@@ -1,0 +1,14 @@
+parity_out/
+*.bin
+build/
+.work/
+perf.data*
+.claude/settings.local.json
+
+# Videos are never committed or uploaded (demo renders stay local).
+*.mp4
+*.webm
+*.mov
+*.mkv
+*.avi
+*.m4v

@@ -1,0 +1,72 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 3343 "core.meta.slang"
+struct vs_main_Result_0
+{
+    float4 position_0 [[position]];
+    float2 ftcoord_0 [[user(TEXCOORD)]];
+    float2 fpos_0 [[user(TEXCOORD_1)]];
+    uint paint_0 [[user(TEXCOORD_2)]];
+};
+
+
+#line 3343
+struct vertexInput_0
+{
+    float2 vertex_0 [[attribute(0)]];
+    float2 tcoord_0 [[attribute(1)]];
+    uint paint_1 [[attribute(2)]];
+};
+
+
+#line 45 "ovg.slang"
+struct View_0
+{
+    float4 size_0;
+};
+
+
+#line 70
+struct VS_Out_0
+{
+    float4 position_1;
+    float2 ftcoord_1;
+    float2 fpos_1;
+    [[flat]] uint paint_2;
+};
+
+
+#line 70
+[[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]], View_0 constant* view_0 [[buffer(0)]])
+{
+
+#line 81
+    thread VS_Out_0 o_0;
+    (&o_0)->ftcoord_1 = _S1.tcoord_0;
+    (&o_0)->fpos_1 = _S1.vertex_0;
+    (&o_0)->paint_2 = _S1.paint_1;
+    float2 p_0 = _S1.vertex_0 - view_0->size_0.zw;
+    (&o_0)->position_1 = float4(2.0f * p_0.x / view_0->size_0.x - 1.0f, 1.0f - 2.0f * p_0.y / view_0->size_0.y, 0.0f, 1.0f);
+
+#line 86
+    thread vs_main_Result_0 _S2;
+
+#line 86
+    (&_S2)->position_0 = o_0.position_1;
+
+#line 86
+    (&_S2)->ftcoord_0 = o_0.ftcoord_1;
+
+#line 86
+    (&_S2)->fpos_0 = o_0.fpos_1;
+
+#line 86
+    (&_S2)->paint_0 = o_0.paint_2;
+
+#line 86
+    return _S2;
+}
+

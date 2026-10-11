@@ -1,0 +1,75 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 10 "program.slang"
+struct Params_0
+{
+    float4 color_a_0;
+    float4 color_b_0;
+    float4 shape_0;
+};
+
+
+struct KernelContext_0
+{
+    Params_0 constant* params_0;
+    texture2d<float, access::sample> channel0_texture_0;
+    sampler channel0_sampler_0;
+    texture2d<float, access::sample> channel1_texture_0;
+    sampler channel1_sampler_0;
+};
+
+
+#line 41
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S1 [[stage_in]], Params_0 constant* params_1 [[buffer(0)]], texture2d<float, access::sample> channel0_texture_1 [[texture(0)]], sampler channel0_sampler_1 [[sampler(0)]], texture2d<float, access::sample> channel1_texture_1 [[texture(1)]], sampler channel1_sampler_1 [[sampler(1)]])
+{
+
+#line 41
+    thread KernelContext_0 kernelContext_0;
+
+#line 41
+    (&kernelContext_0)->params_0 = params_1;
+
+#line 41
+    (&kernelContext_0)->channel0_texture_0 = channel0_texture_1;
+
+#line 41
+    (&kernelContext_0)->channel0_sampler_0 = channel0_sampler_1;
+
+#line 41
+    (&kernelContext_0)->channel1_texture_0 = channel1_texture_1;
+
+#line 41
+    (&kernelContext_0)->channel1_sampler_0 = channel1_sampler_1;
+    float4 _S2 = ((channel0_texture_1).sample((channel0_sampler_1), (_S1.uv_0 * float2(params_1->shape_0.z) ), level((0.0f))));
+
+#line 47
+    float4 grad_0 = mix(params_1->color_a_0, params_1->color_b_0, float4(_S1.uv_0.x) );
+    float a_0 = clamp(1.0f - abs(length(_S1.uv_0 - float2(0.5f) ) - params_1->shape_0.x) / params_1->shape_0.y, 0.0f, 1.0f) * grad_0.w;
+    float _S3 = _S2.w;
+
+#line 49
+    float _S4 = 1.0f - a_0;
+
+#line 49
+    pixelOutput_0 _S5 = { float4(grad_0.xyz * float3(a_0)  + _S2.xyz * float3(_S3)  * float3(_S4)  * float3(0.5f) , a_0 + _S3 * _S4 * 0.5f) + ((channel1_texture_1).sample((channel1_sampler_1), (_S1.uv_0), level((0.0f)))) };
+
+    return _S5;
+}
+

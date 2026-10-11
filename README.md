@@ -1,0 +1,647 @@
+# ovg
+
+<img src="assets/logo.png" width="96" alt="ovg's mascot: a pixel-art chameleon on a branch, its tail a spiral">
+
+**Odin vector graphics.** A 2D vector canvas for Odin that started as a port of
+[femtovg](https://github.com/femtovg/femtovg) (the nanovg lineage) and grew well
+beyond it.
+
+From femtovg: paths, strokes, gradients, image paints, scissoring,
+compositing, render-to-image and antialiased fills, on a canvas that records
+commands for a backend.
+
+Added in ovg:
+
+- **Dashes**: dash arrays, offsets and `pathLength`.
+- **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
+  modes and patterns, each sized to its content.
+- **SVG filters**: every SVG 1.1 primitive (blur, drop shadow, offset, flood,
+  composite, merge, blend, colour matrix, component transfer, morphology,
+  turbulence, diffuse / specular lighting, tile, displacement map, convolve
+  matrix, image), with filter regions, subregions and linearRGB.
+- **SVG import**: `svg_parse` / `svg_draw` with CSS styling, `<use>`, gradients,
+  patterns, masks, filters and text, plus per-element overrides for animation
+  (88.5% of the resvg test suite).
+- **Lottie import**: `lottie_parse` / `lottie_draw` for After Effects
+  (Bodymovin) animations: precomps, mattes, masks, trim paths, eased
+  keyframes, layer effects (blur, drop shadow, fill, tint, tritone) and
+  text layers with text animators.
+- **Text**: shaping with kb_text_shape (ligatures, kerning, Arabic and Indic
+  scripts, bidi), per-glyph font fallback, multi-style layout and baselines,
+  drawn as vector outlines; colour emoji from COLR v0 / v1 fonts, also
+  vectors (Noto Color Emoji bundled as an optional fallback).
+- **Custom shader programs**: register compiled shaders (oksl's SkSL or Shadertoy GLSL) and run them
+  as layers, with image, video or group children.
+- **Recording and playback**: record a frame's commands on one thread and play
+  them on the GPU thread, for parallel frame building.
+
+Two backends: a software rasterizer (no dependencies beyond prebuilt stb) and
+an SDL_GPU backend (SDL3's GPU API: Vulkan on Linux, Metal on macOS, Vulkan or
+D3D12 on Windows). The only dependencies are Odin's own `vendor` packages:
+
+| package | needs |
+| --- | --- |
+| `ovg` (core + software backend) | `vendor:stb/truetype`, `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
+
+## Use
+
+```sh
+git clone https://github.com/defnotmid/ovg
+```
+
+```odin
+import vg "ovg"        // e.g. -collection:libs=.. then "libs:ovg"
+
+sw: vg.Software_Backend
+vg.software_backend_init(&sw)
+c: vg.Canvas
+vg.canvas_init(&c, vg.software_backend(&sw))
+
+vg.set_size(&c, 640, 360)
+vg.clear_rect(&c, 0, 0, 640, 360, vg.WHITE)
+
+p: vg.Path
+vg.path_rounded_rect(&p, 40, 40, 200, 120, 16)
+vg.fill_path(&c, &p, vg.paint_linear_gradient(40, 40, 240, 160, vg.rgb(255, 80, 0), vg.rgb(0, 60, 255)))
+stroke := vg.paint_color(vg.BLACK)
+stroke.stroke.line_width = 3
+vg.stroke_path(&c, &p, stroke)
+
+vg.flush(&c)
+vg.write_png("out.png", sw.pixels, sw.width, sw.height)
+```
+
+### SDL_GPU
+
+```odin
+import vgsdl "ovg/sdlgpu"
+
+gpu: vgsdl.SDL_Backend
+vgsdl.init(&gpu)                // own headless device (or pass the host's)
+c: vg.Canvas
+vg.canvas_init(&c, vgsdl.backend(&gpu))
+// ... draw ...
+vg.flush(&c)                    // renders into the backend's offscreen texture
+shot, _ := vg.screenshot(&c)    // RGBA8, top-down
+```
+
+- `init(&gpu, device)` borrows the host's `^sdl.GPUDevice` (e.g. the one its
+  window renders with). With no device it initializes SDL video, falling back
+  to the `offscreen` video driver when there is no display, and creates a
+  headless device accepting SPIR-V or MSL. `SDL_GPU_DRIVER` picks SDL's
+  driver.
+- `vg.flush(&c, vgsdl.output(&o))` renders the screen into a caller texture
+  (`vgsdl.Output`: texture, format, size). With `o.command_buffer` set, the
+  frame is recorded into that command buffer and the caller submits it; that
+  is required for swapchain textures, which belong to the command buffer that
+  acquired them. Otherwise the backend submits and waits.
+- `vgsdl.image_texture(&c, id)` is the `^sdl.GPUTexture` behind a canvas image,
+  and `vgsdl.offscreen_texture(&gpu)` is the default screen texture, for
+  compositing in host UI code. `vgsdl.read_texture` copies a texture back.
+- Each `flush` records one command buffer (vertex upload in a copy pass,
+  then a render pass per target run) and waits on a fence, unless
+  `gpu.frames_in_flight` (at most 3) lets that many frames keep running while
+  the next is recorded; reading a frame back waits for its own copy. Image
+  uploads use their own command buffers, submitted before the frame's.
+  Stencils, filter intermediates and vertex buffers a frame needs are
+  created before its command buffer is recorded: SDL_GPU submits a command
+  buffer when it creates a texture, a submit may defragment memory (moving
+  textures), and a texture the frame had already bound then lost the draws
+  made into it (rare, history-dependent pixel errors on RADV).
+- Redundant state is skipped within a render pass: uniforms, samplers and
+  scissor are set only when they change (a fill and its fringe share them).
+- Stencil modes are baked into pipelines (SDL_GPU has no dynamic stencil
+  ops); pipelines are cached by blend factors, stencil mode, color write
+  mask, primitive type and target format. Each target size gets a
+  depth-stencil texture (`D24_UNORM_S8_UINT`, else `D32_FLOAT_S8_UINT`), and
+  blur intermediates are kept per image shape; both are released after 30
+  frames unused.
+- RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
+  `R16G16B16A16_FLOAT`. `Generate_Mipmaps` is ignored.
+- Tested on Linux (Vulkan, RADV) and macOS (Metal, Apple M4: tests and
+  `tools/sdlgpu_parity` pass). The Windows path compiles
+  (`odin check -target:windows_amd64`) but is untested.
+- New images are cleared to transparent: SDL_GPU leaves texture contents
+  undefined (garbage on Metal), and the glyph atlas samples texels it never
+  wrote (its padding).
+  D3D12 needs DXIL blobs, which the build doesn't produce on Linux (slangc's
+  dxc fails on Arch), so Windows runs on Vulkan.
+
+### Shaders
+
+`shaders/ovg.slang` is the single shader source (vertex + fragment, entry
+points `vs_main` / `fs_main`). SDL_GPU has no specialization constants, so the
+shader type and glyph mode come from the uniforms and are branched on at
+runtime, as in femtovg. Bindings follow SDL_GPU's convention (vertex uniforms
+set 1, fragment samplers set 2, fragment uniforms set 3).
+`shaders/build.sh` compiles it with `slangc` to the committed `.spv`
+(Vulkan) and `.msl` (Metal) blobs, which the backend `#load`s. Only shader
+edits need slangc.
+
+### Recording on other threads
+
+A recording canvas (`canvas_init_recording`) draws like any canvas but never
+touches a backend, so frames can be built on worker threads and drawn on the
+thread that owns the GPU:
+
+```odin
+rc: vg.Canvas
+vg.canvas_init_recording(&rc)       // on any thread
+rec: vg.Recorded_Frame
+// ... draw on rc ...
+vg.canvas_take(&rc, &rec)           // like flush: the frame moves into rec
+
+p: vg.Player                        // on the backend's thread, one per recording canvas
+vg.player_init(&p, vgsdl.backend(&gpu), &shared)
+vg.player_apply(&p, &rec)           // image allocations, uploads, frees, programs
+vg.player_render(&p, &rec)          // what flush would have rendered
+```
+
+Image ids are issued by the recording canvas; its allocations, uploads
+(pixels copied into the frame) and frees become `Image_Op`s that the player
+applies to a mirror of its images with the same ids, then renders. The
+arrays swap between canvas and frame, so both keep their capacity. Frames of
+one recording canvas are played in order. `create_image_shared(c, src, key,
+stable)` makes an image every player of a `Shared_Images` table shares (one
+texture for N recording canvases); a `stable` source is borrowed instead of
+copied. Programs registered on a recording canvas are created by the player
+(their blobs must outlive the frames using them). The pixels are the same as
+drawing on the player's backend directly (`player_test.odin`).
+
+## Filters and paint extras
+
+SVG filter primitives and paint options, implemented identically in the
+software and SDL_GPU backends (`filter_math.odin` and `shaders/ovg.slang`).
+
+`filter_image(c, target, filter, source)` records a filter that runs at flush,
+in order with drawing. Inputs and target are images of one size; the target
+may be one of the inputs. Filters read premultiplied color (Gray8/RGB8 as a
+GPU sampler returns them) and write premultiplied color.
+
+| `Image_Filter` | SVG | semantics |
+| --- | --- | --- |
+| `Gaussian_Blur{sigma}` | feGaussianBlur | one sigma (pixels), transparent beyond the image |
+| `Blur_XY{sigma_x, sigma_y, edge}` | stdDeviation="x y" | per-axis sigma (<= 0 leaves the axis), edge `.Transparent` or `.Clamp` |
+| `Color_Matrix{m}` | feColorMatrix | 4x5 rows on straight color, offsets in 0..1, clamped; helpers `color_matrix_saturate`, `color_matrix_hue_rotate`, `color_matrix_luminance_to_alpha`, `COLOR_MATRIX_IDENTITY` |
+| `Color_Space_Convert{to_linear}` | color-interpolation-filters | sRGB <-> linearRGB on straight color |
+| `Blend{mode, backdrop}` | feBlend, mix-blend-mode | the 16 W3C blend modes, source (in) onto backdrop (in2), composited source-over |
+| `Composite{op, k, backdrop}` | feComposite | over, in, out, atop, xor, lighter, arithmetic k1..k4 (clamped, color <= alpha) |
+| `Component_Transfer{lut}` | feComponentTransfer | straight channels through a 256 x 1 RGBA8 table (`component_transfer_lut` from `Transfer_Function`s: identity, table, discrete, linear, gamma, truncated to 8 bits as resvg) |
+| `Morphology{radius, dilate, valid}` | feMorphology | per-channel min / max over a box (at most `MORPHOLOGY_MAX_RADIUS`), two separable passes; a fractional radius blends in the next ring by its fraction, so animated radii move smoothly |
+| `Lighting{...}` | feDiffuseLighting, feSpecularLighting | the spec's Sobel normals (edge kernels at `valid`'s border) under a distant, point or spot light, rounded as resvg |
+| `Tile{rect}` | feTile | the source's `rect` repeated |
+| `Displacement_Map{displacement, scale, channels, valid}` | feDisplacementMap | nearest pixel at p + scale (map - 0.5) (map premultiplied, as resvg) |
+| `Convolve_Matrix{kernel, order, target, divisor, bias, edge, preserve_alpha, valid}` | feConvolveMatrix | up to `CONVOLVE_MAX_KERNEL` (36) values, edge duplicate / wrap / none |
+| `Turbulence{params, seed, offset, scale, region}` | feTurbulence | the spec's reference noise over the whole target, from the seed's lattice image (`turbulence_lattice_pixels`); f32 on the GPU, f64 on the software backend; `region` is the stitch tile |
+
+Blur kernels span 3 sigma each side and are exact up to `BLUR_MAX_EXACT_SIGMA`
+(8); beyond that both backends keep `BLUR_MAX_TAPS` (24) taps each side, a
+truncated, renormalized kernel, so blur a downscaled copy for wider blurs.
+feOffset and feFlood need no filter: draw the source image paint offset into a
+cleared target, or `clear_rect` / fill a rectangle with the flood color.
+The neighbourhood filters take `valid` (x0, y0, x1, y1 pixels), the edge of
+the image as the spec sees it (the filter region, as resvg crops to it).
+GPU and software agree within 2/255 except where a filter amplifies a
+one-step input difference: lighting at dark antialiased edges after the
+linearRGB -> sRGB conversion, and sharpening kernels.
+
+SVG filter effects on layers (`svg_filter.odin`, `Layer_Params.filter`): a
+`Filter` is a list of primitives (every SVG 1.1 one; feImage shows an
+image from `Filter.images`) reading the source graphic, its alpha or
+earlier results, computed in linear RGB unless `srgb`; component transfer
+tables and convolution kernels live in `Filter.values`. feTurbulence is the
+spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
+seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
+row bands as resvg on the software backend (on `Software_Backend.pool`
+when the caller lends one). The transfer tables are computed on the CPU and
+uploaded; the other primitives are filter passes. `Filter.region`
+(`Filter_Region{units, x, y, w, h, bbox}`, `.User_Space_On_Use` or
+`.Object_Bounding_Box` with the caller's bounding box;
+`FILTER_REGION_DEFAULT` is SVG's -10% / 120%) cuts the source graphic before
+filtering and every result after, on the whole device pixels of the region's
+bounding box (as resvg), and bounds the layer's window; the zero value is no
+region (the whole canvas). A primitive's `subregion` cuts its own result.
+
+## Colour fonts
+
+Faces with COLR / CPAL tables draw their colour glyphs through the same
+`fill_glyph_outlines` call, as vector fills at the output resolution (crisp
+at any size, under any transform):
+
+```odin
+vg.font_collection_set_emoji(&fonts, vg.EMOJI_FONT_DATA) // optional emoji fallback
+vg.text_layout(&fonts, {{text = "Hello 👋🔥 👩‍💻 🇯🇵", style = {size = 48}}}, {x = 10, y = 60}, &layout)
+for run in layout.runs {
+	vg.fill_glyph_outlines(&c, run.font, layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &path)
+}
+```
+
+- **COLR v0**: each layer glyph filled with its palette colour.
+- **COLR v1**: PaintColrLayers, PaintGlyph, PaintSolid, linear, radial and
+  sweep gradients (pad / repeat / reflect; sweeps map onto the conic
+  gradient), every PaintTransform / Translate / Scale / Rotate / Skew form
+  (around a centre too), PaintColrGlyph, ClipBox. Variable fields use the
+  default instance (VarIndex ignored).
+- **PaintComposite** has no isolated group: source-over and destination-over
+  draw in order, `src-in` / `src-atop` / `dest-in` / `dest-atop` fill one
+  side's outlines with the other side's paint (what fonts use them for),
+  other modes (out, xor, plus, the blend modes) draw the backdrop alone.
+  Nested PaintGlyph clips keep the innermost outline.
+- **Palette** 0. Index 0xFFFF is the text's paint: its colour, or a gradient
+  / image paint as is; the text colour's alpha also scales palette colours,
+  so fill-opacity and fades apply. Layers fade one by one (no group opacity).
+- **Not drawn**: bitmap colour glyphs (sbix, CBDT / CBLC) and SVG glyphs.
+  Their outline is used when the face has one; fallback skips glyphs a
+  bitmap colour face has no outline for.
+- **Fallback**: `font_collection_set_emoji` sets a face tried after the
+  collection's faces (never matched by family). Emoji sequences stay in one
+  face so kb_text_shape forms their ligatures: a rune followed by U+FE0F (or
+  after a joiner in a colour face) takes a colour face, and ZWJ, variation
+  selectors, skin-tone modifiers, keycaps and tags follow the rune before
+  them. Leftover invisible format characters draw nothing.
+- `EMOJI_FONT_DATA` is Noto Color Emoji's COLRv1 build (SIL OFL 1.1, 5.0 MB,
+  flags included; `assets/Noto-COLRv1.ttf`). It is linked only into
+  programs that reference it; Noto-COLRv1-noflags.ttf (3.0 MB) can be passed
+  instead.
+- **Cost**: each colour glyph's paint graph is flattened once per face into
+  fill rows (outline, transform, solid or gradient) and its outlines cached,
+  so a warm glyph draws without parsing or allocating. A line of 20 Noto
+  emoji (321 fills) builds in 0.41 ms at 64 px and 0.87 ms at 512 px
+  (layout, tessellation, commands; Ryzen 9 9900X3D, `-o:speed`); the SDL_GPU
+  frame with readback takes 1.7 ms at 64 px.
+
+## SVG import
+
+`svg.odin` parses SVG markup (with `core:encoding/xml`) into an
+`Svg_Document`, a render-ready, data-oriented copy in the spirit of usvg:
+flat tables of nodes (parent / first child / next indices, local transform,
+object bounding box, effects by index), shapes (path data stored once in
+shared verb / coordinate arrays, computed style), text chunks and pieces,
+images and decoded bitmaps, paint servers and stops, clip paths, masks,
+filters, dashes, element ids (`id_map`) and a string arena. `svg_draw`
+(`svg_draw.odin`) walks the tables and issues canvas and layer calls; the
+document is read-only while drawing, so many canvases (threads) can draw one
+document, each with its own `Svg_Renderer` (scratch paths, text layout,
+override table, image ids).
+
+```odin
+doc, err := vg.svg_parse(data, {load_file = my_loader, fonts = &fonts})
+defer vg.svg_destroy(&doc)
+r: vg.Svg_Renderer
+r.fonts = &fonts
+vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
+ovs := [?]vg.Svg_Override{{id = "wing", transform = vg.transform_rotation(a)}, {id = "sun", fill = vg.RED}}
+vg.svg_draw(&c, &ls, &r, &doc, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
+vg.layer_stack_end(&ls, &c)
+```
+
+- Parsing resolves `<defs>`, `<use>` (elements, symbols, nested svg;
+  instances keep their ids), presentation attributes, `style`, `<style>`
+  sheets (type, class, id, attribute, `:first-child`, descendant and child
+  selectors, specificity, `!important`), inheritance, `currentColor`,
+  units (px, %, em, ex, pt, pc, mm, cm, in), viewBox / preserveAspectRatio,
+  `switch` / `systemLanguage`. Shapes: path, rect (rx/ry), circle, ellipse,
+  line, polyline, polygon (rect and ellipse paths start where SVG's do, for
+  dashes). Paint: fill / stroke (colors incl. CSS names, rgb(), hsl(),
+  gradients, patterns, fallbacks), opacities, fill-rule, dashes,
+  caps / joins / miter limit, `pathLength`, visibility, display,
+  opacity, `mix-blend-mode`, `isolation`, `shape-rendering`.
+  Linear and radial gradients (focal `fx`/`fy`/`fr`, `href` inheritance,
+  units, transforms, spread), patterns (units, content units, viewBox,
+  transform, nested), clip paths (units, transform, nested, clip-rule; a
+  single shape becomes a path clip, anything else an alpha mask), masks
+  (units, content units, luminance / alpha, nested), filters (as above,
+  units, regions, subregions, primitive units). Text: `text` / `tspan`
+  chunks with x / y / dx / dy lists, `rotate`, font family lists, size,
+  weight, style, letter-spacing, text-anchor (on the glyph extent, as
+  resvg), dominant-baseline, CSS whitespace collapsing (the XML reader trims
+  bodies, so text whitespace is protected before parsing). Images: data:
+  URIs and other hrefs through `Svg_Parse_Options.load_file`; raster
+  (stb_image) or SVG (its tree joins the document under a viewport group).
+- `svg_draw(c, ls, r, doc, transform, overrides)` draws in the document's
+  `width x height` space. Effects map to one layer (opacity, path clip or
+  clip-as-mask, mask, filter, blend), two when a non-path clip meets a mask;
+  a single fill or stroke folds opacity into the alpha. Pattern tiles render
+  at the current scale (nearest sampling, as resvg). `Svg_Override{id,
+  transform, replace_transform, opacity, fill, stroke, visible}` changes
+  every instance of an id per draw (the transform applies inside the
+  element's own transform; fill / stroke reach inheriting descendants), with
+  no allocation once the renderer is warm. An element with an id and
+  `display="none"` is kept (not drawn) so `visible = true` can show it: one
+  file holds a sprite's alternate parts.
+- Unsupported (warned in `doc.warnings`): textPath, tref, textLength, markers, feImage
+  referencing an element (images work), CSS filter functions, BackgroundImage inputs, DTD entities,
+  WebP and svgz images, `context-fill`. Strokes under non-uniform scale or
+  skew are expanded in device space (uniform width), images sample bilinear
+  (resvg: bicubic).
+- `tools/svg_suite` checks it against the resvg test suite: `run.sh` renders
+  the curated subset in `tools/svg_suite/tests` (64 files from
+  structure, shapes, painting, paint servers, masking and filters, all
+  passing) on the software backend and compares with the reference PNGs
+  (a pixel is off beyond 24/255 premultiplied; a test passes with at most 1%
+  off). On the full suite's categories for these features (1037 files,
+  fonts from the suite for text) 88.5% pass: shapes 98.5%, masking 97.8%,
+  painting 94.8%, paint servers 90.9%, filters 87.0%, text 82.4%, structure
+  74.6% (bicubic image sampling, WebP / svgz, DTD entities, SVG-in-image
+  edge cases); 93% with a 48/255, 2% tolerance. The resvg tests of the later
+  filter primitives (feComponentTransfer, feConvolveMatrix, lighting and
+  lights, feMorphology, feTurbulence, feDisplacementMap, feTile, feImage:
+  169 files) pass at 86.4% (feTile misses are feOffset's subpixel shift,
+  which resvg truncates; feImage misses reference elements). Over the whole text
+  directory (386 files, unsupported features included) shaping took the
+  pass count from 196 to 204 (ligatures across fonts, Arabic, Malayalam,
+  Source Sans Pro kerning). `-bench:`
+  times a file: a 1.9 MB Inkscape illustration (16 k shapes) parses in 32
+  ms and records in 12 ms.
+
+## Untrusted input
+
+SVG and Lottie files may come from anyone: parsing and drawing are bounded
+by `Limits` (`limits.odin`), one table row per kind of work a small file can
+multiply: nesting depth, SVG elements (`<use>` copies included), CSS
+selector steps, filter primitives, feTurbulence octaves, star points,
+repeater copies and layers per Lottie draw, dashes per stroke, COLR paints
+per glyph and decoded image pixels. Past a limit the work is cut short (a
+stroke with too many dashes draws undashed) and the limit is reported: a
+warning in `doc.warnings`, `Lottie_Renderer.limited` after a draw,
+`Canvas.limited` for dashes. `Svg_Parse_Options.limits` and
+`Lottie_Parse_Options.limits` replace `DEFAULT_LIMITS`, `Canvas.limits`
+the canvas's; a new limit is a row in the table and one `budget_take` (a
+running total) or `budget_cap` (one value) where the work happens.
+
+**Fonts must be trusted.** stb_truetype does not validate font data, and
+malformed fonts can crash it; load only fonts you ship or have validated
+(e.g. with [OTS](https://github.com/khaledhosny/ots)).
+
+## Lottie import
+
+`lottie.odin` parses Lottie (Bodymovin JSON, After Effects exports; with
+`core:encoding/json` into a scratch arena) into a `Lottie_Document`: flat
+tables of compositions (the root, then precomp assets), layers (kind,
+parent, matte layer, in / out / start / stretch, transform, shapes, masks,
+precomp or bitmap index), shape items (a group's children contiguous, props
+by slot), transforms, masks, dashes and animatable properties, whose
+keyframes, values (easing handles, spatial tangents included) and bezier
+paths are stored once. `lottie_draw` (`lottie_draw.odin`) evaluates it at a
+frame: properties interpolate per draw (binary search, cubic-bezier easing,
+hold, arc-length spatial position, path vertices), shape geometry builds per
+layer into the renderer's cubic contours (trim paths cut them), paints walk
+the shape tree bottom to top, and masks, track mattes, blend modes and group
+opacity over overlapping paints go through the layer stack. The document is
+read-only while drawing; each canvas has its own `Lottie_Renderer`, which
+allocates nothing once warm.
+
+```odin
+doc, err := vg.lottie_parse(data, {load_file = my_loader})   // image assets that aren't data: URIs
+defer vg.lottie_destroy(&doc)
+r: vg.Lottie_Renderer
+vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
+vg.lottie_draw(&c, &ls, &r, &doc, vg.lottie_frame_at(&doc, seconds), vg.transform_scaling(w / doc.width, h / doc.height))
+vg.layer_stack_end(&ls, &c)
+```
+
+- Layers: precomp (time remap, stretch, start time; clipped to its size),
+  solid, image, null, shape; parenting; in / out points; transforms
+  (anchor, position or separated x / y, scale, rotation, opacity, skew and
+  skew axis); track mattes (alpha, alpha inverted, luma, luma inverted;
+  chained, `tp` or the layer above); masks (add, subtract, intersect,
+  inverted, opacity, expansion); blend modes (Normal to Luminosity).
+  Layer properties key in comp frames, as lottie-web.
+- Shapes: group (transform, opacity), rect (roundness; paths start where
+  AE's do, for trims), ellipse, path (static and animated), polystar (star
+  and polygon, roundness), fill (rule), stroke (width, caps, joins, miter,
+  dashes and offset), gradient fill / stroke (linear, radial with highlight
+  length and angle; color stops merged with opacity stops, coincident stops
+  as hard edges), trim paths (simultaneous and individual, offset,
+  wrapping), repeater (copies, offset, transform, start / end opacity,
+  above / below).
+- Keyframes: temporal bezier easing per dimension, hold, spatial bezier
+  position (`to` / `ti`), the old format's `e` end values; markers.
+- Layer effects (`ef`, parameters keyframed like any property), each a
+  filter layer (svg_filter.odin) around the layer's content, inside its
+  masks, as lottie-web's SVG filters: Gaussian Blur (29; blurriness x 0.3
+  = sigma, both / horizontal / vertical), Drop Shadow (25; colour, opacity,
+  direction, distance, softness / 4 = sigma), Fill (21; colour, opacity),
+  Tint (20; black / white mapping of the linear-RGB gray, amount over the
+  source) and Tritone (23; shadows / midtones / highlights table). A layer
+  with effects composites its opacity as a group.
+- Text layers (ty 5): the document keyframe at the frame (text, font,
+  size, fill / stroke colour, stroke width with stroke over or under the
+  fill, justification left / right / center, tracking, line height,
+  baseline shift, all caps, box text `sz` / `ps` wrapped greedily at
+  spaces) is laid out with `Lottie_Renderer.fonts` (a `Font_Collection`:
+  the `fonts` list's family and style pick the face; shaping, kerning,
+  per-glyph fallback and colour emoji as for any text; without a
+  collection, the bundled Vera). Families missing from the collection
+  collect in `Lottie_Renderer.missing`. Text animators (`t.a`): range
+  selectors by characters, characters excluding spaces, words or lines;
+  start / end / offset in percent or indices; shapes square, ramp up / down,
+  triangle, round and smooth; amount, ease high / low, smoothness; they
+  animate anchor, position, scale, rotation, skew, opacity, fill / stroke
+  colour, stroke width and tracking per letter (a letter's matrix pivots on
+  its anchor group, characters / words / lines, from the shaped layout's
+  glyph positions; `lottie_selector_mult` is lottie-web's selector math).
+  Positions follow the font's own advances and kerning, so spacing differs
+  slightly from a browser's.
+- Overrides (`Lottie_Override`) replace a layer's transform, opacity,
+  fill / stroke colour (text included), visibility, and a text layer's
+  string (`text`).
+- Skipped with a warning in `doc.warnings`: other effects (stroke, levels,
+  matte ...), layer styles, merge paths, round corners and other shape
+  modifiers, text on a path, embedded glyphs (`chars`: drawn with the
+  font), randomized selectors (kept in order), expression selectors,
+  animator hue / saturation / brightness, cameras and 3D (drawn flat),
+  auto-orient, mask feather, the add / hard mix blend modes; expressions
+  are ignored (their keyframed values play).
+- `Layer_Params.mask_invert` (layers.odin) shows a layer where its mask is
+  transparent (inverted mattes).
+- `tools/lottie_suite` compares renders with lottie-web (5.12.2, SVG
+  renderer, headless Chromium) references: `run.sh` checks 13 small files
+  from Skia's skottie resources, lottie-web's tests and ovg's own effect
+  and text files (39 frames, all within 2% of pixels off by more than
+  32/255, text files within 6%: glyph edges differ from Chromium's font
+  rasterizer though the layout matches; mean errors 0.02 to 4/255, mostly
+  antialiasing). By eye on others: lottie-web's starfish,
+  lights and dalek match except where expressions drive values; skewed
+  strokes keep a uniform width (as for SVG). `-bench:` times a file: lottie-web's
+  bodymovin.json (1.1 MB, 332 layers) parses in 27 ms and records a frame
+  (evaluation, geometry, draw calls) in 0.12 ms; adrock.json (127 kB)
+  parses in 2.2 ms and records in 24 µs.
+
+## Custom programs
+
+`program.odin`: a host-supplied fragment shader run over a whole image, the
+way shading languages are hosted without ovg knowing them
+([onimite](https://github.com/defnotmid/onimite) registers oksl output). A run is a recorded command executed in order at
+flush, like `filter_image`.
+
+```odin
+prog, err := vg.create_program(&c, {
+	frag_spirv = spirv, frag_msl = msl, frag_msl_entry = "main0",
+	vert_spirv = vert_spv, vert_msl = vert_msl, vert_msl_entry = "vs_main",
+	uniform_size = size_of(Params), num_samplers = 1,
+	cpu = my_cpu_shader, cpu_user = &state,   // software backend
+})
+vg.run_program(&c, prog, target, mem.ptr_to_bytes(&params), {photo}, {.Opaque})
+vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged Premultiplied
+```
+
+- The target (RGBA8, or RGBA16F: half floats kept unclamped, for feedback
+  buffers a later run samples) is cleared, then fully shaded. The output is
+  premultiplied. `.Opaque` clears to opaque black and keeps alpha 1
+  (Shadertoy). Uniform bytes are copied into the frame (`Frame.bytes`,
+  16-byte aligned). Channel `n` samples `channels[n]`; unbound channels read
+  transparent black, and a channel may not be the target.
+- SDL_GPU: the program gets its own render pass (no stencil) and one quad,
+  with one pipeline cached per (target format, opaque). Bindings follow
+  SDL_GPU's convention, as oksl emits them:
+  - Vertex input: position in target pixels at location 0, uv (0..1 from the
+    top-left) at location 1.
+  - Vertex uniform: the target size as a vec4 (set 1).
+  - Fragment: uv at location 0, channel samplers at set 2 (binding n), the
+    uniform block at set 3.
+  - Sampler filtering and wrap follow each channel image's `Nearest` /
+    `Repeat_X` / `Repeat_Y` flags.
+- `read_image` copies an image's texels back as stored (RGBA16F: four f16
+  per pixel), as of the last flush; `update_image` takes the same layout.
+- Software: calls `cpu(user, uniforms, w, h, out, stride, format, sampler)`
+  (`out` holds `format` texels: RGBA8, or RGBA16F as `[4]f16`).
+  `sampler.sample(data, channel, uv, lod)` gives GL `texture()` semantics
+  over the channel images: bilinear or nearest, clamp or repeat, texels as
+  stored. The callback may split the image across threads.
+- Backends without programs leave `create_program` nil, and creating one
+  then returns `.Unsupported_Operation`.
+
+Paints:
+
+- `Paint.spread`: `.Pad`, `.Reflect`, `.Repeat` (SVG spreadMethod) for linear,
+  radial and box gradients, two-stop and multi-stop.
+- Gradient colors interpolate in straight alpha (SVG): two stops with
+  different alphas use the ramp texture, like multi-stop gradients.
+- `paint_radial_gradient_focal_stops(cx, cy, r, fx, fy, fr, stops)`: SVG's
+  two-point conical radial gradient (`Paint_Radial_Gradient.focal`), in the
+  shader and the software backend; a focal point outside the circle moves
+  onto it.
+- Round and square caps draw a dot on zero-length subpaths and zero dashes
+  (SVG); fills of contours without area draw nothing.
+- `Paint.transform`: maps paint space to the current space before the canvas
+  transform (gradientTransform, patternTransform, objectBoundingBox units);
+  the zero value is the identity. Works for every paint, image paints included.
+
+## Design
+
+- **`Canvas` records, backends draw.** Drawing calls tessellate paths into
+  vertices and record `Command`s; `flush` hands a `Frame` to the backend.
+  A backend is a `Backend` value (data pointer + procedures).
+- **Antialiasing** is femtovg's: a one-pixel fringe strip whose coverage the
+  shader computes (`strokeMask`). Concave fills use a stencil winding pass;
+  self-overlapping translucent strokes use stencil strokes so each pixel is
+  painted once. Contours keep their winding (`Solidity.None`, so SVG
+  non-zero / even-odd holes work); the fringe goes outside the path's
+  largest contour whichever way it winds (fills of a clockwise path reverse
+  all its contours, which keeps the fill), so clockwise paths and glyphs
+  cover exactly their area. A hole wound like its outer contour (even-odd)
+  is the exception: it fills about a pixel smaller.
+- **The software backend is the pixel reference for the GPU backend.** It
+  evaluates the fragment shader's formulas, replays the stencil passes,
+  samples textures like the GPU and uses the top-left fill rule.
+  `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
+  and diffs them; on an RX 9070 XT (Vulkan, RADV) all 28 checks match, with
+  a mean difference under 0.1 / 255 in each: most pixels within one or two
+  8-bit steps, a few edge pixels of text, emoji and filters further apart.
+- **Layers cover what is drawn into them** (`layers.odin`, Skia's
+  saveLayer: group opacity, blur, SVG filters, clip paths, masks, blend
+  modes). Drawing between `layer_push` and `layer_pop` is recorded against a
+  stand-in target; the pop takes the device bounds of those commands, grows
+  them by how far the blur and filter reach, cuts them to the clip path, the
+  mask and the canvas, and points the commands at a pooled image of that
+  window (sizes in steps of 1/8 of the next power of two). A render target
+  can sit at an origin (`set_render_target(c, img, origin)`), so the layer is
+  still drawn in canvas coordinates and pixels match a full-frame layer.
+  Layers with nothing to show drop their commands; a layer a child blends
+  with covers the whole canvas.
+- **Images are top-down on both backends**, including images rendered into
+  (SDL_GPU puts y = 0 at the top of every target), so a render target can be
+  used as an image paint without `Flip_Y`.
+- **Paints are plain values.** Multi-stop gradients borrow their stop slice;
+  it only has to live for the draw call.
+- **Text** uses stb_truetype. `fill_glyph_outlines` fills glyph outlines as
+  vector paths (exact under any transform and any paint);
+  `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas` (fast,
+  but baked at one scale). Both take glyph ids, so shaped runs draw as is.
+- **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
+  and onimite) shapes with `vendor:kb_text_shape`: each line is split into
+  segments of one font (per-glyph fallback picks the first face covering a
+  codepoint), size, script and bidi level (kb's Unicode script runs; levels
+  from UAX #9's weak and neutral rules for a left-to-right paragraph,
+  `text_bidi.odin`: spaces, punctuation and emoji between right-to-left
+  text join it, others keep the paragraph's direction), each segment is
+  shaped (GSUB: ligatures, contextual alternates, Arabic joining, Indic
+  reordering; GPOS: pair / class kerning, mark positioning) and the
+  segments are placed in
+  bidi visual order (right-to-left runs reversed, numbers after
+  right-to-left letters kept in order inside them). Faces without GPOS
+  kern with their legacy `kern` table; faces kb cannot read (or whose
+  GSUB / GPOS lists point outside the table, which kb does not check) are
+  placed per codepoint with advances and kerning. Letter-spacing turns off
+  liga / clig / dlig (CSS) and is not added after attached marks. The
+  collection parses a face for kb on first use and pools `Text_Shaper`s
+  (shape configs, scratchpads, glyph storage, layout tables), so layouts
+  may run concurrently on one collection; a warm shaper does not allocate.
+  Shaped segments are cached by content (face, script, direction,
+  codepoints, ligature flag; cleared whole past 64 k glyphs), so text drawn
+  every frame costs about what the unshaped layout did (1.1 us for a 42
+  character line; 4.8 us when shaped from scratch). Not handled: explicit
+  bidi controls (U+202A..U+202E, U+2066..U+2069, unsupported by kb), a
+  right-to-left paragraph direction, vertical text, font features chosen
+  by the caller. `layout_simple` still places plain left-to-right text
+  with advances and kerning (UI labels).
+
+## Implementation notes
+
+- Software + SDL_GPU backends (femtovg: OpenGL / wgpu) behind a runtime
+  backend interface.
+- The software backend matches the GPU shader: stroke-mask AA (was a plain
+  `v` coverage), the GPU stencil-pass order for concave fills and stencil
+  strokes, one gradient formula for linear/box/radial (the radial path was off
+  by half a feather), no double `Flip_Y`, GPU texel conversions, rounding to
+  8 bits, rotated-scissor mask, top-left rule (no seams on translucent fills),
+  the GPU blur coefficients.
+- Concave-fill cover quad covers `miny - fringe` (could leave stale stencil).
+- `clear_rect` clears only its rectangle (∩ scissor) with premultiplied color.
+- Second blur pass reads the intermediate as premultiplied (straight-alpha
+  sources were premultiplied twice).
+- `realloc_image` frees the old backend image.
+- Gradient ramps pad past the last stop.
+- Path caches and frame buffers reuse their allocations; paints never
+  allocate. Font variations were dropped (stb_truetype has no variable-font
+  support).
+
+## Test
+
+```sh
+odin test . -vet -strict-style                        # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
+./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
+./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
+odin check sdlgpu -no-entry-point -vet -strict-style  # SDL_GPU backend
+odin run tools/sdlgpu_parity -- out_dir               # SDL_GPU vs software, headless
+odin check sdlgpu -no-entry-point -target:darwin_arm64    # macOS / Windows compile
+odin check sdlgpu -no-entry-point -target:windows_amd64
+./shaders/build.sh                                    # after editing ovg.slang
+./tools/scenes/build_program.sh                       # after editing the parity scene's program.slang
+```
+
+`assets/Vera.ttf` is Bitstream Vera Sans (`LICENSES/Bitstream-Vera.txt`), used
+by the tests and as a `Font_Collection`'s default fallback face.
+`assets/colr_test.ttf` is a tiny COLR v0 / v1 test font made by
+`tools/colr_test_font/build.py` (fontTools).
+
+## License
+
+MIT, see [LICENSE](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The mascot, a chameleon (it changes colour, its tail is a spiral and its tongue a
+curve), is drawn by `tools/mascot` (`odin run tools/mascot -- assets`):
+`assets/logo.svg` keeps its skins (green, pink, blue), eyes, mouths and tongue
+as layers a script can switch by id.
