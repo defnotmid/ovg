@@ -637,9 +637,10 @@ every part follows:
   sources were premultiplied twice).
 - `realloc_image` frees the old backend image.
 - Gradient ramps pad past the last stop.
-- Path caches and frame buffers reuse their allocations; paints never
-  allocate. Font variations were dropped (stb_truetype has no variable-font
-  support).
+- Paths are plain data, read-only while drawn: each draw tessellates into
+  the canvas's scratch. Scratch and frame buffers reuse their allocations;
+  paints never allocate. Font variations were dropped (stb_truetype has no
+  variable-font support).
 
 ## Test
 

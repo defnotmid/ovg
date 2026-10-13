@@ -1,6 +1,5 @@
 package ovg
 
-import "core:hash"
 import "core:math"
 
 // 2D point or direction. Positions and vectors share one type so array
@@ -144,12 +143,6 @@ transform_is_pure_translation :: proc "contextless" (t: Transform2D, epsilon: f3
 // Column-major mat3 padded to three vec4 columns, as uploaded to shaders.
 transform_to_mat3x4 :: proc "contextless" (t: Transform2D) -> [12]f32 {
 	return {t[0], t[1], 0, 0, t[2], t[3], 0, 0, t[4], t[5], 1, 0}
-}
-
-// Hash of the matrix bits; keys the path cache.
-transform_cache_key :: proc "contextless" (t: Transform2D) -> u64 {
-	t := t
-	return hash.fnv64a(([^]u8)(&t)[:size_of(t)])
 }
 
 Rect :: struct {

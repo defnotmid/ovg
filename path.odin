@@ -28,25 +28,21 @@ verb_num_coords :: proc "contextless" (v: Verb) -> int {
 	return 0
 }
 
-// A vector path: verbs plus their coordinates, with a tessellation cache
-// keyed by the transform it was last drawn with. Reuse a `Path` across
+// A vector path: verbs plus their coordinates, read-only while drawn (one
+// path can be drawn by several canvases at once). Reuse a `Path` across
 // frames (`path_reset`) to keep its buffers. Uses the context allocator
 // current at the first append.
 Path :: struct {
-	verbs:       [dynamic]Verb,
-	coords:      [dynamic]Vec2,
-	last_pos:    Vec2,
+	verbs:    [dynamic]Verb,
+	coords:   [dynamic]Vec2,
+	last_pos: Vec2,
 	// Tolerance for merging points in `path_arc_to`; 0 means the default.
-	dist_tol:    f32,
-	cache:       Path_Cache,
-	cache_key:   u64,
-	cache_valid: bool,
+	dist_tol: f32,
 }
 
 path_destroy :: proc(p: ^Path) {
 	delete(p.verbs)
 	delete(p.coords)
-	path_cache_destroy(&p.cache)
 	p^ = {}
 }
 
@@ -55,7 +51,6 @@ path_reset :: proc(p: ^Path) {
 	clear(&p.verbs)
 	clear(&p.coords)
 	p.last_pos = {}
-	p.cache_valid = false
 }
 
 path_is_empty :: proc "contextless" (p: ^Path) -> bool {
@@ -70,7 +65,6 @@ path_append :: proc(p: ^Path, verbs: []Verb, coords: []Vec2) {
 	}
 	append(&p.verbs, ..verbs)
 	append(&p.coords, ..coords)
-	p.cache_valid = false
 }
 
 path_move_to :: proc(p: ^Path, x, y: f32) {

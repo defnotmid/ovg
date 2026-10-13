@@ -466,7 +466,7 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	}
 	if f.has_clip {
 		// Plus the clip's antialiased edge.
-		clip := ensure_cache(c, &ls.clips[depth], f.clip_xform).bounds
+		clip := tessellate(c, &ls.clips[depth], f.clip_xform).bounds
 		area = bounds_intersect(area, bounds_grow(clip, reach + 2))
 	}
 	if f.masked && !f.mask_invert {

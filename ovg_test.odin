@@ -141,21 +141,23 @@ test_path_shapes :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_path_cache :: proc(t: ^testing.T) {
+test_tessellation :: proc(t: ^testing.T) {
 	p: Path
 	defer path_destroy(&p)
 	path_rect(&p, 0, 0, 10, 20)
-	path_cache_build(&p.cache, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
-	c := &p.cache
+	tess: Tessellation
+	defer tessellation_destroy(&tess)
+	tessellation_build(&tess, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
+	c := &tess
 	testing.expect_value(t, len(c.contours), 1)
 	testing.expect(t, c.contours[0].closed)
 	testing.expect_value(t, c.contours[0].point_end - c.contours[0].point_start, 4)
 	testing.expect(t, c.bounds.minx == 0 && c.bounds.maxy == 20)
-	testing.expect(t, path_cache_contains_point(c, 5, 5, .Even_Odd))
-	testing.expect(t, !path_cache_contains_point(c, 20, 20, .Even_Odd))
+	testing.expect(t, tessellation_contains_point(c, 5, 5, .Even_Odd))
+	testing.expect(t, !tessellation_contains_point(c, 20, 20, .Even_Odd))
 
-	path_cache_expand_fill(c, 0, .Miter, 10)
-	r, is_rect := path_cache_fill_is_rect(c)
+	tessellation_fill(c, 0, .Miter, 10)
+	r, is_rect := tessellation_fill_is_rect(c)
 	testing.expect(t, is_rect)
 	testing.expect_value(t, r, Rect{0, 0, 10, 20})
 
@@ -166,8 +168,8 @@ test_path_cache :: proc(t: ^testing.T) {
 	path_line_to(&p, 2, 35)
 	path_line_to(&p, 79, 90)
 	path_close(&p)
-	path_cache_build(c, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
-	path_cache_expand_fill(c, 1, .Miter, 10)
+	tessellation_build(c, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
+	tessellation_fill(c, 1, .Miter, 10)
 	testing.expect_value(t, c.contours[0].convexity, Convexity.Concave)
 }
 
@@ -724,7 +726,6 @@ fill_ink :: proc(s: ^Sw, p: ^Path, rule: Fill_Rule) -> (f32, int) {
 	clear_rect(&s.canvas, 0, 0, s.backend.width, s.backend.height, WHITE)
 	fp := paint_color(BLACK)
 	fp.fill_rule = rule
-	p.cache_valid = false
 	fill_path(&s.canvas, p, fp)
 	flush(&s.canvas)
 	return ink(s)
@@ -775,8 +776,8 @@ test_sw_fill_orientation_holes :: proc(t: ^testing.T) {
 			covered, partial := fill_ink(&s, &p, rule)
 			testing.expectf(t, covered == 56 * 56 - 24 * 24 && partial == 0, "opposite hole %v cw=%v: %v px", rule, cw, covered)
 			testing.expect_value(t, px(&s, 32, 32), [4]u8{255, 255, 255, 255})
-			testing.expect(t, path_cache_contains_point(&p.cache, 10, 10, rule))
-			testing.expect(t, !path_cache_contains_point(&p.cache, 32, 32, rule))
+			testing.expect(t, contains_point(&s.canvas, &p, 10, 10, rule))
+			testing.expect(t, !contains_point(&s.canvas, &p, 32, 32, rule))
 		}
 
 		path_reset(&p)
@@ -786,8 +787,8 @@ test_sw_fill_orientation_holes :: proc(t: ^testing.T) {
 		testing.expect_value(t, px(&s, 32, 32), [4]u8{255, 255, 255, 255})
 		testing.expect_value(t, px(&s, 10, 10), [4]u8{0, 0, 0, 255})
 		testing.expect_value(t, px(&s, 3, 32), [4]u8{255, 255, 255, 255})
-		testing.expect(t, !path_cache_contains_point(&p.cache, 32, 32, .Even_Odd))
-		testing.expect(t, path_cache_contains_point(&p.cache, 32, 32, .Non_Zero))
+		testing.expect(t, !contains_point(&s.canvas, &p, 32, 32, .Even_Odd))
+		testing.expect(t, contains_point(&s.canvas, &p, 32, 32, .Non_Zero))
 		covered, _ := fill_ink(&s, &p, .Non_Zero)
 		testing.expectf(t, covered == 56 * 56, "same hole non-zero cw=%v: %v px", cw, covered)
 	}
@@ -813,7 +814,7 @@ test_sw_glyph_outline_area :: proc(t: ^testing.T) {
 	covered, _ := fill_ink(&s, &p, .Non_Zero)
 
 	// Exact area and perimeter of the flattened outline.
-	c := &p.cache
+	c := tessellate(&s.canvas, &p, TRANSFORM_IDENTITY)
 	area, perimeter: f32
 	for ct in c.contours {
 		pts := c.points[ct.point_start:ct.point_end]

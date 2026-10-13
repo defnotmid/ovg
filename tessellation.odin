@@ -42,12 +42,12 @@ Contour :: struct {
 	convexity:   Convexity,
 	// Encloses no area (a line, points on one line): fills draw nothing.
 	zero_area:   bool,
-	// Ranges into `Path_Cache.fill_verts` / `stroke_verts`.
+	// Ranges into `Tessellation.fill_verts` / `stroke_verts`.
 	fill:        Range,
 	stroke:      Range,
 }
 
-Path_Cache :: struct {
+Tessellation :: struct {
 	contours:     [dynamic]Contour,
 	points:       [dynamic]Point,
 	bounds:       Bounds,
@@ -64,7 +64,7 @@ Path_Cache :: struct {
 	flipped:      bool,
 }
 
-path_cache_destroy :: proc(c: ^Path_Cache) {
+tessellation_destroy :: proc(c: ^Tessellation) {
 	delete(c.contours)
 	delete(c.points)
 	delete(c.fill_verts)
@@ -73,12 +73,12 @@ path_cache_destroy :: proc(c: ^Path_Cache) {
 	c^ = {}
 }
 
-contour_points :: #force_inline proc "contextless" (c: ^Path_Cache, ct: Contour) -> []Point {
+contour_points :: #force_inline proc "contextless" (c: ^Tessellation, ct: Contour) -> []Point {
 	return c.points[ct.point_start:ct.point_end]
 }
 
 // Rebuilds `c` from `p` under `t`, reusing its buffers.
-path_cache_build :: proc(c: ^Path_Cache, p: ^Path, t: Transform2D, tess_tol, dist_tol: f32) {
+tessellation_build :: proc(c: ^Tessellation, p: ^Path, t: Transform2D, tess_tol, dist_tol: f32) {
 	clear(&c.contours)
 	clear(&c.points)
 	clear(&c.fill_verts)
@@ -165,7 +165,7 @@ path_cache_build :: proc(c: ^Path_Cache, p: ^Path, t: Transform2D, tess_tol, dis
 // even-odd fill stay the same while the fringe moves to the other side of
 // each edge. Holes wound against the largest contour flip with it.
 @(private = "file")
-orient_contours :: proc(c: ^Path_Cache, flip: bool) {
+orient_contours :: proc(c: ^Tessellation, flip: bool) {
 	if c.flipped == flip {
 		return
 	}
@@ -182,13 +182,13 @@ orient_contours :: proc(c: ^Path_Cache, flip: bool) {
 }
 
 @(private = "file")
-add_contour :: proc(c: ^Path_Cache) {
+add_contour :: proc(c: ^Tessellation) {
 	start := u32(len(c.points))
 	append(&c.contours, Contour{point_start = start, point_end = start})
 }
 
 @(private = "file")
-add_point :: proc(c: ^Path_Cache, pos: Vec2, flags: Point_Flags, dist_tol: f32) {
+add_point :: proc(c: ^Tessellation, pos: Vec2, flags: Point_Flags, dist_tol: f32) {
 	if len(c.contours) == 0 {
 		return
 	}
@@ -205,7 +205,7 @@ add_point :: proc(c: ^Path_Cache, pos: Vec2, flags: Point_Flags, dist_tol: f32) 
 }
 
 @(private = "file")
-tesselate_bezier :: proc(c: ^Path_Cache, p1, p2, p3, p4: Vec2, level: int, flags: Point_Flags, tess_tol, dist_tol: f32) {
+tesselate_bezier :: proc(c: ^Tessellation, p1, p2, p3, p4: Vec2, level: int, flags: Point_Flags, tess_tol, dist_tol: f32) {
 	if level > 10 {
 		return
 	}
@@ -229,7 +229,7 @@ tesselate_bezier :: proc(c: ^Path_Cache, p1, p2, p3, p4: Vec2, level: int, flags
 	tesselate_bezier(c, p1234, p234, p34, p4, level + 1, flags, tess_tol, dist_tol)
 }
 
-path_cache_contains_point :: proc(c: ^Path_Cache, x, y: f32, rule: Fill_Rule) -> bool {
+tessellation_contains_point :: proc(c: ^Tessellation, x, y: f32, rule: Fill_Rule) -> bool {
 	if !bounds_contains(c.bounds, x, y) {
 		return false
 	}
@@ -262,7 +262,7 @@ is_left :: proc "contextless" (p0, p1: Vec2, x, y: f32) -> f32 {
 
 // Builds fill triangles (fan converted to a list) and, with a fringe, the
 // antialiasing strip around each contour.
-path_cache_expand_fill :: proc(c: ^Path_Cache, fringe_width: f32, line_join: Line_Join, miter_limit: f32) {
+tessellation_fill :: proc(c: ^Tessellation, fringe_width: f32, line_join: Line_Join, miter_limit: f32) {
 	has_fringe := fringe_width > 0
 	orient_contours(c, c.fill_flip)
 	calculate_joins(c, fringe_width, line_join, miter_limit)
@@ -339,8 +339,8 @@ path_cache_expand_fill :: proc(c: ^Path_Cache, fringe_width: f32, line_join: Lin
 
 // Builds the stroke strip of each contour. `stroke_width` is half the line
 // width.
-path_cache_expand_stroke :: proc(
-	c: ^Path_Cache,
+tessellation_stroke :: proc(
+	c: ^Tessellation,
 	stroke_width_in: f32,
 	fringe_width: f32,
 	line_cap_start, line_cap_end: Line_Cap,
@@ -416,7 +416,7 @@ path_cache_expand_stroke :: proc(
 }
 
 @(private = "file")
-calculate_joins :: proc(c: ^Path_Cache, stroke_width: f32, line_join: Line_Join, miter_limit: f32) {
+calculate_joins :: proc(c: ^Tessellation, stroke_width: f32, line_join: Line_Join, miter_limit: f32) {
 	inv_sw: f32 = 1.0 / stroke_width if stroke_width > 0 else 0
 
 	for &ct in c.contours {
@@ -504,7 +504,7 @@ calculate_joins :: proc(c: ^Path_Cache, stroke_width: f32, line_join: Line_Join,
 }
 
 // The axis-aligned rectangle, if the path is exactly one filled rectangle.
-path_cache_fill_is_rect :: proc(c: ^Path_Cache) -> (Rect, bool) {
+tessellation_fill_is_rect :: proc(c: ^Tessellation) -> (Rect, bool) {
 	if len(c.contours) != 1 || c.contours[0].fill.count != 6 {
 		return {}, false
 	}

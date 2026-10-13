@@ -33,6 +33,8 @@ Canvas :: struct {
 	dash_scratch:          Path,
 	// The stroke being dashed, flattened.
 	dash_flat:             Flat_Path,
+	// The path being drawn, tessellated (`tessellate`).
+	tess:                  Tessellation,
 	// Bounds on per-draw work (limits.odin); canvas_init sets
 	// DEFAULT_LIMITS. Dashes use Dash_Segments.
 	limits:                Limits,
@@ -91,6 +93,7 @@ canvas_destroy :: proc(c: ^Canvas) {
 	gradient_store_destroy(&c.gradients)
 	path_destroy(&c.dash_scratch)
 	flat_path_destroy(&c.dash_flat)
+	tessellation_destroy(&c.tess)
 	path_destroy(&c.cap_scratch)
 	delete(c.program_ops)
 	c^ = {}
@@ -330,28 +333,25 @@ filter_image :: proc(c: ^Canvas, target: Image_Id, filter: Image_Filter, source:
 // ---- paths ----------------------------------------------------------------------
 
 @(private)
-ensure_cache :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> ^Path_Cache {
-	key := transform_cache_key(t)
-	if !p.cache_valid || p.cache_key != key {
-		path_cache_build(&p.cache, p, t, c.tess_tol, c.dist_tol)
-		p.cache_key = key
-		p.cache_valid = true
-	}
-	return &p.cache
+// Tessellates `p` under `t` into the canvas's scratch, valid until the next
+// call.
+tessellate :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> ^Tessellation {
+	tessellation_build(&c.tess, p, t, c.tess_tol, c.dist_tol)
+	return &c.tess
 }
 
 contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool {
-	cache := ensure_cache(c, p, state(c).transform)
+	cache := tessellate(c, p, state(c).transform)
 	b := cache.bounds
 	if b.maxx < 0 || b.minx > f32(c.width) || b.maxy < 0 || b.miny > f32(c.height) {
 		return false
 	}
-	return path_cache_contains_point(cache, x, y, rule)
+	return tessellation_contains_point(cache, x, y, rule)
 }
 
 // Bounds of the path under the current transform.
 path_bounds :: proc(c: ^Canvas, p: ^Path) -> Bounds {
-	return ensure_cache(c, p, state(c).transform).bounds
+	return tessellate(c, p, state(c).transform).bounds
 }
 
 @(private)
@@ -364,7 +364,7 @@ outside_target :: proc(c: ^Canvas, b: Bounds) -> bool {
 fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	st := state(c)
 	t := st.transform
-	cache := ensure_cache(c, p, t)
+	cache := tessellate(c, p, t)
 	if outside_target(c, cache.bounds) {
 		return
 	}
@@ -380,7 +380,7 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 		b := cache.bounds
 		fringe = min(c.fringe_width + 1.5 * paint.feather * scale * math.SQRT_TWO * math.sqrt(f32(math.PI)), min(b.maxx - b.minx, b.maxy - b.miny))
 	}
-	path_cache_expand_fill(cache, fringe, .Miter, 2.4)
+	tessellation_fill(cache, fringe, .Miter, 2.4)
 	convex := len(cache.contours) == 1 && cache.contours[0].convexity == .Convex
 
 	cmd := Command {
@@ -438,7 +438,7 @@ stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	}
 	st := state(c)
 	t := st.transform
-	cache := ensure_cache(c, p, t)
+	cache := tessellate(c, p, t)
 	if outside_target(c, cache.bounds) {
 		return
 	}
@@ -457,7 +457,7 @@ stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	flavor_mul_alpha(&flavor, st.alpha)
 
 	fringe := c.fringe_width if paint.anti_alias else 0
-	path_cache_expand_stroke(
+	tessellation_stroke(
 		cache,
 		line_width * 0.5,
 		fringe,

@@ -1476,7 +1476,6 @@ lottie_gather_copies :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, first_verb, fir
 			append(&p.coords, transform_point(m, q.x, q.y))
 		}
 	}
-	p.cache_valid = false
 	if len(p.coords) > 0 {
 		p.last_pos = p.coords[len(p.coords) - 1]
 	}
