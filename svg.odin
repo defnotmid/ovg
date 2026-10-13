@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:mem/virtual"
+import "core:slice"
 import "core:strings"
 import stbi "vendor:stb/image"
 
@@ -535,10 +536,10 @@ svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Sv
 		warned = warned,
 	}
 	p.by_id = make(map[string]u32, 64, tmp)
-	p.servers = make(map[u32]i32, 16, tmp)
-	p.clips = make(map[u32]i32, 16, tmp)
-	p.masks = make(map[u32]i32, 16, tmp)
-	p.filter_defs = make(map[u32]i32, 16, tmp)
+	for &d in p.defs {
+		d = make([]i32, len(x.elements), tmp)
+		slice.fill(d, SVG_DEF_UNSEEN)
+	}
 	p.bitmap_of = make(map[string]i32, 4, tmp)
 	p.use_stack = make([dynamic]u32, tmp)
 	p.viewports = make([dynamic]Vec2, tmp)
@@ -618,11 +619,8 @@ Svg_Parser :: struct {
 	tmp:         mem.Allocator,
 	by_id:       map[string]u32,
 	sheet:       Css_Sheet,
-	// Converted definitions by XML element (-2 while being converted).
-	servers:     map[u32]i32,
-	clips:       map[u32]i32,
-	masks:       map[u32]i32,
-	filter_defs: map[u32]i32,
+	// Converted definitions by kind and XML element (svg_def_seen).
+	defs:        [Svg_Def][]i32,
 	bitmap_of:   map[string]i32,
 	// Shared with nested SVG images' parsers.
 	warned:      ^map[string]bool,
@@ -2718,14 +2716,41 @@ svg_style_chain :: proc(p: ^Svg_Parser, el: u32) -> Svg_Computed {
 	return st
 }
 
+// Definitions converted on first reference, by the document table they
+// go into.
+@(private)
+Svg_Def :: enum u8 {
+	Server, // doc.servers
+	Clip,   // doc.clips
+	Mask,   // doc.masks
+	Filter, // doc.filters
+}
+
+// A definition slot not looked at yet; -2 marks one being converted (a
+// reference back to it is recursive), -1 one that did not convert.
+@(private)
+SVG_DEF_UNSEEN :: -3
+
+// The conversion of definition `el` when it was seen before (-2 while it
+// is being converted); otherwise marks it as being converted. The caller
+// stores the result in `p.defs[kind][el]`.
+@(private)
+svg_def_seen :: proc(p: ^Svg_Parser, kind: Svg_Def, el: u32) -> (idx: i32, seen: bool) {
+	slot := &p.defs[kind][el]
+	if slot^ != SVG_DEF_UNSEEN {
+		return slot^, true
+	}
+	slot^ = -2
+	return -1, false
+}
+
 @(private)
 svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, ok := p.servers[el]; ok {
+	if idx, seen := svg_def_seen(p, .Server, el); seen {
 		return max(idx, -1)
 	}
-	p.servers[el] = -2
 	idx := i32(-1)
-	defer p.servers[el] = idx
+	defer p.defs[.Server][el] = idx
 	tag := svg_tag(p.x.elements[el].ident)
 	chain_buf: [16]u32
 	chain := chain_buf[:svg_href_chain(p, el, &chain_buf)]
@@ -2902,15 +2927,14 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 
 @(private)
 svg_clip :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, ok := p.clips[el]; ok {
+	if idx, seen := svg_def_seen(p, .Clip, el); seen {
 		if idx == -2 {
 			svg_warn(p, "recursive clip-path is skipped")
 		}
 		return max(idx, -1)
 	}
-	p.clips[el] = -2
 	idx := i32(-1)
-	defer p.clips[el] = idx
+	defer p.defs[.Clip][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
 	st := svg_style_chain(p, el)
@@ -2947,15 +2971,14 @@ svg_clip :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 
 @(private)
 svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, ok := p.masks[el]; ok {
+	if idx, seen := svg_def_seen(p, .Mask, el); seen {
 		if idx == -2 {
 			svg_warn(p, "recursive mask is skipped")
 		}
 		return max(idx, -1)
 	}
-	p.masks[el] = -2
 	idx := i32(-1)
-	defer p.masks[el] = idx
+	defer p.defs[.Mask][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
 	st := svg_style_chain(p, el)
@@ -3011,11 +3034,11 @@ svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 
 @(private)
 svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, ok := p.filter_defs[el]; ok {
-		return idx
+	if idx, seen := svg_def_seen(p, .Filter, el); seen {
+		return max(idx, -1)
 	}
 	idx := i32(-1)
-	defer p.filter_defs[el] = idx
+	defer p.defs[.Filter][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
 	st := svg_style_chain(p, el)
