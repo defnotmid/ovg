@@ -296,3 +296,26 @@ test_shape_mark_cluster_fallback :: proc(t: ^testing.T) {
 	}
 	_ = g
 }
+
+// Text that names no family is drawn in `default_family` when the
+// collection has it, whatever other faces match its weight; without one
+// (or with one the collection lacks) every face competes, the first
+// winning ties.
+@(test)
+test_font_default_family :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/BebasNeue-Regular.ttf")) > 0)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	bebas, _ := font_collection_find(&s.fonts, "Bebas Neue", 400)
+	mono, _ := font_collection_find(&s.fonts, "JetBrains Mono", 400)
+	f, ok := font_collection_find(&s.fonts, "", 400)
+	testing.expect(t, ok && f == bebas)
+	s.fonts.default_family = "JetBrains Mono"
+	f, ok = font_collection_find(&s.fonts, "", 700)
+	testing.expect(t, ok && f == mono)
+	s.fonts.default_family = "No Such Family"
+	f, ok = font_collection_find(&s.fonts, "", 400)
+	testing.expect(t, ok && f == bebas)
+}

@@ -595,7 +595,9 @@ every part follows:
   `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas` (fast,
   but baked at one scale). Both take glyph ids, so shaped runs draw as is.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
-  and onimite) shapes with `vendor:kb_text_shape`: each line is split into
+  and onimite) picks each piece's face by family, weight and style (text
+  that names no family uses `Font_Collection.default_family` when set) and
+  shapes with `vendor:kb_text_shape`: each line is split into
   segments of one font (per-glyph fallback picks the first face covering a
   codepoint), size, script and bidi level (kb's Unicode script runs; levels
   from UAX #9's weak and neutral rules for a left-to-right paragraph,

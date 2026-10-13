@@ -21,6 +21,9 @@ Font_Collection :: struct {
 	// Colour emoji face tried after `faces` (font_collection_set_emoji);
 	// never matched by family. `emoji.font.data == nil` when unset.
 	emoji:      Font_Face,
+	// The family text that names none is drawn in (borrowed); empty, or
+	// a family no face has: every face competes by weight and style.
+	default_family: string,
 	// Guards the shaping state below and each face's lazily parsed kb font,
 	// so layouts may run concurrently on one collection.
 	shape_lock: sync.Mutex,
@@ -100,9 +103,15 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8) -> int {
 }
 
 // The best face for `family` (case-insensitive): matching style first, then
-// the nearest weight (0 means 400). An empty family takes the first face.
-// `found = false` returns the fallback face.
+// the nearest weight (0 means 400). An empty family is `default_family`
+// when the collection has it, else every face competes (earlier faces win
+// ties). `found = false` returns the fallback face.
 font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic := false) -> (font: ^Font, found: bool) {
+	if family == "" && c.default_family != "" {
+		if f, ok := font_collection_find(c, c.default_family, weight, italic); ok {
+			return f, true
+		}
+	}
 	want := weight if weight > 0 else 400
 	best := -1
 	best_score := max(int)
