@@ -319,3 +319,22 @@ test_svg_visible_override :: proc(t: ^testing.T) {
 	testing.expect(t, close_to(svg_px(&s, 10, 10), {255, 0, 0, 255}))
 	testing.expect(t, close_to(svg_px(&s, 30, 10), {255, 255, 255, 255}))
 }
+
+// An element kept with display="none" (for an override to show) is not in
+// its parent's bounding box: a bounding-box flood on the group covers only
+// the visible rect.
+@(test)
+test_svg_off_bbox :: proc(t: ^testing.T) {
+	s: Svg_Fx
+	defer svg_fx_close(&s)
+	err := svg_fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+		<filter id="f" x="0" y="0" width="1" height="1"><feFlood flood-color="blue"/></filter>
+		<g filter="url(#f)">
+			<rect width="20" height="20" fill="red"/>
+			<rect id="alt" x="60" y="60" width="20" height="20" display="none"/>
+		</g></svg>`)
+	testing.expect_value(t, err, Svg_Error.None)
+	svg_fx_draw(&s)
+	testing.expect(t, close_to(svg_px(&s, 10, 10), {0, 0, 255, 255}))
+	testing.expect(t, close_to(svg_px(&s, 50, 50), {255, 255, 255, 255}))
+}

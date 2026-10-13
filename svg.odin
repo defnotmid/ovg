@@ -3539,7 +3539,9 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 svg_finish :: proc(p: ^Svg_Parser) {
 	doc := p.doc
 	#reverse for &n in doc.nodes {
-		if n.parent >= 0 && n.bbox.w >= 0 {
+		// display="none" kept for overrides (Off) is not in its parent's
+		// box (SVG: no box), visibility="hidden" is.
+		if n.parent >= 0 && n.bbox.w >= 0 && .Off not_in n.flags {
 			par := &doc.nodes[n.parent]
 			par.bbox = svg_box_union(par.bbox, svg_rect_transform(n.bbox, n.transform))
 		}
