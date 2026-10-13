@@ -872,6 +872,10 @@ apply_gradient_colors :: proc "contextless" (p: ^Params, gc: Gradient_Colors, co
 		p.outer_col = color_to_array(premultiplied(g.end_color))
 		p.shader_type = .Fill_Gradient_Conic if conic else .Fill_Gradient
 	case Multi_Stop_Gradient:
+		// The ramp holds the stops alone (one per stop list, however the
+		// paint fades); the alpha multiplies it here.
+		p.inner_col = {g.tint, g.tint, g.tint, g.tint}
+		p.outer_col = p.inner_col
 		p.shader_type = .Fill_Image_Gradient_Conic if conic else .Fill_Image_Gradient
 	}
 }

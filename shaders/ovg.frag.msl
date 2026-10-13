@@ -3802,138 +3802,145 @@ struct pixelInput_0
 #line 689
             float _S288 = gradient_t_0(_S279.fpos_4, &kernelContext_49);
 
-#line 689
-            result_0 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S288, 0.0f)), level((0.0f))));
+            float4 _S289 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S288, 0.0f)), level((0.0f))));
+
+#line 691
+            float4 _S290 = inner_col_0(&kernelContext_49);
+
+#line 691
+            result_0 = _S289 * _S290;
 
 #line 689
         }
         else
         {
-
-#line 691
             if(_S280 == int(1))
             {
 
-#line 691
-                float2 _S289 = transform_point_0(int(3), _S279.fpos_4, &kernelContext_49);
+#line 692
+                float2 _S291 = transform_point_0(int(3), _S279.fpos_4, &kernelContext_49);
 
-#line 691
-                float2 _S290 = extent_0(&kernelContext_49);
+#line 692
+                float2 _S292 = extent_0(&kernelContext_49);
 
-#line 691
-                float4 _S291 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S289 / _S290), level((0.0f)))), &kernelContext_49);
+#line 692
+                float4 _S293 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S291 / _S292), level((0.0f)))), &kernelContext_49);
 
-#line 691
-                float4 _S292 = inner_col_0(&kernelContext_49);
+#line 692
+                float4 _S294 = inner_col_0(&kernelContext_49);
 
-#line 691
-                result_0 = _S291 * _S292;
+#line 692
+                result_0 = _S293 * _S294;
 
-#line 691
+#line 692
             }
             else
             {
                 if(_S280 == int(6))
                 {
 
-#line 694
-                    float4 _S293 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S279.ftcoord_1), level((0.0f)))), &kernelContext_49);
+#line 695
+                    float4 _S295 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S279.ftcoord_1), level((0.0f)))), &kernelContext_49);
 
-#line 694
-                    float4 _S294 = inner_col_0(&kernelContext_49);
+#line 695
+                    float4 _S296 = inner_col_0(&kernelContext_49);
 
-#line 694
-                    pixelOutput_0 _S295 = { _S293 * _S294 };
-                    return _S295;
+#line 695
+                    pixelOutput_0 _S297 = { _S295 * _S296 };
+                    return _S297;
                 }
                 else
                 {
 
-#line 696
+#line 697
                     if(_S280 == int(2))
                     {
 
-#line 696
+#line 697
                         result_0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
 
-#line 696
+#line 697
                     }
                     else
                     {
 
-#line 698
+#line 699
                         if(_S280 == int(4))
                         {
 
-#line 698
-                            float4 _S296 = render_filtered_image_0(_S279.fpos_4, &kernelContext_49);
+#line 699
+                            float4 _S298 = render_filtered_image_0(_S279.fpos_4, &kernelContext_49);
 
-#line 698
-                            result_0 = _S296;
+#line 699
+                            result_0 = _S298;
 
-#line 698
+#line 699
                         }
                         else
                         {
 
-#line 700
+#line 701
                             if(_S280 == int(8))
                             {
 
-#line 700
-                                float4 _S297 = inner_col_0(&kernelContext_49);
+#line 701
+                                float4 _S299 = inner_col_0(&kernelContext_49);
 
-#line 700
-                                float4 _S298 = outer_col_0(&kernelContext_49);
+#line 701
+                                float4 _S300 = outer_col_0(&kernelContext_49);
 
-#line 700
-                                float _S299 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
+#line 701
+                                float _S301 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
 
-#line 700
-                                result_0 = mix(_S297, _S298, float4(_S299) );
+#line 701
+                                result_0 = mix(_S299, _S300, float4(_S301) );
 
-#line 700
+#line 701
                             }
                             else
                             {
 
-#line 702
+#line 703
                                 if(_S280 == int(9))
                                 {
 
-#line 702
-                                    float _S300 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
+#line 703
+                                    float _S302 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
+                                    float4 _S303 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S302, 0.0f)), level((0.0f))));
 
-#line 702
-                                    result_0 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S300, 0.0f)), level((0.0f))));
+#line 704
+                                    float4 _S304 = inner_col_0(&kernelContext_49);
 
-#line 702
+#line 704
+                                    result_0 = _S303 * _S304;
+
+#line 703
                                 }
                                 else
                                 {
 
-#line 702
-                                    float4 _S301 = inner_col_0(&kernelContext_49);
+#line 703
+                                    float4 _S305 = inner_col_0(&kernelContext_49);
 
-#line 702
-                                    result_0 = _S301;
+#line 703
+                                    result_0 = _S305;
 
-#line 702
+#line 703
                                 }
 
-#line 700
+#line 701
                             }
 
-#line 698
+#line 699
                         }
 
-#line 696
+#line 697
                     }
 
-#line 694
+#line 695
                 }
 
-#line 691
+#line 692
             }
 
 #line 689
@@ -3943,88 +3950,88 @@ struct pixelInput_0
     }
 
 #line 687
-    float _S302 = scissor_mask_0(_S279.fpos_4, &kernelContext_49);
+    float _S306 = scissor_mask_0(_S279.fpos_4, &kernelContext_49);
 
 #line 687
-    int _S303 = glyph_texture_type_0(&kernelContext_49);
+    int _S307 = glyph_texture_type_0(&kernelContext_49);
 
-#line 710
-    if(_S303 != int(0))
+#line 711
+    if(_S307 != int(0))
     {
 
-#line 711
-        float4 _S304 = (((&kernelContext_49)->glyphtex_texture_0).sample(((&kernelContext_49)->glyphtex_sampler_0), (_S279.ftcoord_1), level((0.0f))));
+#line 712
+        float4 _S308 = (((&kernelContext_49)->glyphtex_texture_0).sample(((&kernelContext_49)->glyphtex_sampler_0), (_S279.ftcoord_1), level((0.0f))));
 
-#line 711
+#line 712
         float4 mask_0;
-        if(_S303 == int(1))
+        if(_S307 == int(1))
         {
 
-#line 712
-            mask_0 = float4(_S304.x) ;
+#line 713
+            mask_0 = float4(_S308.x) ;
 
-#line 712
+#line 713
         }
         else
         {
-            float4 _S305 = float4(1.0f, 1.0f, 1.0f, 1.0f);
-            float _S306 = _S304.w;
+            float4 _S309 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+            float _S310 = _S308.w;
 
-#line 716
-            mask_0 = float4(_S304.xyz * float3(_S306) , _S306);
+#line 717
+            mask_0 = float4(_S308.xyz * float3(_S310) , _S310);
 
-#line 716
-            result_0 = _S305;
+#line 717
+            result_0 = _S309;
 
-#line 712
+#line 713
         }
 
-#line 712
-        result_0 = result_0 * (mask_0 * float4(_S302) );
+#line 713
+        result_0 = result_0 * (mask_0 * float4(_S306) );
 
-#line 710
+#line 711
     }
     else
     {
 
-#line 710
-        bool _S307;
+#line 711
+        bool _S311;
 
-#line 719
+#line 720
         if(_S280 != int(2))
         {
 
-#line 719
-            _S307 = _S280 != int(4);
+#line 720
+            _S311 = _S280 != int(4);
 
-#line 719
+#line 720
         }
         else
         {
 
-#line 719
-            _S307 = false;
+#line 720
+            _S311 = false;
 
-#line 719
+#line 720
         }
 
-#line 719
-        if(_S307)
+#line 720
+        if(_S311)
         {
 
-#line 719
-            result_0 = result_0 * float4((stroke_alpha_0 * _S302)) ;
+#line 720
+            result_0 = result_0 * float4((stroke_alpha_0 * _S306)) ;
 
-#line 719
+#line 720
         }
 
-#line 710
+#line 711
     }
 
-#line 710
-    pixelOutput_0 _S308 = { result_0 };
+#line 711
+    pixelOutput_0 _S312 = { result_0 };
 
-#line 722
-    return _S308;
+#line 723
+    return _S312;
 }
 

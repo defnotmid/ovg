@@ -4,8 +4,11 @@ import "core:hash"
 
 GRADIENT_RAMP_WIDTH :: 256
 
-// Caches the 256x1 ramp textures of multi-stop gradients. Ramps used in a
+// The 256x1 ramp textures of multi-stop gradients, by stop list (a paint's
+// alpha is applied when drawing, so fades reuse the ramp). Ramps used in a
 // frame survive into the next; anything unused for a whole frame is freed.
+// Kept across frames because the stops arrive with every draw and a ramp
+// is a texture upload.
 Gradient_Store :: struct {
 	this_frame: map[u64]Image_Id,
 	prev_frame: map[u64]Image_Id,
@@ -24,9 +27,7 @@ gradient_store_destroy :: proc(s: ^Gradient_Store) {
 @(private)
 gradient_key :: proc(g: Multi_Stop_Gradient) -> u64 {
 	stops := g.stops
-	tint := g.tint
-	h := hash.fnv64a(([^]u8)(raw_data(stops))[:len(stops) * size_of(Gradient_Stop)])
-	return hash.fnv64a(([^]u8)(&tint)[:size_of(tint)], h)
+	return hash.fnv64a(([^]u8)(raw_data(stops))[:len(stops) * size_of(Gradient_Stop)])
 }
 
 gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient, images: ^Image_Store) -> (id: Image_Id, err: Error) {
@@ -56,31 +57,26 @@ gradient_store_release_old :: proc(s: ^Gradient_Store, images: ^Image_Store) {
 	s.this_frame, s.prev_frame = s.prev_frame, s.this_frame
 }
 
-// Renders the gradient into a premultiplied RGBA8 ramp. Offsets outside the
-// stop range pad with the first/last stop color.
+// Renders the gradient's stops (not its tint) into a premultiplied RGBA8
+// ramp. Offsets outside the stop range pad with the first/last stop color.
 gradient_synthesize :: proc "contextless" (g: Multi_Stop_Gradient, dest: ^[GRADIENT_RAMP_WIDTH * 4]u8) {
 	dest^ = {}
 	if len(g.stops) == 0 {
 		return
 	}
-	tinted :: proc "contextless" (s: Gradient_Stop, tint: f32) -> Gradient_Stop {
-		s := s
-		s.color.a *= tint
-		return s
-	}
-	first := tinted(g.stops[0], g.tint)
+	first := g.stops[0]
 	if first.offset > 0 {
 		gradient_span(dest, first.color, first.color, 0, first.offset)
 	}
 	for i in 0 ..< len(g.stops) - 1 {
-		s0 := tinted(g.stops[i], g.tint)
-		s1 := tinted(g.stops[i + 1], g.tint)
+		s0 := g.stops[i]
+		s1 := g.stops[i + 1]
 		if s0.offset > 1 {
 			break
 		}
 		gradient_span(dest, s0.color, s1.color, s0.offset, s1.offset)
 	}
-	last := tinted(g.stops[len(g.stops) - 1], g.tint)
+	last := g.stops[len(g.stops) - 1]
 	if last.offset < 1 {
 		gradient_span(dest, last.color, last.color, last.offset, 1)
 	}

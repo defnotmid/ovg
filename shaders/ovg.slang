@@ -687,7 +687,8 @@ float4 fs_main(VS_Out i) : SV_Target {
     if (type == FILL_GRADIENT) {
         result = lerp(inner_col(), outer_col(), gradient_t(i.fpos));
     } else if (type == FILL_IMAGE_GRADIENT) {
-        result = tex.SampleLevel(float2(gradient_t(i.fpos), 0.0), 0);
+        // The ramp is the stops; inner_col carries the paint's alpha.
+        result = tex.SampleLevel(float2(gradient_t(i.fpos), 0.0), 0) * inner_col();
     } else if (type == FILL_IMAGE) {
         float2 pt = transform_point(3, i.fpos) / extent();
         result = apply_tex_type(tex.SampleLevel(pt, 0)) * inner_col();
@@ -700,7 +701,7 @@ float4 fs_main(VS_Out i) : SV_Target {
     } else if (type == FILL_GRADIENT_CONIC) {
         result = lerp(inner_col(), outer_col(), conic_fraction(i.fpos));
     } else if (type == FILL_IMAGE_GRADIENT_CONIC) {
-        result = tex.SampleLevel(float2(conic_fraction(i.fpos), 0.0), 0);
+        result = tex.SampleLevel(float2(conic_fraction(i.fpos), 0.0), 0) * inner_col();
     } else {
         result = inner_col();
     }

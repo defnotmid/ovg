@@ -487,12 +487,13 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 	case .Fill_Gradient:
 		result = mix4(p.inner_col, p.outer_col, gradient_t(p, px, py))
 	case .Fill_Image_Gradient:
+		// The ramp is the stops; inner_col carries the paint's alpha.
 		d := gradient_t(p, px, py)
-		result = sample(f.tex, d, 0) if f.has_tex else p.inner_col
+		result = sample(f.tex, d, 0) * p.inner_col if f.has_tex else p.inner_col
 	case .Fill_Gradient_Conic:
 		result = mix4(p.inner_col, p.outer_col, conic_fraction(p^, px, py))
 	case .Fill_Image_Gradient_Conic:
-		result = sample(f.tex, conic_fraction(p^, px, py), 0) if f.has_tex else p.inner_col
+		result = sample(f.tex, conic_fraction(p^, px, py), 0) * p.inner_col if f.has_tex else p.inner_col
 	case .Fill_Image:
 		if f.has_tex {
 			pt := paint_point(p.paint_mat, px, py) / p.extent
