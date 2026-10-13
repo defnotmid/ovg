@@ -397,3 +397,18 @@ test_svg_no_allocation_when_warm :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, track.total_allocation_count, 0)
 }
+
+// Every property has a row: a unique name the lookup finds, a parser and a
+// copy (svg_props, SVG_PROP_ALIASES).
+@(test)
+test_svg_prop_table :: proc(t: ^testing.T) {
+	for info, prop in svg_props {
+		testing.expectf(t, info.name != "" && info.apply != nil && info.copy != nil, "%v: incomplete row", prop)
+		found, ok := svg_prop_from_name(info.name)
+		testing.expectf(t, ok && found == prop, "%q finds %v", info.name, found)
+	}
+	for alias in SVG_PROP_ALIASES {
+		found, ok := svg_prop_from_name(alias.name)
+		testing.expectf(t, ok && found == alias.prop, "alias %q finds %v", alias.name, found)
+	}
+}

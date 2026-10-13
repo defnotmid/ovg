@@ -959,17 +959,13 @@ svg_collect_decls :: proc(p: ^Svg_Parser, el: u32, d: ^Svg_Decls) {
 @(private)
 svg_compute_style :: proc(p: ^Svg_Parser, el: u32, parent: ^Svg_Computed) -> Svg_Computed {
 	st := parent^
-	st.opacity = 1
-	st.display_none = false
-	st.clip_path, st.mask, st.filter = "", "", ""
-	st.blend = .Normal
-	st.isolate = false
-	st.stop_color, st.stop_opacity = BLACK, 1
-	st.flood_color, st.flood_opacity = BLACK, 1
-	st.lighting_color = WHITE
-	st.mask_alpha = false
-	st.overflow_visible = false
-	st.css_transform = ""
+	// Non-inherited properties start from their initial values.
+	initial := svg_initial_style()
+	for &info in svg_props {
+		if !info.inherited {
+			info.copy(&st, &initial)
+		}
+	}
 	st.baseline_set = false
 	e := &p.x.elements[el]
 	if sp, ok := svg_attr(e, "xml:space"); ok {
@@ -978,175 +974,21 @@ svg_compute_style :: proc(p: ^Svg_Parser, el: u32, parent: ^Svg_Computed) -> Svg
 
 	d: Svg_Decls
 	svg_collect_decls(p, el, &d)
-
+	declare :: proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, prop: Svg_Prop, v: string) {
+		switch v {
+		case "":
+		case "inherit":
+			svg_props[prop].copy(st, parent)
+		case:
+			svg_props[prop].apply(p, st, parent, v)
+		}
+	}
 	// `color` and `font-size` first: currentColor and em units use them.
-	if v := d[.Color]; v != "" && v != "inherit" {
-		if v == "currentColor" {
-			// Inherited already.
-		} else if c, ok := css_color_parse(v); ok {
-			st.color = c
-		}
-	}
-	if v := d[.Font_Size]; v != "" && v != "inherit" {
-		st.font_size = svg_font_size(v, parent.font_size)
-	}
-
+	declare(p, &st, parent, .Color, d[.Color])
+	declare(p, &st, parent, .Font_Size, d[.Font_Size])
 	for v, prop in d {
-		if v == "" || prop == .Color || prop == .Font_Size {
-			continue
-		}
-		if v == "inherit" {
-			svg_inherit(&st, parent, prop)
-			continue
-		}
-		switch prop {
-		case .Fill:
-			st.fill = svg_parse_paint(p, v, &st, parent.fill)
-			st.fill_decl = true
-			st.fill_current = v == "currentColor" || v == "currentcolor"
-		case .Stroke:
-			st.stroke = svg_parse_paint(p, v, &st, parent.stroke)
-			st.stroke_decl = true
-			st.stroke_current = v == "currentColor" || v == "currentcolor"
-		case .Fill_Opacity:
-			st.fill_opacity = svg_opacity(v)
-		case .Stroke_Opacity:
-			st.stroke_opacity = svg_opacity(v)
-		case .Opacity:
-			st.opacity = svg_opacity(v)
-		case .Fill_Rule:
-			st.fill_rule = .Even_Odd if v == "evenodd" else .Non_Zero
-		case .Clip_Rule:
-			st.clip_rule = .Even_Odd if v == "evenodd" else .Non_Zero
-		case .Stroke_Width:
-			if l, ok := svg_parse_length(v); ok {
-				w := svg_length_px(l, svg_percent_base(p, 2), st.font_size)
-				if w >= 0 {
-					st.stroke_width = w
-				}
-			}
-		case .Stroke_Linecap:
-			switch v {
-			case "butt":
-				st.cap = .Butt
-			case "round":
-				st.cap = .Round
-			case "square":
-				st.cap = .Square
-			}
-		case .Stroke_Linejoin:
-			switch v {
-			case "miter", "miter-clip", "arcs":
-				st.join = .Miter
-			case "round":
-				st.join = .Round
-			case "bevel":
-				st.join = .Bevel
-			}
-		case .Stroke_Miterlimit:
-			if m, ok := svg_parse_number(v); ok && m >= 1 {
-				st.miter_limit = m
-			}
-		case .Stroke_Dasharray:
-			st.dash = svg_parse_dash(p, v, st.font_size)
-		case .Stroke_Dashoffset:
-			if l, ok := svg_parse_length(v); ok {
-				st.dash_offset = svg_length_px(l, svg_percent_base(p, 2), st.font_size)
-			}
-		case .Visibility:
-			st.visible = v == "visible"
-			st.visible_decl = true
-		case .Display:
-			st.display_none = v == "none"
-		case .Font_Family:
-			st.families = svg_parse_families(p, v)
-		case .Font_Weight:
-			st.font_weight = svg_font_weight(v, parent.font_weight)
-		case .Font_Style:
-			st.italic = v == "italic" || v == "oblique"
-		case .Text_Anchor:
-			switch v {
-			case "start":
-				st.anchor = .Left
-			case "middle":
-				st.anchor = .Center
-			case "end":
-				st.anchor = .Right
-			}
-		case .Dominant_Baseline, .Alignment_Baseline:
-			st.baseline_set = true
-			switch v {
-			case "middle":
-				st.baseline = .Middle
-			case "central":
-				st.baseline = .Central
-			case "hanging":
-				st.baseline = .Hanging
-			case "text-before-edge", "text-top":
-				st.baseline = .Top
-			case "text-after-edge", "text-bottom", "ideographic":
-				st.baseline = .Bottom
-			case "auto", "alphabetic", "baseline":
-				st.baseline = .Alphabetic
-			case:
-				svg_warn(p, "dominant-baseline=%q is not supported", v)
-			}
-		case .Letter_Spacing:
-			if v == "normal" {
-				st.letter_spacing = 0
-			} else if l, ok := svg_parse_length(v); ok {
-				st.letter_spacing = svg_length_px(l, svg_percent_base(p, 0), st.font_size)
-			}
-		case .Clip_Path:
-			st.clip_path = "" if v == "none" else v
-		case .Mask:
-			st.mask = "" if v == "none" else v
-		case .Mask_Type:
-			st.mask_alpha = v == "alpha"
-		case .Filter:
-			st.filter = "" if v == "none" else v
-		case .Mix_Blend_Mode:
-			st.blend = svg_blend_mode(v)
-		case .Isolation:
-			st.isolate = v == "isolate"
-		case .Stop_Color:
-			st.stop_color = svg_parse_color(v, st.color)
-		case .Stop_Opacity:
-			st.stop_opacity = svg_opacity(v)
-		case .Flood_Color:
-			st.flood_color = svg_parse_color(v, st.color)
-		case .Flood_Opacity:
-			st.flood_opacity = svg_opacity(v)
-		case .Lighting_Color:
-			if v == "currentColor" || v == "currentcolor" {
-				st.lighting_color = st.color
-			} else if lc, lok := css_color_parse(v); lok {
-				st.lighting_color = lc
-			} else {
-				st.lighting_color = WHITE
-			}
-			st.lighting_color.a = 1
-		case .Shape_Rendering:
-			st.crisp = v == "crispEdges" || v == "optimizeSpeed"
-		case .Overflow:
-			st.overflow_visible = v == "visible" || v == "auto"
-		case .Color_Interpolation_Filters:
-			st.srgb_filters = v == "sRGB"
-		case .Transform:
-			st.css_transform = v
-		case .Marker:
-			if v != "none" {
-				svg_warn(p, "markers are not supported")
-			}
-		case .Text_Decoration:
-			if v != "none" {
-				svg_warn(p, "text-decoration is not supported")
-			}
-		case .Paint_Order:
-			if v != "normal" && v != "fill" && v != "fill stroke" && v != "fill stroke markers" {
-				svg_warn(p, "paint-order is not supported")
-			}
-		case .Color, .Font_Size:
+		if prop != .Color && prop != .Font_Size {
+			declare(p, &st, parent, prop, v)
 		}
 	}
 	if st.fill_current {
@@ -1158,36 +1000,229 @@ svg_compute_style :: proc(p: ^Svg_Parser, el: u32, parent: ^Svg_Computed) -> Svg
 	return st
 }
 
+// What the cascade does with one property: its CSS name, whether it
+// inherits, how a declared value applies to the computed style, and how it
+// copies the property's fields from another style (the parent's for
+// `inherit`, the initial style's to reset a property that doesn't inherit).
 @(private)
-svg_inherit :: proc(st, parent: ^Svg_Computed, prop: Svg_Prop) {
-	#partial switch prop {
-	case .Opacity:
-		st.opacity = parent.opacity
-	case .Clip_Path:
-		st.clip_path = parent.clip_path
-	case .Mask:
-		st.mask = parent.mask
-	case .Filter:
-		st.filter = parent.filter
-	case .Stop_Color:
-		st.stop_color = parent.stop_color
-	case .Stop_Opacity:
-		st.stop_opacity = parent.stop_opacity
-	case .Flood_Color:
-		st.flood_color = parent.flood_color
-	case .Flood_Opacity:
-		st.flood_opacity = parent.flood_opacity
-	case .Lighting_Color:
-		st.lighting_color = parent.lighting_color
-	case .Mix_Blend_Mode:
-		st.blend = parent.blend
-	case .Display:
-		st.display_none = parent.display_none
-	case .Overflow:
-		st.overflow_visible = parent.overflow_visible
-	}
-	// Inherited properties already hold the parent's value.
+Svg_Prop_Info :: struct {
+	name:      string,
+	inherited: bool,
+	apply:     proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string),
+	copy:      proc(st, from: ^Svg_Computed),
 }
+
+@(private, rodata)
+svg_props := [Svg_Prop]Svg_Prop_Info {
+	.Fill = {"fill", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.fill = svg_parse_paint(p, v, st, parent.fill)
+			st.fill_decl = true
+			st.fill_current = v == "currentColor" || v == "currentcolor"
+		}, proc(st, from: ^Svg_Computed) {st.fill, st.fill_current = from.fill, from.fill_current}},
+	.Fill_Opacity = {"fill-opacity", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.fill_opacity = svg_opacity(v)
+		}, proc(st, from: ^Svg_Computed) {st.fill_opacity = from.fill_opacity}},
+	.Fill_Rule = {"fill-rule", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.fill_rule = .Even_Odd if v == "evenodd" else .Non_Zero
+		}, proc(st, from: ^Svg_Computed) {st.fill_rule = from.fill_rule}},
+	.Stroke = {"stroke", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.stroke = svg_parse_paint(p, v, st, parent.stroke)
+			st.stroke_decl = true
+			st.stroke_current = v == "currentColor" || v == "currentcolor"
+		}, proc(st, from: ^Svg_Computed) {st.stroke, st.stroke_current = from.stroke, from.stroke_current}},
+	.Stroke_Opacity = {"stroke-opacity", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.stroke_opacity = svg_opacity(v)
+		}, proc(st, from: ^Svg_Computed) {st.stroke_opacity = from.stroke_opacity}},
+	.Stroke_Width = {"stroke-width", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if l, ok := svg_parse_length(v); ok {
+				if w := svg_length_px(l, svg_percent_base(p, 2), st.font_size); w >= 0 {
+					st.stroke_width = w
+				}
+			}
+		}, proc(st, from: ^Svg_Computed) {st.stroke_width = from.stroke_width}},
+	.Stroke_Linecap = {"stroke-linecap", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			switch v {
+			case "butt":
+				st.cap = .Butt
+			case "round":
+				st.cap = .Round
+			case "square":
+				st.cap = .Square
+			}
+		}, proc(st, from: ^Svg_Computed) {st.cap = from.cap}},
+	.Stroke_Linejoin = {"stroke-linejoin", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			switch v {
+			case "miter", "miter-clip", "arcs":
+				st.join = .Miter
+			case "round":
+				st.join = .Round
+			case "bevel":
+				st.join = .Bevel
+			}
+		}, proc(st, from: ^Svg_Computed) {st.join = from.join}},
+	.Stroke_Miterlimit = {"stroke-miterlimit", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if m, ok := svg_parse_number(v); ok && m >= 1 {
+				st.miter_limit = m
+			}
+		}, proc(st, from: ^Svg_Computed) {st.miter_limit = from.miter_limit}},
+	.Stroke_Dasharray = {"stroke-dasharray", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.dash = svg_parse_dash(p, v, st.font_size)
+		}, proc(st, from: ^Svg_Computed) {st.dash = from.dash}},
+	.Stroke_Dashoffset = {"stroke-dashoffset", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if l, ok := svg_parse_length(v); ok {
+				st.dash_offset = svg_length_px(l, svg_percent_base(p, 2), st.font_size)
+			}
+		}, proc(st, from: ^Svg_Computed) {st.dash_offset = from.dash_offset}},
+	.Opacity = {"opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.opacity = svg_opacity(v)
+		}, proc(st, from: ^Svg_Computed) {st.opacity = from.opacity}},
+	.Visibility = {"visibility", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.visible = v == "visible"
+			st.visible_decl = true
+		}, proc(st, from: ^Svg_Computed) {st.visible = from.visible}},
+	.Display = {"display", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.display_none = v == "none"
+		}, proc(st, from: ^Svg_Computed) {st.display_none = from.display_none}},
+	.Color = {"color", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			// currentColor: the inherited colour, already there.
+			if v != "currentColor" {
+				if c, ok := css_color_parse(v); ok {
+					st.color = c
+				}
+			}
+		}, proc(st, from: ^Svg_Computed) {st.color = from.color}},
+	.Font_Family = {"font-family", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.families = svg_parse_families(p, v)
+		}, proc(st, from: ^Svg_Computed) {st.families = from.families}},
+	.Font_Size = {"font-size", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.font_size = svg_font_size(v, parent.font_size)
+		}, proc(st, from: ^Svg_Computed) {st.font_size = from.font_size}},
+	.Font_Weight = {"font-weight", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.font_weight = svg_font_weight(v, parent.font_weight)
+		}, proc(st, from: ^Svg_Computed) {st.font_weight = from.font_weight}},
+	.Font_Style = {"font-style", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.italic = v == "italic" || v == "oblique"
+		}, proc(st, from: ^Svg_Computed) {st.italic = from.italic}},
+	.Text_Anchor = {"text-anchor", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			switch v {
+			case "start":
+				st.anchor = .Left
+			case "middle":
+				st.anchor = .Center
+			case "end":
+				st.anchor = .Right
+			}
+		}, proc(st, from: ^Svg_Computed) {st.anchor = from.anchor}},
+	.Dominant_Baseline = {"dominant-baseline", true, svg_apply_baseline, svg_copy_baseline},
+	.Alignment_Baseline = {"alignment-baseline", true, svg_apply_baseline, svg_copy_baseline},
+	.Letter_Spacing = {"letter-spacing", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if v == "normal" {
+				st.letter_spacing = 0
+			} else if l, ok := svg_parse_length(v); ok {
+				st.letter_spacing = svg_length_px(l, svg_percent_base(p, 0), st.font_size)
+			}
+		}, proc(st, from: ^Svg_Computed) {st.letter_spacing = from.letter_spacing}},
+	.Clip_Path = {"clip-path", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.clip_path = "" if v == "none" else v
+		}, proc(st, from: ^Svg_Computed) {st.clip_path = from.clip_path}},
+	.Clip_Rule = {"clip-rule", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.clip_rule = .Even_Odd if v == "evenodd" else .Non_Zero
+		}, proc(st, from: ^Svg_Computed) {st.clip_rule = from.clip_rule}},
+	.Mask = {"mask", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.mask = "" if v == "none" else v
+		}, proc(st, from: ^Svg_Computed) {st.mask = from.mask}},
+	.Mask_Type = {"mask-type", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.mask_alpha = v == "alpha"
+		}, proc(st, from: ^Svg_Computed) {st.mask_alpha = from.mask_alpha}},
+	.Filter = {"filter", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.filter = "" if v == "none" else v
+		}, proc(st, from: ^Svg_Computed) {st.filter = from.filter}},
+	.Mix_Blend_Mode = {"mix-blend-mode", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.blend = svg_blend_mode(v)
+		}, proc(st, from: ^Svg_Computed) {st.blend = from.blend}},
+	.Isolation = {"isolation", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.isolate = v == "isolate"
+		}, proc(st, from: ^Svg_Computed) {st.isolate = from.isolate}},
+	.Stop_Color = {"stop-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.stop_color = svg_parse_color(v, st.color)
+		}, proc(st, from: ^Svg_Computed) {st.stop_color = from.stop_color}},
+	.Stop_Opacity = {"stop-opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.stop_opacity = svg_opacity(v)
+		}, proc(st, from: ^Svg_Computed) {st.stop_opacity = from.stop_opacity}},
+	.Flood_Color = {"flood-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.flood_color = svg_parse_color(v, st.color)
+		}, proc(st, from: ^Svg_Computed) {st.flood_color = from.flood_color}},
+	.Flood_Opacity = {"flood-opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.flood_opacity = svg_opacity(v)
+		}, proc(st, from: ^Svg_Computed) {st.flood_opacity = from.flood_opacity}},
+	.Lighting_Color = {"lighting-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if v == "currentColor" || v == "currentcolor" {
+				st.lighting_color = st.color
+			} else if lc, ok := css_color_parse(v); ok {
+				st.lighting_color = lc
+			} else {
+				st.lighting_color = WHITE
+			}
+			st.lighting_color.a = 1
+		}, proc(st, from: ^Svg_Computed) {st.lighting_color = from.lighting_color}},
+	.Shape_Rendering = {"shape-rendering", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.crisp = v == "crispEdges" || v == "optimizeSpeed"
+		}, proc(st, from: ^Svg_Computed) {st.crisp = from.crisp}},
+	.Overflow = {"overflow", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.overflow_visible = v == "visible" || v == "auto"
+		}, proc(st, from: ^Svg_Computed) {st.overflow_visible = from.overflow_visible}},
+	.Color_Interpolation_Filters = {"color-interpolation-filters", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.srgb_filters = v == "sRGB"
+		}, proc(st, from: ^Svg_Computed) {st.srgb_filters = from.srgb_filters}},
+	.Transform = {"transform", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			st.css_transform = v
+		}, proc(st, from: ^Svg_Computed) {st.css_transform = from.css_transform}},
+	.Marker = {"marker", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if v != "none" {
+				svg_warn(p, "markers are not supported")
+			}
+		}, svg_copy_nothing},
+	.Text_Decoration = {"text-decoration", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if v != "none" {
+				svg_warn(p, "text-decoration is not supported")
+			}
+		}, svg_copy_nothing},
+	.Paint_Order = {"paint-order", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+			if v != "normal" && v != "fill" && v != "fill stroke" && v != "fill stroke markers" {
+				svg_warn(p, "paint-order is not supported")
+			}
+		}, svg_copy_nothing},
+}
+
+@(private)
+svg_apply_baseline :: proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+	st.baseline_set = true
+	switch v {
+	case "middle":
+		st.baseline = .Middle
+	case "central":
+		st.baseline = .Central
+	case "hanging":
+		st.baseline = .Hanging
+	case "text-before-edge", "text-top":
+		st.baseline = .Top
+	case "text-after-edge", "text-bottom", "ideographic":
+		st.baseline = .Bottom
+	case "auto", "alphabetic", "baseline":
+		st.baseline = .Alphabetic
+	case:
+		svg_warn(p, "dominant-baseline=%q is not supported", v)
+	}
+}
+
+@(private)
+svg_copy_baseline :: proc(st, from: ^Svg_Computed) {
+	st.baseline = from.baseline
+}
+
+// Properties ovg only warns about hold nothing to copy.
+@(private)
+svg_copy_nothing :: proc(st, from: ^Svg_Computed) {}
 
 @(private)
 svg_opacity :: proc(v: string) -> f32 {

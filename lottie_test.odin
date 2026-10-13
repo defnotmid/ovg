@@ -711,3 +711,20 @@ test_lottie_web_parity :: proc(t: ^testing.T) {
 	check(t, asset_size, 10, 10, RED)
 	check(t, asset_size, 30, 30, PAPER)
 }
+
+// The Lottie tables are complete: every effect kind reads at most
+// LOTTIE_EFFECT_MAX_PARAMS controls and has a distinct type number; every
+// animator property has a file key.
+@(test)
+test_lottie_tables :: proc(t: ^testing.T) {
+	effects := LOTTIE_EFFECTS
+	for info, kind in effects {
+		testing.expectf(t, int(info.count) <= LOTTIE_EFFECT_MAX_PARAMS && info.type_id > 0, "%v: bad row", kind)
+		for other, k2 in effects {
+			testing.expectf(t, k2 == kind || other.type_id != info.type_id, "%v and %v share type %d", kind, k2, info.type_id)
+		}
+	}
+	for info, prop in LOTTIE_ANIMATOR_PROPS {
+		testing.expectf(t, info.key != "", "%v: no key", prop)
+	}
+}

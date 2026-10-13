@@ -59,93 +59,25 @@ Svg_Prop :: enum u8 {
 @(private)
 Svg_Decls :: [Svg_Prop]string
 
+// Other names of a property (svg_props holds each one's main name).
+@(private)
+SVG_PROP_ALIASES :: [?]struct {
+	name: string,
+	prop: Svg_Prop,
+}{{"marker-start", .Marker}, {"marker-mid", .Marker}, {"marker-end", .Marker}}
+
+// The property named `name`.
 @(private)
 svg_prop_from_name :: proc(name: string) -> (Svg_Prop, bool) {
-	switch name {
-	case "fill":
-		return .Fill, true
-	case "fill-opacity":
-		return .Fill_Opacity, true
-	case "fill-rule":
-		return .Fill_Rule, true
-	case "stroke":
-		return .Stroke, true
-	case "stroke-opacity":
-		return .Stroke_Opacity, true
-	case "stroke-width":
-		return .Stroke_Width, true
-	case "stroke-linecap":
-		return .Stroke_Linecap, true
-	case "stroke-linejoin":
-		return .Stroke_Linejoin, true
-	case "stroke-miterlimit":
-		return .Stroke_Miterlimit, true
-	case "stroke-dasharray":
-		return .Stroke_Dasharray, true
-	case "stroke-dashoffset":
-		return .Stroke_Dashoffset, true
-	case "opacity":
-		return .Opacity, true
-	case "visibility":
-		return .Visibility, true
-	case "display":
-		return .Display, true
-	case "color":
-		return .Color, true
-	case "font-family":
-		return .Font_Family, true
-	case "font-size":
-		return .Font_Size, true
-	case "font-weight":
-		return .Font_Weight, true
-	case "font-style":
-		return .Font_Style, true
-	case "text-anchor":
-		return .Text_Anchor, true
-	case "dominant-baseline":
-		return .Dominant_Baseline, true
-	case "alignment-baseline":
-		return .Alignment_Baseline, true
-	case "letter-spacing":
-		return .Letter_Spacing, true
-	case "clip-path":
-		return .Clip_Path, true
-	case "clip-rule":
-		return .Clip_Rule, true
-	case "mask":
-		return .Mask, true
-	case "mask-type":
-		return .Mask_Type, true
-	case "filter":
-		return .Filter, true
-	case "mix-blend-mode":
-		return .Mix_Blend_Mode, true
-	case "isolation":
-		return .Isolation, true
-	case "stop-color":
-		return .Stop_Color, true
-	case "stop-opacity":
-		return .Stop_Opacity, true
-	case "flood-color":
-		return .Flood_Color, true
-	case "flood-opacity":
-		return .Flood_Opacity, true
-	case "lighting-color":
-		return .Lighting_Color, true
-	case "shape-rendering":
-		return .Shape_Rendering, true
-	case "overflow":
-		return .Overflow, true
-	case "color-interpolation-filters":
-		return .Color_Interpolation_Filters, true
-	case "transform":
-		return .Transform, true
-	case "marker", "marker-start", "marker-mid", "marker-end":
-		return .Marker, true
-	case "text-decoration":
-		return .Text_Decoration, true
-	case "paint-order":
-		return .Paint_Order, true
+	for info, prop in svg_props {
+		if info.name == name {
+			return prop, true
+		}
+	}
+	for alias in SVG_PROP_ALIASES {
+		if alias.name == name {
+			return alias.prop, true
+		}
 	}
 	return {}, false
 }
