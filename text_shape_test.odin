@@ -2,6 +2,7 @@ package ovg
 
 import "core:log"
 import "core:os"
+import "core:mem"
 import "core:testing"
 import "core:unicode/utf8"
 
@@ -244,4 +245,32 @@ test_bidi_levels :: proc(t: ^testing.T) {
 	for c in cases {
 		testing.expectf(t, levels(c.text) == c.want, "%q: got %s, want %s", c.text, levels(c.text), c.want)
 	}
+}
+
+// Once warm, laying out text allocates nothing: shaped segments come from
+// the cache, fallback and bidi included.
+@(test)
+test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	fx_add_noto(t, &s, "NotoSansArabic-Regular.ttf")
+	lines := [?]string{"The quick brown fox, 1234.", "office affinity AVAT", "abc مرحبا 42 def"}
+	for _ in 0 ..< 3 {
+		for line in lines {
+			fx_layout(&s, line, "Bitstream Vera Sans")
+		}
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		for _ in 0 ..< 10 {
+			for line in lines {
+				fx_layout(&s, line, "Bitstream Vera Sans")
+			}
+		}
+	}
+	testing.expect_value(t, track.total_allocation_count, 0)
 }

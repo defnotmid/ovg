@@ -624,6 +624,7 @@ Paints:
 odin test . -vet -strict-style                        # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
+odin run tools/bench -o:speed                         # CPU time and allocations per warm frame, generated workloads
 odin check sdlgpu -no-entry-point -vet -strict-style  # SDL_GPU backend
 odin run tools/sdlgpu_parity -- out_dir               # SDL_GPU vs software, headless
 odin check sdlgpu -no-entry-point -target:darwin_arm64    # macOS / Windows compile

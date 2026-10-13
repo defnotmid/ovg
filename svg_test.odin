@@ -1,5 +1,6 @@
 package ovg
 
+import "core:mem"
 import "core:testing"
 
 // SVG import: parsing into the document tables, then drawing on the
@@ -356,4 +357,43 @@ test_svg_blur_axis_scale :: proc(t: ^testing.T) {
 	right := svg_px(&s, 68, 30)
 	testing.expectf(t, below.r > 245, "below the edge: %v", below)
 	testing.expectf(t, right.r < 230, "right of the edge: %v", right)
+}
+
+// Once warm, drawing a document allocates nothing: shapes, gradients, a
+// dashed stroke, group opacity, a clip, a mask, a filter, text and an
+// override that moves every frame.
+@(test)
+test_svg_no_allocation_when_warm :: proc(t: ^testing.T) {
+	s: Svg_Fx
+	defer svg_fx_close(&s)
+	err := svg_fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">
+		<defs>
+			<linearGradient id="g"><stop offset="0" stop-color="red"/><stop offset="0.5" stop-color="lime" stop-opacity="0.5"/><stop offset="1" stop-color="blue"/></linearGradient>
+			<clipPath id="c"><circle cx="20" cy="20" r="18"/></clipPath>
+			<mask id="m"><rect width="64" height="64" fill="white"/><circle cx="40" cy="40" r="8" fill="black"/></mask>
+			<filter id="f"><feGaussianBlur stdDeviation="1.5"/><feOffset dx="2" dy="2"/></filter>
+		</defs>
+		<g id="spin" opacity="0.8"><rect width="40" height="40" fill="url(#g)" stroke="black" stroke-dasharray="3 2"/></g>
+		<g clip-path="url(#c)"><rect width="64" height="64" fill="orange"/></g>
+		<g mask="url(#m)" filter="url(#f)"><circle cx="40" cy="40" r="16" fill="purple"/></g>
+		<text x="4" y="60" font-size="10">Warm <tspan font-weight="bold">text</tspan></text>
+		</svg>`)
+	testing.expect_value(t, err, Svg_Error.None)
+	draw :: proc(s: ^Svg_Fx, i: int) {
+		ovs := [?]Svg_Override{{id = "spin", transform = transform_rotation(f32(i) * 0.05)}}
+		svg_fx_draw(s, ovs[:])
+	}
+	for i in 0 ..< 30 {
+		draw(&s, i)
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		for i in 0 ..< 30 {
+			draw(&s, i)
+		}
+	}
+	testing.expect_value(t, track.total_allocation_count, 0)
 }

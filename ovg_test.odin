@@ -1,6 +1,7 @@
 package ovg
 
 import "core:math"
+import "core:mem"
 import "core:testing"
 
 // ---- helpers ------------------------------------------------------------------
@@ -824,4 +825,59 @@ test_sw_glyph_outline_area :: proc(t: ^testing.T) {
 	}
 	area = abs(area)
 	testing.expectf(t, abs(covered - area) < 0.05 * perimeter, "glyph ink %v vs area %v (perimeter %v)", covered, area, perimeter)
+}
+
+// Once warm, a canvas frame allocates nothing: multi-stop gradients, dashed
+// strokes, nested translucent and blurred layers, text outlines.
+@(test)
+test_sw_no_allocation_when_warm :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	l: Text_Layout
+	defer text_layout_destroy(&l)
+	frame :: proc(c: ^Canvas, ls: ^Layer_Stack, p: ^Path, fonts: ^Font_Collection, l: ^Text_Layout, i: int) {
+		clear_rect(c, 0, 0, 64, 64, WHITE)
+		layer_stack_begin(ls, c, 64, 64)
+		stops := [?]Gradient_Stop{{0, rgb(255, 0, 0)}, {0.5, rgba(0, 255, 0, 128)}, {1, rgb(0, 0, 255)}}
+		layer_push(ls, c, {opacity = 0.8})
+		layer_push(ls, c, {blur = 1})
+		path_reset(p)
+		path_rounded_rect(p, 4 + f32(i % 4), 4, 40, 30, 6)
+		fill_path(c, p, paint_linear_gradient_stops(0, 0, 64, 0, stops[:]))
+		st := paint_color(BLACK)
+		st.stroke.line_width = 2
+		dash := [?]f32{3, 2}
+		st.stroke.dash = dash[:]
+		stroke_path(c, p, st)
+		layer_pop(ls, c)
+		layer_pop(ls, c)
+		text_layout(fonts, {{text = "warm frame", style = {size = 12}}}, {x = 4, y = 56}, l)
+		for run in l.runs {
+			fill_glyph_outlines(c, run.font, l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), p)
+		}
+		layer_stack_end(ls, c)
+		flush(c)
+	}
+	for i in 0 ..< 30 {
+		frame(c, &ls, &p, &fonts, &l, i)
+	}
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	{
+		context.allocator = mem.tracking_allocator(&track)
+		for i in 0 ..< 30 {
+			frame(c, &ls, &p, &fonts, &l, i)
+		}
+	}
+	testing.expect_value(t, track.total_allocation_count, 0)
 }
