@@ -28,6 +28,8 @@ Lottie_Text_Scratch :: struct {
 	// selector's share.
 	shift:     [dynamic]f32,
 	mults:     [dynamic]f32,
+	// Per animator: its properties at the frame.
+	values:    [dynamic]Lottie_Animator_Values,
 	// The collection used without `Lottie_Renderer.fonts`.
 	own_fonts: Font_Collection,
 }
@@ -59,6 +61,7 @@ lottie_text_scratch_destroy :: proc(s: ^Lottie_Text_Scratch) {
 	delete(s.letters)
 	delete(s.shift)
 	delete(s.mults)
+	delete(s.values)
 	if s.own_fonts.fallback.font.data != nil {
 		font_collection_destroy(&s.own_fonts)
 	}
@@ -444,6 +447,24 @@ lottie_note_missing :: proc(r: ^Lottie_Renderer, family: string) {
 	append(&r.missing, family)
 }
 
+// An animator's properties evaluated at one frame (they don't vary by
+// letter): each value as many floats as its property has (`dims`, 0 when
+// absent: the table's default).
+@(private)
+Lottie_Animator_Values :: struct {
+	v:    [Lottie_Animator_Prop][4]f32,
+	dims: [Lottie_Animator_Prop]u8,
+}
+
+@(private)
+lottie_animator_values :: proc(doc: ^Lottie_Document, a: ^Lottie_Text_Animator, t: f32) -> (out: Lottie_Animator_Values) {
+	for info, k in LOTTIE_ANIMATOR_PROPS {
+		out.v[k] = info.default
+		out.dims[k] = u8(lottie_eval(doc, a.props[k], t, out.v[k][:]))
+	}
+	return
+}
+
 // Each letter's matrix, opacity and colours under the layer's animators
 // (lottie-web's TextAnimatorProperty.getMeasures without a path).
 @(private)
@@ -457,6 +478,11 @@ lottie_text_animate :: proc(d: ^Lottie_Draw, txt: ^Lottie_Text, td: ^Lottie_Text
 		lt.m = TRANSFORM_IDENTITY
 		lt.opacity = 1
 		lt.fill, lt.stroke, lt.stroke_width = fill, stroke, td.stroke_width
+	}
+	resize(&s.values, len(animators))
+	values := s.values[:]
+	for &a, j in animators {
+		values[j] = lottie_animator_values(doc, &a, t)
 	}
 	// Per letter: the summed tracking shift, then the animators' changes.
 	resize(&s.shift, len(letters))
@@ -488,15 +514,16 @@ lottie_text_animate :: proc(d: ^Lottie_Draw, txt: ^Lottie_Text, td: ^Lottie_Text
 		}
 		total := ind
 		div: f32 = 1 if a.index_units else 100 / max(total, 1)
-		o := lottie_eval1(doc, a.offset, t, 0) / div
+		v := &values[j].v
+		o := v[.Offset].x / div
 		sel := Lottie_Selector {
 			shape      = a.shape,
-			start      = lottie_eval1(doc, a.start, t, 0) / div + o,
-			end        = lottie_eval1(doc, a.end, t, 100) / div + o,
-			amount     = lottie_eval1(doc, a.amount, t, 100) / 100,
-			ease_high  = lottie_eval1(doc, a.ease_high, t, 0),
-			ease_low   = lottie_eval1(doc, a.ease_low, t, 0),
-			smoothness = lottie_eval1(doc, a.smoothness, t, 100),
+			start      = v[.Start].x / div + o,
+			end        = v[.End].x / div + o,
+			amount     = v[.Amount].x / 100,
+			ease_high  = v[.Ease_High].x,
+			ease_low   = v[.Ease_Low].x,
+			smoothness = v[.Smoothness].x,
 		}
 		if sel.start > sel.end {
 			sel.start, sel.end = sel.end, sel.start
@@ -528,8 +555,8 @@ lottie_text_animate :: proc(d: ^Lottie_Draw, txt: ^Lottie_Text, td: ^Lottie_Text
 		}
 		if i > line_start || td.justify != .Left {
 			for &a, j in animators {
-				if a.tracking >= 0 {
-					tv := lottie_eval1(doc, a.tracking, t, 0)
+				if a.props[.Tracking] >= 0 {
+					tv := values[j].v[.Tracking].x
 					if i == line_start && td.justify == .Center {
 						first_off -= tv * 0.5
 					}
@@ -541,6 +568,14 @@ lottie_text_animate :: proc(d: ^Lottie_Draw, txt: ^Lottie_Text, td: ^Lottie_Text
 	}
 	end_line(shift, line_start, len(letters), acc, first_off, td.justify)
 
+	// A colour animated over the letter's: the channels the property has.
+	toward :: proc(cur: Color, v: [4]f32, dims: u8, mult: f32) -> Color {
+		c := transmute([4]f32)cur
+		for k in 0 ..< min(int(dims), 3) {
+			c[k] += (v[k] - c[k]) * mult
+		}
+		return transmute(Color)c
+	}
 	for &lt, i in letters {
 		if lt.newline {
 			continue
@@ -553,53 +588,46 @@ lottie_text_animate :: proc(d: ^Lottie_Draw, txt: ^Lottie_Text, td: ^Lottie_Text
 		pivot.y += align.y * y_off * 0.01
 		m := transform_translation(-pivot.x, -pivot.y)
 		for &a, j in animators {
-			if a.anchor >= 0 {
-				v := lottie_eval2(doc, a.anchor, t, {})
+			if a.props[.Anchor] >= 0 {
+				v := values[j].v[.Anchor]
 				m = transform_multiply(m, transform_translation(-v.x * mult[j], -v.y * mult[j]))
 			}
 		}
 		for &a, j in animators {
-			if a.scale >= 0 {
-				v := lottie_eval2(doc, a.scale, t, {100, 100}) / 100
+			if a.props[.Scale] >= 0 {
+				v := values[j].v[.Scale].xy / 100
 				m = transform_multiply(m, transform_scaling(1 + (v.x - 1) * mult[j], 1 + (v.y - 1) * mult[j]))
 			}
 		}
 		for &a, j in animators {
-			if a.skew >= 0 {
-				sk := lottie_eval1(doc, a.skew, t, 0) * math.RAD_PER_DEG * mult[j]
-				sa := lottie_eval1(doc, a.skew_axis, t, 0) * math.RAD_PER_DEG * mult[j]
+			v := &values[j]
+			if a.props[.Skew] >= 0 {
+				sk := v.v[.Skew].x * math.RAD_PER_DEG * mult[j]
+				sa := v.v[.Skew_Axis].x * math.RAD_PER_DEG * mult[j]
 				m = transform_multiply(m, transform_rotation(sa))
 				m = transform_multiply(m, transform_skew_x(-sk))
 				m = transform_multiply(m, transform_rotation(-sa))
 			}
-			if a.rotation >= 0 {
-				m = transform_multiply(m, transform_rotation(lottie_eval1(doc, a.rotation, t, 0) * math.RAD_PER_DEG * mult[j]))
+			if a.props[.Rotation] >= 0 {
+				m = transform_multiply(m, transform_rotation(v.v[.Rotation].x * math.RAD_PER_DEG * mult[j]))
 			}
-			if a.opacity >= 0 {
-				o := lottie_eval1(doc, a.opacity, t, 100) / 100
+			if a.props[.Opacity] >= 0 {
+				o := v.v[.Opacity].x / 100
 				lt.opacity += (o * mult[j] - lt.opacity) * mult[j]
 			}
-			if a.stroke_width >= 0 {
-				lt.stroke_width += lottie_eval1(doc, a.stroke_width, t, 0) * mult[j]
+			if a.props[.Stroke_Width] >= 0 {
+				lt.stroke_width += v.v[.Stroke_Width].x * mult[j]
 			}
-			if a.stroke >= 0 {
-				v := [4]f32{lt.stroke.r, lt.stroke.g, lt.stroke.b, 1}
-				lottie_eval(doc, a.stroke, t, v[:])
-				cur := transmute([4]f32)lt.stroke
-				cur.rgb += (v.rgb - cur.rgb) * mult[j]
-				lt.stroke = transmute(Color)cur
+			if a.props[.Stroke] >= 0 {
+				lt.stroke = toward(lt.stroke, v.v[.Stroke], v.dims[.Stroke], mult[j])
 			}
-			if a.fill >= 0 {
-				v := [4]f32{lt.fill.r, lt.fill.g, lt.fill.b, 1}
-				lottie_eval(doc, a.fill, t, v[:])
-				cur := transmute([4]f32)lt.fill
-				cur.rgb += (v.rgb - cur.rgb) * mult[j]
-				lt.fill = transmute(Color)cur
+			if a.props[.Fill] >= 0 {
+				lt.fill = toward(lt.fill, v.v[.Fill], v.dims[.Fill], mult[j])
 			}
 		}
 		for &a, j in animators {
-			if a.position >= 0 {
-				v := lottie_eval2(doc, a.position, t, {})
+			if a.props[.Position] >= 0 {
+				v := values[j].v[.Position]
 				m = transform_multiply(m, transform_translation(v.x * mult[j], v.y * mult[j]))
 			}
 		}

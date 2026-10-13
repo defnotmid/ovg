@@ -331,28 +331,64 @@ Lottie_Selector_Shape :: enum u8 {
 Lottie_Text_Animator :: struct {
 	// Range selector: 1 characters, 2 characters excluding spaces, 3
 	// words, 4 lines.
-	based_on:     u8,
-	shape:        Lottie_Selector_Shape,
+	based_on:    u8,
+	shape:       Lottie_Selector_Shape,
 	// Start / end / offset in indices rather than percent.
-	index_units:  bool,
-	start:        i32,
-	end:          i32,
-	offset:       i32,
-	amount:       i32,
-	ease_high:    i32,
-	ease_low:     i32,
-	smoothness:   i32,
-	anchor:       i32,
-	position:     i32,
-	scale:        i32,
-	rotation:     i32,
-	skew:         i32,
-	skew_axis:    i32,
-	opacity:      i32,
-	fill:         i32,
-	stroke:       i32,
-	stroke_width: i32,
-	tracking:     i32,
+	index_units: bool,
+	// Into props, -1 when absent.
+	props:       [Lottie_Animator_Prop]i32,
+}
+
+// A text animator's properties: its range selector's, then the letter
+// properties it animates.
+Lottie_Animator_Prop :: enum u8 {
+	Start,
+	End,
+	Offset,
+	Amount,
+	Ease_High,
+	Ease_Low,
+	Smoothness,
+	Anchor,
+	Position,
+	Scale,
+	Rotation,
+	Skew,
+	Skew_Axis,
+	Opacity,
+	Fill,
+	Stroke,
+	Stroke_Width,
+	Tracking,
+}
+
+// Where each animator property is in the file (the selector object "s" or
+// the properties object "a") and its value when absent.
+Lottie_Animator_Prop_Info :: struct {
+	key:      string,
+	selector: bool,
+	default:  [4]f32,
+}
+
+LOTTIE_ANIMATOR_PROPS :: [Lottie_Animator_Prop]Lottie_Animator_Prop_Info {
+	.Start        = {"s", true, {}},
+	.End          = {"e", true, {100, 0, 0, 0}},
+	.Offset       = {"o", true, {}},
+	.Amount       = {"a", true, {100, 0, 0, 0}},
+	.Ease_High    = {"xe", true, {}},
+	.Ease_Low     = {"ne", true, {}},
+	.Smoothness   = {"sm", true, {100, 0, 0, 0}},
+	.Anchor       = {"a", false, {}},
+	.Position     = {"p", false, {}},
+	.Scale        = {"s", false, {100, 100, 0, 0}},
+	.Rotation     = {"r", false, {}},
+	.Skew         = {"sk", false, {}},
+	.Skew_Axis    = {"sa", false, {}},
+	.Opacity      = {"o", false, {100, 0, 0, 0}},
+	.Fill         = {"fc", false, {0, 0, 0, 1}},
+	.Stroke       = {"sc", false, {0, 0, 0, 1}},
+	.Stroke_Width = {"sw", false, {}},
+	.Tracking     = {"t", false, {}},
 }
 
 Lottie_Comp :: struct {
@@ -1259,30 +1295,15 @@ lottie_parse_text :: proc(p: ^Lottie_Parser, t: json.Object) -> i32 {
 		}
 		props := lj_obj(ao, "a")
 		a := Lottie_Text_Animator {
-			based_on     = u8(clamp(lj_num(so, "b", 1), 1, 4)),
-			shape        = Lottie_Selector_Shape(clamp(int(lj_num(so, "sh", 1)), 1, 6)),
-			index_units  = lj_num(so, "r", 1) == 2,
-			start        = lottie_parse_prop(p, so["s"], .Number),
-			end          = lottie_parse_prop(p, so["e"], .Number),
-			offset       = lottie_parse_prop(p, so["o"], .Number),
-			amount       = lottie_parse_prop(p, so["a"], .Number),
-			ease_high    = lottie_parse_prop(p, so["xe"], .Number),
-			ease_low     = lottie_parse_prop(p, so["ne"], .Number),
-			smoothness   = lottie_parse_prop(p, so["sm"], .Number),
-			anchor       = lottie_parse_prop(p, props["a"], .Number),
-			position     = lottie_parse_prop(p, props["p"], .Number),
-			scale        = lottie_parse_prop(p, props["s"], .Number),
-			rotation     = lottie_parse_prop(p, props["r"], .Number),
-			skew         = lottie_parse_prop(p, props["sk"], .Number),
-			skew_axis    = lottie_parse_prop(p, props["sa"], .Number),
-			opacity      = lottie_parse_prop(p, props["o"], .Number),
-			fill         = lottie_parse_prop(p, props["fc"], .Number),
-			stroke       = lottie_parse_prop(p, props["sc"], .Number),
-			stroke_width = lottie_parse_prop(p, props["sw"], .Number),
-			tracking     = lottie_parse_prop(p, props["t"], .Number),
+			based_on    = u8(clamp(lj_num(so, "b", 1), 1, 4)),
+			shape       = Lottie_Selector_Shape(clamp(int(lj_num(so, "sh", 1)), 1, 6)),
+			index_units = lj_num(so, "r", 1) == 2,
 		}
-		if a.rotation < 0 {
-			a.rotation = lottie_parse_prop(p, props["rz"], .Number)
+		for info, k in LOTTIE_ANIMATOR_PROPS {
+			a.props[k] = lottie_parse_prop(p, (so if info.selector else props)[info.key], .Number)
+		}
+		if a.props[.Rotation] < 0 {
+			a.props[.Rotation] = lottie_parse_prop(p, props["rz"], .Number)
 		}
 		if lj_has(props, "rx") || lj_has(props, "ry") {
 			lottie_warn(p, "3D text animator rotation is drawn flat")
