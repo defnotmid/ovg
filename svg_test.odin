@@ -14,6 +14,7 @@ Svg_Fx :: struct {
 	r:       Svg_Renderer,
 	fonts:   Font_Collection,
 	doc:     Svg_Document,
+	text:    Svg_Layout,
 }
 
 @(private = "file")
@@ -21,15 +22,16 @@ svg_fx_open :: proc(s: ^Svg_Fx, markup: string) -> Svg_Error {
 	software_backend_init(&s.backend)
 	canvas_init(&s.canvas, software_backend(&s.backend))
 	font_collection_init(&s.fonts)
-	s.r.fonts = &s.fonts
 	err: Svg_Error
 	s.doc, err = svg_parse(transmute([]u8)markup, {fonts = &s.fonts})
+	svg_layout(&s.doc, &s.fonts, &s.text)
 	return err
 }
 
 @(private = "file")
 svg_fx_close :: proc(s: ^Svg_Fx) {
 	svg_renderer_destroy(&s.r, &s.canvas)
+	svg_layout_destroy(&s.text)
 	svg_destroy(&s.doc)
 	layer_stack_destroy(&s.layers, &s.canvas)
 	canvas_destroy(&s.canvas)
@@ -44,7 +46,7 @@ svg_fx_draw :: proc(s: ^Svg_Fx, overrides: []Svg_Override = nil) {
 	set_size(&s.canvas, w, h)
 	clear_rect(&s.canvas, 0, 0, w, h, WHITE)
 	layer_stack_begin(&s.layers, &s.canvas, w, h, nil, s.doc.uses_blend)
-	svg_draw(&s.canvas, &s.layers, &s.r, &s.doc, TRANSFORM_IDENTITY, overrides)
+	svg_draw(&s.canvas, &s.layers, &s.r, &s.doc, &s.text, TRANSFORM_IDENTITY, overrides)
 	layer_stack_end(&s.layers, &s.canvas)
 	flush(&s.canvas)
 }

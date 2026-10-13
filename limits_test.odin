@@ -50,11 +50,13 @@ svg_hostile :: proc(t: ^testing.T, s: ^Limits_Fx, markup: string, loc := #caller
 	defer svg_destroy(&doc)
 	testing.expect_value(t, err, Svg_Error.None, loc = loc)
 	r: Svg_Renderer
-	r.fonts = &fonts
 	defer svg_renderer_destroy(&r, &s.canvas)
+	text: Svg_Layout
+	svg_layout(&doc, &fonts, &text)
+	defer svg_layout_destroy(&text)
 	clear_rect(&s.canvas, 0, 0, 64, 64, WHITE)
 	layer_stack_begin(&s.layers, &s.canvas, 64, 64, nil, doc.uses_blend)
-	svg_draw(&s.canvas, &s.layers, &r, &doc)
+	svg_draw(&s.canvas, &s.layers, &r, &doc, &text)
 	layer_stack_end(&s.layers, &s.canvas)
 	flush(&s.canvas)
 	return strings.join(doc.warnings[:], "\n", context.temp_allocator)

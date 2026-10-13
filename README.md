@@ -279,20 +279,25 @@ flat tables of nodes (parent / first child / next indices, local transform,
 object bounding box, effects by index), shapes (path data stored once in
 shared verb / coordinate arrays, computed style), text chunks and pieces,
 images and decoded bitmaps, paint servers and stops, clip paths, masks,
-filters, dashes, element ids (`id_map`) and a string arena. `svg_draw`
-(`svg_draw.odin`) walks the tables and issues canvas and layer calls; the
-document is read-only while drawing, so many canvases (threads) can draw one
-document, each with its own `Svg_Renderer` (scratch paths, text layout,
-override table, image ids).
+filters, dashes, element ids (`id_map`) and a string arena. `svg_layout`
+lays the document's text out with a `Font_Collection` into an `Svg_Layout`
+(positioned glyphs, runs per text), again only when the document or the
+fonts change. `svg_draw` (`svg_draw.odin`) walks the tables with that
+layout and issues canvas and layer calls; document and layout are
+read-only while drawing, so many canvases (threads) can draw one document,
+each with its own `Svg_Renderer` (scratch paths, override table, image
+ids).
 
 ```odin
 doc, err := vg.svg_parse(data, {load_file = my_loader, fonts = &fonts})
 defer vg.svg_destroy(&doc)
+text: vg.Svg_Layout                       // the text laid out: once per document and fonts
+vg.svg_layout(&doc, &fonts, &text)
+defer vg.svg_layout_destroy(&text)
 r: vg.Svg_Renderer
-r.fonts = &fonts
 vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
 ovs := [?]vg.Svg_Override{{id = "wing", transform = vg.transform_rotation(a)}, {id = "sun", fill = vg.RED}}
-vg.svg_draw(&c, &ls, &r, &doc, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
+vg.svg_draw(&c, &ls, &r, &doc, &text, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
 vg.layer_stack_end(&ls, &c)
 ```
 

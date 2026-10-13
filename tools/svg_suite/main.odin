@@ -123,7 +123,6 @@ main :: proc() {
 	ls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&ls, &c)
 	r: vg.Svg_Renderer
-	r.fonts = &fonts
 	defer vg.svg_renderer_destroy(&r, &c)
 
 	results := make([dynamic]Result)
@@ -238,13 +237,16 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 	loader := Loader{filepath.dir(svg_path)}
 	doc, perr2 := vg.svg_parse(data, {load_file = load_file, user = &loader, fonts = fonts})
 	defer vg.svg_destroy(&doc)
+	text: vg.Svg_Layout
+	vg.svg_layout(&doc, fonts, &text)
+	defer vg.svg_layout_destroy(&text)
 
 	vg.set_size(c, w, h)
 	vg.reset(c)
 	vg.clear_rect(c, 0, 0, w, h, vg.TRANSPARENT)
 	if perr2 == .None && doc.width > 0 && doc.height > 0 {
 		vg.layer_stack_begin(ls, c, w, h, nil, doc.uses_blend)
-		vg.svg_draw(c, ls, r, &doc, vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height))
+		vg.svg_draw(c, ls, r, &doc, &text, vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height))
 		vg.layer_stack_end(ls, c)
 	}
 	vg.flush(c)
@@ -319,8 +321,10 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	rls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&rls, &rc)
 	rr: vg.Svg_Renderer
-	rr.fonts = fonts
 	defer vg.svg_renderer_destroy(&rr, &rc)
+	text: vg.Svg_Layout
+	vg.svg_layout(&doc, fonts, &text)
+	defer vg.svg_layout_destroy(&text)
 	frame: vg.Recorded_Frame
 	defer vg.recorded_frame_destroy(&frame)
 	record_best := max(f64)
@@ -328,7 +332,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		t0 := time.tick_now()
 		vg.set_size(&rc, w, h)
 		vg.layer_stack_begin(&rls, &rc, w, h, nil, doc.uses_blend)
-		vg.svg_draw(&rc, &rls, &rr, &doc, xf)
+		vg.svg_draw(&rc, &rls, &rr, &doc, &text, xf)
 		vg.layer_stack_end(&rls, &rc)
 		vg.canvas_take(&rc, &frame)
 		record_best = min(record_best, time.duration_milliseconds(time.tick_since(t0)))
@@ -343,7 +347,6 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	ls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&ls, &c)
 	r: vg.Svg_Renderer
-	r.fonts = fonts
 	defer vg.svg_renderer_destroy(&r, &c)
 	sw_best := max(f64)
 	for _ in 0 ..< max(n / 4, 1) {
@@ -351,7 +354,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		vg.set_size(&c, w, h)
 		vg.clear_rect(&c, 0, 0, w, h, vg.WHITE)
 		vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
-		vg.svg_draw(&c, &ls, &r, &doc, xf)
+		vg.svg_draw(&c, &ls, &r, &doc, &text, xf)
 		vg.layer_stack_end(&ls, &c)
 		vg.flush(&c)
 		sw_best = min(sw_best, time.duration_milliseconds(time.tick_since(t0)))

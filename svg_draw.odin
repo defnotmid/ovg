@@ -1,6 +1,7 @@
 package ovg
 
 import "core:math"
+import "core:slice"
 
 // Drawing an `Svg_Document` (svg.odin): a walk over its node table that
 // issues canvas and layer calls. Group opacity, clip paths, masks, filters
@@ -30,34 +31,91 @@ Svg_Override :: struct {
 }
 
 // Per-canvas drawing state, reused across draws (no allocation per element
-// once warm). Set `fonts` before drawing text.
+// once warm).
 Svg_Renderer :: struct {
-	fonts:       ^Font_Collection,
 	path:        Path,
 	clip:        Path,
 	// Per document id: the override index, or -1.
 	override_of: [dynamic]i32,
-	text:        Text_Layout,
-	pieces:      [dynamic]Text_Piece,
 	// Canvas images of document bitmaps, by pixel address (and nearest).
 	images:      map[uintptr]Image_Id,
-	// Font families text asked for that the collection lacks (strings
-	// owned by the documents), for the host to report.
-	missing:     [dynamic]string,
 }
 
 svg_renderer_destroy :: proc(r: ^Svg_Renderer, c: ^Canvas) {
 	path_destroy(&r.path)
 	path_destroy(&r.clip)
 	delete(r.override_of)
-	text_layout_destroy(&r.text)
-	delete(r.pieces)
 	for _, id in r.images {
 		delete_image(c, id)
 	}
 	delete(r.images)
-	delete(r.missing)
 	r^ = {}
+}
+
+// ---- text layout ----------------------------------------------------------------------
+
+// A document's text laid out with a font collection (`svg_layout`), the
+// stage between parsing and drawing: data out of layout, data in to
+// `svg_draw`. Positioned glyphs in one array, runs of one face over it,
+// and per document text (`doc.texts` order) its range of runs. The fonts
+// are borrowed: lay out again after the collection changes (faces added,
+// the emoji face set) and for each document.
+Svg_Layout :: struct {
+	glyphs:  [dynamic]Positioned_Glyph,
+	runs:    [dynamic]Svg_Glyph_Run,
+	texts:   [dynamic]Range,
+	// Font families the text asks for that the collection lacks (strings
+	// owned by the document), for the host to report.
+	missing: [dynamic]string,
+	// Scratch of the stage.
+	line:    Text_Layout,
+	pieces:  [dynamic]Text_Piece,
+}
+
+// Glyphs of one face and one document piece (`doc.pieces[piece]`, whose
+// style paints them).
+Svg_Glyph_Run :: struct {
+	font:   ^Font,
+	em:     f32, // font units to pixels
+	glyphs: Range,
+	piece:  u32,
+}
+
+// Lays out every text of `doc` with `fonts` into `out` (cleared first).
+svg_layout :: proc(doc: ^Svg_Document, fonts: ^Font_Collection, out: ^Svg_Layout) {
+	clear(&out.glyphs)
+	clear(&out.runs)
+	clear(&out.texts)
+	clear(&out.missing)
+	for &t in doc.texts {
+		first := len(out.runs)
+		pen: Vec2
+		for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
+			ch := &doc.chunks[ci]
+			pen = svg_layout_chunk(fonts, doc, ch, pen, &out.line, &out.pieces)
+			for family in out.line.missing {
+				if family != "" && !slice.contains(out.missing[:], family) {
+					append(&out.missing, family)
+				}
+			}
+			for run in out.line.runs {
+				start := len(out.glyphs)
+				append(&out.glyphs, ..out.line.glyphs[run.first:][:run.count])
+				append(&out.runs, Svg_Glyph_Run{run.font, run.em, {u32(start), u32(run.count)}, ch.pieces.start + run.paint})
+			}
+		}
+		append(&out.texts, Range{u32(first), u32(len(out.runs) - first)})
+	}
+}
+
+svg_layout_destroy :: proc(l: ^Svg_Layout) {
+	delete(l.glyphs)
+	delete(l.runs)
+	delete(l.texts)
+	delete(l.missing)
+	text_layout_destroy(&l.line)
+	delete(l.pieces)
+	l^ = {}
 }
 
 // Frees the canvas images made for `doc` (call before destroying a
@@ -78,7 +136,7 @@ svg_renderer_release :: proc(r: ^Svg_Renderer, c: ^Canvas, doc: ^Svg_Document) {
 // `transform` before the canvas's current transform. Effects need the
 // layer stack begun for the frame (`layer_stack_begin`, with a root layer
 // when `doc.uses_blend` and the target is the screen).
-svg_draw :: proc(c: ^Canvas, ls: ^Layer_Stack, r: ^Svg_Renderer, doc: ^Svg_Document, transform := TRANSFORM_IDENTITY, overrides: []Svg_Override = nil) {
+svg_draw :: proc(c: ^Canvas, ls: ^Layer_Stack, r: ^Svg_Renderer, doc: ^Svg_Document, text: ^Svg_Layout, transform := TRANSFORM_IDENTITY, overrides: []Svg_Override = nil) {
 	if len(doc.nodes) == 0 {
 		return
 	}
@@ -98,6 +156,7 @@ svg_draw :: proc(c: ^Canvas, ls: ^Layer_Stack, r: ^Svg_Renderer, doc: ^Svg_Docum
 		ls        = ls,
 		r         = r,
 		doc       = doc,
+		text      = text,
 		overrides = overrides,
 	}
 	save(c)
@@ -112,6 +171,8 @@ Svg_Draw :: struct {
 	ls:        ^Layer_Stack,
 	r:         ^Svg_Renderer,
 	doc:       ^Svg_Document,
+	// The document's text laid out (svg_layout); nil draws no text.
+	text:      ^Svg_Layout,
 	overrides: []Svg_Override,
 }
 
@@ -577,74 +638,52 @@ svg_pattern_paint :: proc(d: ^Svg_Draw, s: ^Svg_Server, bbox: Rect) -> (Paint, b
 
 @(private)
 svg_draw_text :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Color), clip_mode, force_visible: bool) {
-	doc, c, r := d.doc, d.c, d.r
-	if r.fonts == nil {
+	doc, c, r, text := d.doc, d.c, d.r, d.text
+	if text == nil || int(n.data) >= len(text.texts) {
 		return
 	}
-	t := &doc.texts[n.data]
-	l := &r.text
-	pen: Vec2
-	for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
-		ch := &doc.chunks[ci]
-		pen = svg_layout_chunk(r.fonts, doc, ch, pen, l, &r.pieces)
-		for family in l.missing {
-			svg_note_missing(r, family)
+	runs := text.texts[n.data]
+	for run in text.runs[runs.start:][:runs.count] {
+		pc := &doc.pieces[run.piece]
+		if pc.hidden && !force_visible {
+			continue
 		}
-		for run in l.runs {
-			pc := &doc.pieces[ch.pieces.start + run.paint]
-			if pc.hidden && !force_visible {
-				continue
+		glyphs := text.glyphs[run.glyphs.start:][:run.glyphs.count]
+		s := &pc.style
+		fo := fill_ov if pc.fill_inherited else nil
+		so := stroke_ov if pc.stroke_inherited else nil
+		fill, has_fill := svg_paint(d, s.fill, s.fill_opacity, fo, n.bbox, clip_mode)
+		fill.fill_rule = .Non_Zero
+		stroke: Paint
+		has_stroke := false
+		if !clip_mode && s.stroke_width > 0 {
+			stroke, has_stroke = svg_paint(d, s.stroke, s.stroke_opacity, so, n.bbox, false)
+			svg_stroke_settings(&stroke, s, doc, 0)
+		}
+		if pc.rotate == 0 {
+			if has_fill {
+				fill_glyph_outlines(c, run.font, glyphs, run.em, fill, &r.path)
 			}
-			glyphs := l.glyphs[run.first:][:run.count]
-			s := &pc.style
-			fo := fill_ov if pc.fill_inherited else nil
-			so := stroke_ov if pc.stroke_inherited else nil
-			fill, has_fill := svg_paint(d, s.fill, s.fill_opacity, fo, n.bbox, clip_mode)
-			fill.fill_rule = .Non_Zero
-			stroke: Paint
-			has_stroke := false
-			if !clip_mode && s.stroke_width > 0 {
-				stroke, has_stroke = svg_paint(d, s.stroke, s.stroke_opacity, so, n.bbox, false)
-				svg_stroke_settings(&stroke, s, doc, 0)
+			if has_stroke {
+				stroke_glyph_outlines(c, run.font, glyphs, run.em, stroke, &r.path)
 			}
-			if pc.rotate == 0 {
-				if has_fill {
-					fill_glyph_outlines(c, run.font, glyphs, run.em, fill, &r.path)
-				}
-				if has_stroke {
-					stroke_glyph_outlines(c, run.font, glyphs, run.em, stroke, &r.path)
-				}
-				continue
+			continue
+		}
+		// SVG rotate: each glyph turns about its own origin.
+		for g in glyphs {
+			save(c)
+			translate(c, g.x, g.y)
+			rotate(c, pc.rotate * math.RAD_PER_DEG)
+			one := [1]Positioned_Glyph{{g.glyph, 0, 0}}
+			if has_fill {
+				fill_glyph_outlines(c, run.font, one[:], run.em, fill, &r.path)
 			}
-			// SVG rotate: each glyph turns about its own origin.
-			for g in glyphs {
-				save(c)
-				translate(c, g.x, g.y)
-				rotate(c, pc.rotate * math.RAD_PER_DEG)
-				one := [1]Positioned_Glyph{{g.glyph, 0, 0}}
-				if has_fill {
-					fill_glyph_outlines(c, run.font, one[:], run.em, fill, &r.path)
-				}
-				if has_stroke {
-					stroke_glyph_outlines(c, run.font, one[:], run.em, stroke, &r.path)
-				}
-				restore(c)
+			if has_stroke {
+				stroke_glyph_outlines(c, run.font, one[:], run.em, stroke, &r.path)
 			}
+			restore(c)
 		}
 	}
-}
-
-@(private)
-svg_note_missing :: proc(r: ^Svg_Renderer, family: string) {
-	if family == "" {
-		return
-	}
-	for m in r.missing {
-		if m == family {
-			return
-		}
-	}
-	append(&r.missing, family)
 }
 
 // The canvas image of document bitmap `bm` (made once per renderer).

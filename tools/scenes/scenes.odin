@@ -41,6 +41,7 @@ Resources :: struct {
 	// The SVG scene (svg_scenes.odin), parsed on first use.
 	svg_doc:   vg.Svg_Document,
 	svg:       vg.Svg_Renderer,
+	svg_text:  vg.Svg_Layout,
 	svg_fonts: vg.Font_Collection,
 	svg_ready: bool,
 	// The emoji scene: Vera with the bundled colour emoji face.
@@ -96,6 +97,7 @@ draw_frame :: proc(c: ^vg.Canvas, s: Scene, r: ^Resources) {
 
 resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.svg_renderer_destroy(&r.svg, c)
+	vg.svg_layout_destroy(&r.svg_text)
 	vg.svg_destroy(&r.svg_doc)
 	vg.lottie_renderer_destroy(&r.lottie, c)
 	vg.lottie_destroy(&r.lottie_doc)

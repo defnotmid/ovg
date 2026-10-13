@@ -171,6 +171,7 @@ rand :: proc(r: ^Rng) -> f32 {
 Svg_Work :: struct {
 	markup:   string,
 	doc:      vg.Svg_Document,
+	text:     vg.Svg_Layout,
 	renderer: vg.Svg_Renderer,
 }
 
@@ -182,7 +183,7 @@ svg_scene_open :: proc(b: ^Bench, markup: string) -> Svg_Work {
 		os.exit(1)
 	}
 	w.doc = doc
-	w.renderer.fonts = &b.fonts
+	vg.svg_layout(&w.doc, &b.fonts, &w.text)
 	return w
 }
 
@@ -200,7 +201,7 @@ svg_draw :: proc(b: ^Bench, user: rawptr, i: int) {
 	// One part moves every frame, as a host animating by id would.
 	ovs := [?]vg.Svg_Override{{id = "g3", transform = vg.transform_rotation(f32(i) * 0.01)}}
 	xf := vg.transform_scaling(1000 / w.doc.width, 1000 / w.doc.height)
-	vg.svg_draw(&b.canvas, &b.layers, &w.renderer, &w.doc, xf, ovs[:])
+	vg.svg_draw(&b.canvas, &b.layers, &w.renderer, &w.doc, &w.text, xf, ovs[:])
 }
 
 // `n` shapes in groups of 20 under a style sheet, gradients, a pattern of
