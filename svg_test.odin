@@ -338,3 +338,22 @@ test_svg_off_bbox :: proc(t: ^testing.T) {
 	testing.expect(t, close_to(svg_px(&s, 10, 10), {0, 0, 255, 255}))
 	testing.expect(t, close_to(svg_px(&s, 50, 50), {255, 255, 255, 255}))
 }
+
+// Blur under a non-uniform scale is per axis: stdDeviation 2 under
+// scale(4, 1) is sigma 8 across and 2 down (resvg), not 5 both ways.
+@(test)
+test_svg_blur_axis_scale :: proc(t: ^testing.T) {
+	s: Svg_Fx
+	defer svg_fx_close(&s)
+	err := svg_fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80">
+		<filter id="b" filterUnits="userSpaceOnUse" x="-100" y="-100" width="400" height="400"><feGaussianBlur stdDeviation="2"/></filter>
+		<g transform="scale(4,1)"><rect x="10" y="20" width="5" height="20" filter="url(#b)"/></g></svg>`)
+	testing.expect_value(t, err, Svg_Error.None)
+	svg_fx_draw(&s)
+	// 4 px below the bottom edge (y = 40): about 2 sigma at sigma 2.
+	below := svg_px(&s, 50, 44)
+	// 8 px right of the right edge (x = 60): 1 sigma at sigma 8.
+	right := svg_px(&s, 68, 30)
+	testing.expectf(t, below.r > 245, "below the edge: %v", below)
+	testing.expectf(t, right.r < 230, "right of the edge: %v", right)
+}

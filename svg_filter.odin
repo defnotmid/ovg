@@ -224,7 +224,6 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	if len(f.primitives) == 0 {
 		return source
 	}
-	scale := transform_average_scale(xform)
 	results := make([]Image_Id, len(f.primitives), context.temp_allocator)
 	w, h := ls.window.w, ls.window.h
 	win := ls.window
@@ -296,7 +295,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		out := layer_acquire(ls, c, w, h)
 		switch p.op {
 		case .Gaussian_Blur:
-			layer_blur_into(ls, c, out, in1, p.std * scale, BLUR_MAX_EXACT_SIGMA)
+			layer_blur_into(ls, c, out, in1, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)
 		case .Offset:
 			filter_offset_into(ls, c, out, in1, offset_px(xform, p.dx, p.dy))
 		case .Flood:
@@ -320,7 +319,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 			a := layer_acquire(ls, c, w, h)
 			filter_image(c, a, Color_Matrix{ALPHA_ONLY}, in1)
 			blurred := layer_acquire(ls, c, w, h)
-			layer_blur_into(ls, c, blurred, a, p.std * scale, BLUR_MAX_EXACT_SIGMA)
+			layer_blur_into(ls, c, blurred, a, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)
 			moved := layer_acquire(ls, c, w, h)
 			filter_offset_into(ls, c, moved, blurred, offset_px(xform, p.dx, p.dy))
 			flood := layer_acquire(ls, c, w, h)
@@ -538,7 +537,6 @@ offset_px :: proc "contextless" (xform: Transform2D, dx, dy: f32) -> Vec2 {
 // arithmetic with k4 > 0). Primitives past the 64th count as unbounded.
 @(private)
 filter_reach :: proc "contextless" (f: ^Filter, xform: Transform2D) -> (reach: Vec2, bounded: bool) {
-	scale := transform_average_scale(xform)
 	axis := Vec2{math.hypot(xform[0], xform[2]), math.hypot(xform[1], xform[3])}
 	ok: u64 // bit i: primitive i's result is bounded
 	is_bounded :: proc "contextless" (ref: Filter_Ref, i: int, ok: u64) -> bool {
@@ -558,13 +556,13 @@ filter_reach :: proc "contextless" (f: ^Filter, xform: Transform2D) -> (reach: V
 		b := b1
 		switch p.op {
 		case .Gaussian_Blur:
-			reach += blur_reach(p.std * scale, BLUR_MAX_EXACT_SIGMA)
+			reach += blur_reach(p.std * axis, BLUR_MAX_EXACT_SIGMA)
 		case .Offset:
 			d := offset_px(xform, p.dx, p.dy)
 			reach += {abs(d.x), abs(d.y)}
 		case .Drop_Shadow:
 			d := offset_px(xform, p.dx, p.dy)
-			reach += blur_reach(p.std * scale, BLUR_MAX_EXACT_SIGMA) + {abs(d.x), abs(d.y)}
+			reach += blur_reach(p.std * axis, BLUR_MAX_EXACT_SIGMA) + {abs(d.x), abs(d.y)}
 		case .Flood:
 			b = p.color.a <= 0
 		case .Turbulence, .Diffuse_Lighting, .Specular_Lighting, .Tile, .Image:
