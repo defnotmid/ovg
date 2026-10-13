@@ -31,6 +31,8 @@ Canvas :: struct {
 	dist_tol:              f32,
 	// Dashed copy of the path being stroked.
 	dash_scratch:          Path,
+	// The stroke being dashed, flattened.
+	dash_flat:             Flat_Path,
 	// Bounds on per-draw work (limits.odin); canvas_init sets
 	// DEFAULT_LIMITS. Dashes use Dash_Segments.
 	limits:                Limits,
@@ -88,6 +90,7 @@ canvas_destroy :: proc(c: ^Canvas) {
 	image_store_destroy(&c.images)
 	gradient_store_destroy(&c.gradients)
 	path_destroy(&c.dash_scratch)
+	flat_path_destroy(&c.dash_flat)
 	path_destroy(&c.cap_scratch)
 	delete(c.program_ops)
 	c^ = {}
@@ -425,7 +428,7 @@ stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	if len(paint.stroke.dash) > 0 {
 		// Dash in path units, before the transform (SVG).
 		path_reset(&c.dash_scratch)
-		if !path_dash(p, paint.stroke.dash, paint.stroke.dash_offset, paint.stroke.path_length, &c.dash_scratch, c.limits[.Dash_Segments]) {
+		if !path_dash(p, paint.stroke.dash, paint.stroke.dash_offset, paint.stroke.path_length, &c.dash_scratch, &c.dash_flat, c.limits[.Dash_Segments]) {
 			c.limited += {.Dash_Segments}
 		}
 		p = &c.dash_scratch
