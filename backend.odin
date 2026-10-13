@@ -307,9 +307,10 @@ Cmd_Draw :: struct {
 	stencil: Stencil_Mode,
 	paint:   u32,
 }
+// `Frame.filters[filter]` from the command's image into `target_image`.
 Cmd_Filter_Image :: struct {
 	target_image: Image_Id,
-	filter:       Image_Filter,
+	filter:       u32,
 }
 
 Command_Type :: union {
@@ -340,8 +341,12 @@ Frame :: struct {
 	pieces:    []Piece,
 	paints:    []Params,
 	commands:  []Command,
-	// Uniform blocks of program runs (`Cmd_Run_Program.uniforms`).
+	// Uniform blocks of program runs (`Program_Run.uniforms`).
 	bytes:     []u8,
+	// Commands stay small: payloads a few commands carry live in side tables
+	// they index (`Cmd_Filter_Image.filter`, `Cmd_Run_Program.run`).
+	filters:   []Image_Filter,
+	runs:      []Program_Run,
 }
 
 frame_pieces :: #force_inline proc "contextless" (f: Frame, cmd: Command) -> []Piece {

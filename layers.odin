@@ -587,15 +587,16 @@ layer_relocate :: proc(c: ^Canvas, start: int, si: Layer_Stand_In, content, mask
 			}
 		case Cmd_Filter_Image:
 			swap(&v.target_image, si, content, mask)
-			#partial switch &fv in v.filter {
+			#partial switch &fv in c.filters[v.filter] {
 			case Blend:
 				swap(&fv.backdrop, si, content, mask)
 			case Composite:
 				swap(&fv.backdrop, si, content, mask)
 			}
 		case Cmd_Run_Program:
-			swap(&v.target, si, content, mask)
-			for &ch in v.channels {
+			run := &c.runs[v.run]
+			swap(&run.target, si, content, mask)
+			for &ch in run.channels {
 				swap(&ch, si, content, mask)
 			}
 		}

@@ -20,6 +20,8 @@ Canvas :: struct {
 	paints:                [dynamic]Params,
 	// Uniform blocks of custom program runs (program.odin).
 	bytes:                 [dynamic]u8,
+	filters:               [dynamic]Image_Filter,
+	runs:                  [dynamic]Program_Run,
 	images:                Image_Store,
 	programs:              Slot_Map(Backend_Program),
 	gradients:             Gradient_Store,
@@ -80,6 +82,8 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.pieces)
 	delete(c.paints)
 	delete(c.bytes)
+	delete(c.filters)
+	delete(c.runs)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
 	gradient_store_destroy(&c.gradients)
@@ -316,7 +320,8 @@ realloc_image :: proc(c: ^Canvas, id: Image_Id, width, height: u32, format: Pixe
 // images must have the same size and format. Transforms, scissor and the
 // current render target do not apply.
 filter_image :: proc(c: ^Canvas, target: Image_Id, filter: Image_Filter, source: Image_Id) {
-	append(&c.commands, Command{type = Cmd_Filter_Image{target, filter}, image = source})
+	append(&c.filters, filter)
+	append(&c.commands, Command{type = Cmd_Filter_Image{target, u32(len(c.filters) - 1)}, image = source})
 }
 
 // ---- paths ----------------------------------------------------------------------
@@ -623,10 +628,12 @@ Canvas_Mark :: struct {
 	pieces:   int,
 	paints:   int,
 	bytes:    int,
+	filters:  int,
+	runs:     int,
 }
 
 canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
-	return {len(c.commands), len(c.verts), len(c.pieces), len(c.paints), len(c.bytes)}
+	return {len(c.commands), len(c.verts), len(c.pieces), len(c.paints), len(c.bytes), len(c.filters), len(c.runs)}
 }
 
 // Drops everything recorded since `m`. The render target must be the one
@@ -638,6 +645,8 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	resize(&c.pieces, m.pieces)
 	resize(&c.paints, m.paints)
 	resize(&c.bytes, m.bytes)
+	resize(&c.filters, m.filters)
+	resize(&c.runs, m.runs)
 }
 
 // ---- flush ----------------------------------------------------------------------
@@ -646,13 +655,21 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 // (for SDL_GPU, an `Output` texture; 0 renders offscreen).
 flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	assert(!c.images.recording, "a recording canvas hands frames over with canvas_take")
-	c.backend.render(c.backend.data, output, &c.images, {c.verts[:], c.pieces[:], c.paints[:], c.commands[:], c.bytes[:]})
+	c.backend.render(c.backend.data, output, &c.images, canvas_frame(c))
 	clear(&c.commands)
 	clear(&c.bytes)
+	clear(&c.filters)
+	clear(&c.runs)
 	clear(&c.verts)
 	clear(&c.pieces)
 	clear(&c.paints)
 	frame_end(c)
+}
+
+// The frame recorded so far, as `flush` hands it over.
+@(private)
+canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
+	return {c.verts[:], c.pieces[:], c.paints[:], c.commands[:], c.bytes[:], c.filters[:], c.runs[:]}
 }
 
 @(private)
@@ -675,6 +692,8 @@ Recorded_Frame :: struct {
 	paints:      [dynamic]Params,
 	commands:    [dynamic]Command,
 	bytes:       [dynamic]u8,
+	filters:     [dynamic]Image_Filter,
+	runs:        [dynamic]Program_Run,
 	image_ops:   [dynamic]Image_Op,
 	pixels:      [dynamic]u8,
 	program_ops: [dynamic]Program_Op,
@@ -686,6 +705,8 @@ recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
 	delete(f.paints)
 	delete(f.commands)
 	delete(f.bytes)
+	delete(f.filters)
+	delete(f.runs)
 	delete(f.image_ops)
 	delete(f.pixels)
 	delete(f.program_ops)
@@ -706,6 +727,8 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	swap_clear(&c.paints, &out.paints)
 	swap_clear(&c.commands, &out.commands)
 	swap_clear(&c.bytes, &out.bytes)
+	swap_clear(&c.filters, &out.filters)
+	swap_clear(&c.runs, &out.runs)
 	swap_clear(&c.images.ops, &out.image_ops)
 	swap_clear(&c.images.pixels, &out.pixels)
 	swap_clear(&c.program_ops, &out.program_ops)

@@ -164,11 +164,11 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 			continue
 		}
 		if f, ok := cmd.type.(Cmd_Filter_Image); ok {
-			sw_filter_image(b, images, cmd, f)
+			sw_filter_image(b, images, cmd, f.target_image, frame.filters[f.filter])
 			continue
 		}
 		if p, ok := cmd.type.(Cmd_Run_Program); ok {
-			sw_run_program(images, frame, p)
+			sw_run_program(images, frame, frame.runs[p.run])
 			continue
 		}
 		target, ok := sw_active_target(b, images)
@@ -692,14 +692,14 @@ apply_blend :: proc "contextless" (s: Composite_Operation_State, src, dst: [4]f3
 // `tex_type`, as the shader does; every pixel is computed before it is
 // written, so the target may alias an input.
 @(private = "file")
-sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, f: Cmd_Filter_Image) {
+sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Image_Id, filter: Image_Filter) {
 	src, src_ok := lookup_texture(images, cmd.image)
-	dst_entry := image_store_get(images, f.target_image)
+	dst_entry := image_store_get(images, target)
 	if !src_ok || dst_entry == nil {
 		return
 	}
 	dst := Sw_Target{dst_entry.image.pixels, dst_entry.info.width, dst_entry.info.height, dst_entry.info.format}
-	if t, is_turbulence := f.filter.(Turbulence); is_turbulence {
+	if t, is_turbulence := filter.(Turbulence); is_turbulence {
 		// The source is the GPU's lattice image; the seed makes the f64 one.
 		if dst.format == .RGBA8 {
 			sw_turbulence(b, dst, t)
@@ -711,7 +711,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 	}
 	src_tt := tex_type_for({src.flags, src.width, src.height, src.format})
 
-	if sx, sy, edge, is_blur := blur_params(f.filter); is_blur {
+	if sx, sy, edge, is_blur := blur_params(filter); is_blur {
 		if len(b.blur_tmp) < len(src.pixels) {
 			delete(b.blur_tmp, b.allocator)
 			b.blur_tmp = make([]u8, len(src.pixels), b.allocator)
@@ -725,7 +725,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		return
 	}
 
-	if m, is_morph := f.filter.(Morphology); is_morph {
+	if m, is_morph := filter.(Morphology); is_morph {
 		if len(b.blur_tmp) < len(src.pixels) {
 			delete(b.blur_tmp, b.allocator)
 			b.blur_tmp = make([]u8, len(src.pixels), b.allocator)
@@ -739,16 +739,16 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 
 	back: Sw_Texture
 	back_tt: f32
-	if id := filter_backdrop(f.filter); image_id_valid(id) {
+	if id := filter_backdrop(filter); image_id_valid(id) {
 		ok: bool
 		back, ok = lookup_texture(images, id)
-		_, is_lut := f.filter.(Component_Transfer)
+		_, is_lut := filter.(Component_Transfer)
 		if !ok || (!is_lut && (back.width != src.width || back.height != src.height)) {
 			return
 		}
 		back_tt = tex_type_for({back.flags, back.width, back.height, back.format})
 	}
-	#partial switch v in f.filter {
+	#partial switch v in filter {
 	case Lighting, Tile, Displacement_Map, Convolve_Matrix:
 		// Neighbourhood filters: the target may alias the source.
 		out := dst
@@ -759,7 +759,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 			}
 			out.pixels = b.blur_tmp[:len(dst.pixels)]
 		}
-		neighbourhood_filter(src, src_tt, back, back_tt, out, f.filter)
+		neighbourhood_filter(src, src_tt, back, back_tt, out, filter)
 		if raw_data(out.pixels) != raw_data(dst.pixels) {
 			copy(dst.pixels, out.pixels)
 		}
@@ -769,7 +769,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		for x in 0 ..< dst.width {
 			s := apply_tex_type(fetch(src, x, y), src_tt)
 			out: [4]f32
-			#partial switch v in f.filter {
+			#partial switch v in filter {
 			case Color_Matrix:
 				out = color_matrix_pixel(v.m, s)
 			case Color_Space_Convert:
@@ -1082,7 +1082,7 @@ sw_program_sample :: proc(data: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 }
 
 @(private = "file")
-sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Cmd_Run_Program) {
+sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	p := (^Sw_Program)(cmd.program.user)
 	entry := image_store_get(images, cmd.target)
 	if p == nil || entry == nil || (entry.info.format != .RGBA8 && entry.info.format != .RGBA16F) {

@@ -49,7 +49,7 @@ Row :: struct {
 	indexed:  bool,
 	// Filter passes run in a render pass of their own.
 	own_pass: bool,
-	program:  ^vg.Cmd_Run_Program,
+	program:  ^vg.Program_Run,
 }
 
 // A GPU buffer and the transfer buffer that fills it, grown to the largest
@@ -313,12 +313,13 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
-			target := lookup(&p, c.target)
-			if target == nil || c.program.user == nil {
+			run := &frame.runs[c.run]
+			target := lookup(&p, run.target)
+			if target == nil || run.program.user == nil {
 				continue
 			}
-			info, _ := vg.image_store_info(images, c.target)
-			append(&b.rows, Row{kind = .Program, target = target^, verts = {extra_base(&p), 6}, program = &c})
+			info, _ := vg.image_store_info(images, run.target)
+			append(&b.rows, Row{kind = .Program, target = target^, verts = {extra_base(&p), 6}, program = run})
 			emit_quad(&p, f32(info.width), f32(info.height), 0)
 		}
 	}
@@ -449,13 +450,14 @@ plan_copy :: proc(p: ^Planner, src, dst: ^Image) {
 // temporary first when the target is also an input, then copy.
 @(private = "file")
 plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
+	filter := p.frame.filters[c.filter]
 	src_info, ok := vg.image_store_info(p.images, cmd.image)
 	dst_info, dst_ok := vg.image_store_info(p.images, c.target_image)
 	if !ok || !dst_ok {
 		return
 	}
 	extent := [2]f32{f32(src_info.width), f32(src_info.height)}
-	if t, is_turbulence := c.filter.(vg.Turbulence); is_turbulence {
+	if t, is_turbulence := filter.(vg.Turbulence); is_turbulence {
 		// The source is the lattice image, not the target's size.
 		frag := turbulence_uniforms(t)
 		frag[9] = {f32(dst_info.width), f32(dst_info.height), 0, 0}
@@ -467,7 +469,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		return
 	}
 
-	if sx, sy, edge, is_blur := vg.blur_params(c.filter); is_blur {
+	if sx, sy, edge, is_blur := vg.blur_params(filter); is_blur {
 		mid := scratch_image(p.b, src_info)
 		if mid == nil {
 			return
@@ -499,7 +501,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		return
 	}
 
-	if m, is_morph := c.filter.(vg.Morphology); is_morph {
+	if m, is_morph := filter.(vg.Morphology); is_morph {
 		mid := scratch_image(p.b, src_info)
 		if mid == nil {
 			return
@@ -517,11 +519,11 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		return
 	}
 
-	backdrop := vg.filter_backdrop(c.filter)
+	backdrop := vg.filter_backdrop(filter)
 	back_tt: f32
 	if vg.image_id_valid(backdrop) {
 		back_info, back_ok := vg.image_store_info(p.images, backdrop)
-		_, is_lut := c.filter.(vg.Component_Transfer)
+		_, is_lut := filter.(vg.Component_Transfer)
 		if !back_ok || (!is_lut && (back_info.width != src_info.width || back_info.height != src_info.height)) {
 			return
 		}
@@ -535,7 +537,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 	frag[9] = {extent.x, extent.y, 0, 0}
 	frag[10] = {0, 0, vg.tex_type_for(src_info), 0}
 	frag[13] = {back_tt, 0, 0, 0}
-	switch v in c.filter {
+	switch v in filter {
 	case vg.Color_Matrix:
 		frag[10].w = f32(vg.Shader_Type.Filter_Color_Matrix)
 		for row in 0 ..< 4 {

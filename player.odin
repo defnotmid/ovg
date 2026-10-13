@@ -155,20 +155,14 @@ player_render :: proc(p: ^Player, f: ^Recorded_Frame, output: Render_Output = 0)
 	// Program commands hold the canvas's key index: the backend's program
 	// stands in for it while the frame renders.
 	clear(&p.recorded)
-	for &cmd in f.commands {
-		if run, ok := &cmd.type.(Cmd_Run_Program); ok {
-			append(&p.recorded, run.program)
-			h := int(run.program.handle)
-			run.program = p.programs[h] if h < len(p.programs) else {}
-		}
+	for &run in f.runs {
+		append(&p.recorded, run.program)
+		h := int(run.program.handle)
+		run.program = p.programs[h] if h < len(p.programs) else {}
 	}
-	p.backend.render(p.backend.data, output, &p.images, {f.verts[:], f.pieces[:], f.paints[:], f.commands[:], f.bytes[:]})
-	i := 0
-	for &cmd in f.commands {
-		if run, ok := &cmd.type.(Cmd_Run_Program); ok {
-			run.program = p.recorded[i]
-			i += 1
-		}
+	p.backend.render(p.backend.data, output, &p.images, {f.verts[:], f.pieces[:], f.paints[:], f.commands[:], f.bytes[:], f.filters[:], f.runs[:]})
+	for &run, i in f.runs {
+		run.program = p.recorded[i]
 	}
 }
 

@@ -80,7 +80,13 @@ Program_Flag :: enum u8 {
 }
 Program_Flags :: bit_set[Program_Flag;u8]
 
+// Runs `Frame.runs[run]`.
 Cmd_Run_Program :: struct {
+	run: u32,
+}
+
+// A program run (`run_program`): one row of `Frame.runs`.
+Program_Run :: struct {
 	program:  Backend_Program,
 	target:   Image_Id,
 	// The uniform block: a range of `Frame.bytes`.
@@ -160,7 +166,7 @@ run_program :: proc(c: ^Canvas, id: Program_Id, target: Image_Id, uniforms: []u8
 			return .Unsupported_Operation
 		}
 	}
-	cmd := Cmd_Run_Program {
+	cmd := Program_Run {
 		program = p^,
 		target  = target,
 		flags   = flags,
@@ -174,7 +180,8 @@ run_program :: proc(c: ^Canvas, id: Program_Id, target: Image_Id, uniforms: []u8
 	for ch, i in channels[:min(len(channels), PROGRAM_MAX_CHANNELS)] {
 		cmd.channels[i] = ch
 	}
-	append(&c.commands, Command{type = cmd})
+	append(&c.runs, cmd)
+	append(&c.commands, Command{type = Cmd_Run_Program{u32(len(c.runs) - 1)}})
 	return nil
 }
 
