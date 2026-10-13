@@ -696,8 +696,7 @@ lottie_quad_path :: proc(p: ^Path, q: [4]Vec2) {
 
 @(private)
 lottie_inverse :: proc "contextless" (t: Transform2D) -> (Transform2D, bool) {
-	det := t[0] * t[3] - t[1] * t[2]
-	if abs(det) < 1e-12 {
+	if transform_singular(t) {
 		return {}, false
 	}
 	return transform_inverse(t), true

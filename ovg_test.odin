@@ -882,3 +882,71 @@ test_sw_no_allocation_when_warm :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, track.total_allocation_count, 0)
 }
+
+// A zero-length subpath's dot is its start cap behind and its end cap
+// ahead, each its own style: butt start + round end is half a disc.
+@(test)
+test_sw_zero_length_mixed_caps :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 32, 32)
+	path_line_to(&p, 32, 32)
+	st := paint_color(BLACK)
+	st.stroke.line_width = 16
+	st.stroke.line_cap_start, st.stroke.line_cap_end = .Butt, .Round
+	clear_rect(&s.canvas, 0, 0, 64, 64, WHITE)
+	stroke_path(&s.canvas, &p, st)
+	flush(&s.canvas)
+	testing.expect_value(t, px(&s, 36, 32), [4]u8{0, 0, 0, 255}) // ahead: the round end
+	testing.expect_value(t, px(&s, 27, 32), [4]u8{255, 255, 255, 255}) // behind: butt
+}
+
+// A recording canvas renders nothing to read back.
+@(test)
+test_recording_screenshot :: proc(t: ^testing.T) {
+	c: Canvas
+	canvas_init_recording(&c)
+	defer canvas_destroy(&c)
+	_, err := screenshot(&c)
+	testing.expect_value(t, err, Error.Unsupported_Operation)
+}
+
+// Small scales are invertible: only a singular matrix falls back to the
+// identity.
+@(test)
+test_transform_inverse_small_scale :: proc(t: ^testing.T) {
+	m := transform_scaling(0.001, 0.001)
+	inv := transform_inverse(m)
+	testing.expect(t, abs(inv[0] - 1000) < 0.01 && abs(inv[3] - 1000) < 0.01)
+	testing.expect_value(t, transform_inverse(transform_scaling(0, 1)), TRANSFORM_IDENTITY)
+}
+
+// The round half of a mixed-cap dot is a smooth arc: at a large width its
+// edge pixels sit on the circle.
+@(test)
+test_sw_zero_length_round_half_smooth :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 256, 256)
+	defer sw_close(&s)
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 128, 128)
+	path_line_to(&p, 128, 128)
+	st := paint_color(BLACK)
+	st.stroke.line_width = 200
+	st.stroke.line_cap_start, st.stroke.line_cap_end = .Square, .Round
+	clear_rect(&s.canvas, 0, 0, 256, 256, WHITE)
+	stroke_path(&s.canvas, &p, st)
+	flush(&s.canvas)
+	// On the round side (x > 128), points just inside / outside the radius
+	// at 40 degrees, where a 16-sided polygon's chord would cut in.
+	inside := Vec2{128, 128} + Vec2{math.cos(f32(0.7)), math.sin(f32(0.7))} * 97
+	outside := Vec2{128, 128} + Vec2{math.cos(f32(0.7)), math.sin(f32(0.7))} * 103
+	testing.expect_value(t, px(&s, u32(inside.x), u32(inside.y)), [4]u8{0, 0, 0, 255})
+	testing.expect_value(t, px(&s, u32(outside.x), u32(outside.y)), [4]u8{255, 255, 255, 255})
+	// The square side reaches the corner.
+	testing.expect_value(t, px(&s, 35, 35), [4]u8{0, 0, 0, 255})
+}

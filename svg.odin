@@ -2465,10 +2465,14 @@ svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Te
 @(private)
 svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Text_State) {
 	doc := p.doc
+	// In a clip path the text is geometry, filled white whatever its fill,
+	// as shapes are (svg_shape_style).
 	style := svg_shape_style(p, st)
-	style.fill = st.fill
-	if st.stroke_width > 0 && !p.in_clip {
-		style.stroke = st.stroke
+	if !p.in_clip {
+		style.fill = st.fill
+		if st.stroke_width > 0 {
+			style.stroke = st.stroke
+		}
 	}
 	piece_from := 0
 	cur_dx, cur_dy: f32

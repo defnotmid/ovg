@@ -729,3 +729,26 @@ test_lottie_tables :: proc(t: ^testing.T) {
 		testing.expectf(t, info.key != "", "%v: no key", prop)
 	}
 }
+
+// A text stroke colour with document width 0 still strokes once an
+// animator gives it width (lottie-web strokes whenever `sc` is set).
+@(test)
+test_lottie_text_stroke_width_animated :: proc(t: ^testing.T) {
+	s: Lottie_Fx
+	err := lottie_fx_open(&s, `{"v":"5.7.0","fr":30,"ip":0,"op":60,"w":120,"h":60,"layers":[
+		{"ty":5,"ind":1,"ip":0,"op":60,"st":0,"ks":{"p":{"a":0,"k":[8,44]}},
+		 "t":{"d":{"k":[{"t":0,"s":{"t":"HH","s":40,"sc":[1,0,0],"sw":0,"lh":48}}]},"m":{"g":1},
+		  "a":[{"s":{"t":0,"b":1,"sh":1,"s":{"a":0,"k":0},"e":{"a":0,"k":100}},"a":{"sw":{"a":0,"k":6}}}]}}]}`)
+	testing.expect_value(t, err, Lottie_Error.None)
+	defer lottie_fx_close(&s)
+	lottie_fx_draw(&s, 0)
+	red := 0
+	for y in 0 ..< 60 {
+		for x in 0 ..< 120 {
+			if p := lottie_px(&s, x, y); p.r > 200 && p.g < 80 {
+				red += 1
+			}
+		}
+	}
+	testing.expectf(t, red > 50, "stroked pixels: %d", red)
+}

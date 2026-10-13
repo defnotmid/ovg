@@ -1,6 +1,8 @@
 parity_out/
 *.bin
 build/
+# The binary `odin test .` leaves in the working directory.
+/ovg
 .work/
 perf.data*
 .claude/settings.local.json

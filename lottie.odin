@@ -1374,8 +1374,9 @@ lottie_parse_text_doc :: proc(p: ^Lottie_Parser, o: json.Object) -> u32 {
 	}
 	td.line_height = lj_num(o, "lh", td.size * 1.2)
 	td.fill, td.has_fill = color(o, "fc")
+	// A stroke colour makes a stroke even at width 0: an animator may give
+	// it width (lottie-web).
 	td.stroke, td.has_stroke = color(o, "sc")
-	td.has_stroke = td.has_stroke && td.stroke_width > 0
 	switch int(lj_num(o, "j", 0)) {
 	case 1, 4:
 		td.justify = .Right

@@ -274,3 +274,25 @@ test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, track.total_allocation_count, 0)
 }
+
+// A combining mark the primary face lacks takes its base along to the face
+// that has both, so the mark attaches (Vera has no U+0301; JetBrains Mono
+// has it and GPOS mark positioning).
+@(test)
+test_shape_mark_cluster_fallback :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	g := fx_layout(&s, "xéx", "Bitstream Vera Sans")
+	l := &s.layout
+	// x (Vera), e + mark (JetBrains, shaped together), x (Vera): the middle
+	// run starts at the base (codepoint 1), not at a lone mark (2).
+	testing.expect_value(t, len(l.runs), 3)
+	if len(l.runs) == 3 {
+		testing.expect(t, l.runs[0].font != l.runs[1].font)
+		testing.expect_value(t, l.runs[0].count, 1)
+		testing.expect_value(t, l.clusters[l.runs[1].first], 1)
+	}
+	_ = g
+}

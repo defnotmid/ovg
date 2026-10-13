@@ -2,6 +2,7 @@ package ovg
 
 import "core:mem"
 import "core:testing"
+import "core:thread"
 
 // SVG import: parsing into the document tables, then drawing on the
 // software backend and reading pixels back.
@@ -414,4 +415,56 @@ test_svg_prop_table :: proc(t: ^testing.T) {
 		found, ok := svg_prop_from_name(alias.name)
 		testing.expectf(t, ok && found == alias.prop, "alias %q finds %v", alias.name, found)
 	}
+}
+
+// A clip path uses its text's outlines whatever the text's own fill
+// (fill="none" included), as it does for shapes (both are filled white
+// when parsed into a clip).
+@(test)
+test_svg_clip_text_fill_none :: proc(t: ^testing.T) {
+	s: Svg_Fx
+	defer svg_fx_close(&s)
+	err := svg_fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60">
+		<clipPath id="c"><text x="4" y="50" font-size="60" fill="none">H</text></clipPath>
+		<rect width="80" height="60" fill="blue" clip-path="url(#c)"/></svg>`)
+	testing.expect_value(t, err, Svg_Error.None)
+	svg_fx_draw(&s)
+	blue := 0
+	for y in 0 ..< 60 {
+		for x in 0 ..< 80 {
+			if p := svg_px(&s, x, y); p.b > 200 && p.r < 50 {
+				blue += 1
+			}
+		}
+	}
+	testing.expectf(t, blue > 100, "clipped area: %d blue pixels", blue)
+}
+
+// Filters on a lent thread pool leave the host's finished tasks for the
+// host to pop (feTurbulence runs in bands on the pool).
+@(test)
+test_sw_lent_pool_keeps_host_tasks :: proc(t: ^testing.T) {
+	pool: thread.Pool
+	thread.pool_init(&pool, context.allocator, 2)
+	thread.pool_start(&pool)
+	defer thread.pool_destroy(&pool)
+	defer thread.pool_join(&pool)
+	s: Svg_Fx
+	defer svg_fx_close(&s)
+	err := svg_fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="128">
+		<filter id="f"><feTurbulence baseFrequency="0.05" numOctaves="2"/></filter>
+		<rect width="64" height="128" filter="url(#f)"/></svg>`)
+	testing.expect_value(t, err, Svg_Error.None)
+	s.backend.pool = &pool
+	thread.pool_add_task(&pool, context.allocator, proc(task: thread.Task) {}, nil, 7)
+	for thread.pool_num_done(&pool) < 1 {
+		thread.yield()
+	}
+	svg_fx_draw(&s)
+	task, ok := thread.pool_pop_done(&pool)
+	testing.expect(t, ok && task.user_index == 7)
+	// And nothing of the filter's own tasks is left behind.
+	_, more := thread.pool_pop_done(&pool)
+	testing.expect(t, !more)
+	s.backend.pool = nil
 }

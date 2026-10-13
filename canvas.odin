@@ -499,35 +499,52 @@ stroke_zero_length_caps :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	dots := &c.cap_scratch
 	path_reset(dots)
 	hw := paint.stroke.line_width * 0.5
-	cap := paint.stroke.line_cap_start
+	caps := [2]Line_Cap{paint.stroke.line_cap_start, paint.stroke.line_cap_end}
 	start, last, dir: Vec2
 	length: f32
 	open, has_seg := false, false
-	finish :: proc(dots: ^Path, open, has_seg: bool, length, tol: f32, at, dir: Vec2, hw: f32, cap: Line_Cap) {
+	// The dot is the start cap behind the subpath's direction and the end
+	// cap ahead of it, each its own style.
+	finish :: proc(dots: ^Path, open, has_seg: bool, length, tol: f32, at, dir: Vec2, hw: f32, caps: [2]Line_Cap) {
 		if !open || !has_seg || length > tol {
 			return
 		}
-		if cap == .Round {
+		if caps == {.Round, .Round} {
 			path_circle(dots, at.x, at.y, hw)
 			return
 		}
 		d := dir if dir != {} else Vec2{1, 0}
 		n := Vec2{-d.y, d.x}
-		a := at + (d + n) * hw
-		b := at + (d - n) * hw
-		c := at + (-d - n) * hw
-		e := at + (-d + n) * hw
-		path_move_to(dots, a.x, a.y)
-		path_line_to(dots, b.x, b.y)
-		path_line_to(dots, c.x, c.y)
-		path_line_to(dots, e.x, e.y)
+		// One cap's half, from `at + from * hw` round to `at - from * hw`
+		// on the `side` half-plane.
+		half :: proc(dots: ^Path, at, from, side: Vec2, hw: f32, cap: Line_Cap) {
+			switch cap {
+			case .Butt:
+			case .Square:
+				for q in ([2]Vec2{at + (from + side) * hw, at + (side - from) * hw}) {
+					path_line_to(dots, q.x, q.y)
+				}
+			case .Round:
+				// Half a circle from `from` through `side` (path_arc: .Hole
+				// sweeps to larger angles).
+				a0 := math.atan2(from.y, from.x)
+				up := from.x * side.y - from.y * side.x > 0
+				path_arc(dots, at.x, at.y, hw, a0, a0 + (math.PI if up else -math.PI), .Hole if up else .Solid)
+			}
+			e := at - from * hw
+			path_line_to(dots, e.x, e.y)
+		}
+		s := at + n * hw
+		path_move_to(dots, s.x, s.y)
+		half(dots, at, n, d, hw, caps[1])
+		half(dots, at, -n, -d, hw, caps[0])
 		path_close(dots)
 	}
 	it := path_iter(p)
 	for verb, coords in path_iter_next(&it) {
 		switch verb {
 		case .Move_To:
-			finish(dots, open, has_seg, length, tol, start, dir, hw, cap)
+			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
 			start, last = coords[0], coords[0]
 			length, dir = 0, {}
 			open, has_seg = true, false
@@ -546,12 +563,12 @@ stroke_zero_length_caps :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 			has_seg = true
 		case .Close:
 			has_seg = true
-			finish(dots, open, has_seg, length, tol, start, dir, hw, cap)
+			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
 			open = false
 		case .Solid, .Hole:
 		}
 	}
-	finish(dots, open, has_seg, length, tol, start, dir, hw, cap)
+	finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
 	if len(dots.verbs) == 0 {
 		return
 	}
@@ -741,6 +758,10 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 
 // Copy of the screen as RGBA8, top-down. Call after `flush`.
 screenshot :: proc(c: ^Canvas, allocator := context.allocator) -> (Screenshot, Error) {
+	// A recording canvas renders nothing (its player does).
+	if c.backend.screenshot == nil {
+		return {}, .Unsupported_Operation
+	}
 	return c.backend.screenshot(c.backend.data, allocator)
 }
 

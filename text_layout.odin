@@ -1,5 +1,6 @@
 package ovg
 
+import "core:unicode"
 
 // Text layout over a Font_Collection: styled pieces (SVG text + tspans),
 // lines, baselines, alignment and per-glyph font fallback. The result is a
@@ -130,6 +131,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	}
 	n := i32(len(s.runes))
 	emoji_fallback(fonts, s.runes[:], s.font[:])
+	mark_fallback(s)
 	resize(&s.script, int(n))
 	resize(&s.level, int(n))
 	resize(&s.bidi, int(n))
@@ -347,4 +349,52 @@ font_x_height :: proc(font: ^Font, em, size: f32) -> f32 {
 		return f32(y1) * em
 	}
 	return size * 0.5
+}
+
+
+// A combining mark that fell back to another face than its base's takes
+// the cluster (base and its marks) to the first such face that has them
+// all: marks attach to their base only when shaped with it. Runes that kept
+// their neighbour's face cost one comparison.
+@(private = "file")
+mark_fallback :: proc(s: ^Text_Shaper) {
+	is_mark :: proc(r: rune) -> bool {
+		return unicode.is_nonspacing_mark(r) || unicode.is_enclosing_mark(r) || unicode.is_spacing_mark(r)
+	}
+	n := len(s.runes)
+	for i := 1; i < n; i += 1 {
+		if s.font[i] == s.font[i - 1] || !is_mark(s.runes[i]) {
+			continue
+		}
+		// The cluster: back to its base, on to its last mark (one piece).
+		base := i - 1
+		for base > 0 && is_mark(s.runes[base]) && s.piece[base - 1] == s.piece[i] {
+			base -= 1
+		}
+		end := i + 1
+		for end < n && is_mark(s.runes[end]) && s.piece[end] == s.piece[i] {
+			end += 1
+		}
+		if s.piece[base] != s.piece[i] {
+			i = end - 1
+			continue
+		}
+		for k in base ..< end {
+			f := s.font[k]
+			has_all := true
+			for j in base ..< end {
+				if font_glyph_index_drawable(f, s.runes[j]) == 0 {
+					has_all = false
+					break
+				}
+			}
+			if has_all {
+				for j in base ..< end {
+					s.font[j] = f
+				}
+				break
+			}
+		}
+		i = end - 1
+	}
 }

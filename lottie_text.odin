@@ -396,7 +396,7 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 		glyphs := lay.glyphs[run.first:][:run.count]
 		if !animated {
 			for stroke in paints {
-				if stroke && has_stroke {
+				if stroke && has_stroke && td.stroke_width > 0 {
 					p := paint_color(stroke_col)
 					p.stroke.line_width = td.stroke_width
 					p.stroke.line_join = .Round

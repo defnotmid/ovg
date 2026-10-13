@@ -107,12 +107,21 @@ transform_premultiply :: proc "contextless" (t: ^Transform2D, other: Transform2D
 	t^ = transform_multiply(other, t^)
 }
 
+// Whether `t` has no inverse: its determinant is zero relative to its own
+// terms, beyond f32 rounding (so a tiny but invertible scale, as 0.001, is
+// not singular).
+transform_singular :: proc "contextless" (t: Transform2D) -> bool {
+	a, b, c, d := f64(t[0]), f64(t[1]), f64(t[2]), f64(t[3])
+	return abs(a * d - c * b) <= 1e-6 * max(abs(a * d), abs(c * b))
+}
+
+// The inverse of `t`; the identity for a singular `t` (transform_singular).
 transform_inverse :: proc "contextless" (t: Transform2D) -> Transform2D {
 	// The determinant is computed in f64 for stability, as in femtovg.
 	a, b, c, d := f64(t[0]), f64(t[1]), f64(t[2]), f64(t[3])
 	x, y := f64(t[4]), f64(t[5])
 	det := a * d - c * b
-	if det > -1e-6 && det < 1e-6 {
+	if transform_singular(t) {
 		return TRANSFORM_IDENTITY
 	}
 	inv := 1.0 / det

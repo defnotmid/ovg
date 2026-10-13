@@ -856,11 +856,36 @@ sw_bands :: proc(b: ^Software_Backend, rows: int, data: rawptr, band: proc(data:
 		}
 		sync.futex_wait(&job.pending, u32(left))
 	}
-	// Forget finished tasks (the pool keeps a record of each until popped).
-	sync.mutex_lock(&b.pool.mutex)
-	sync.atomic_sub(&b.pool.num_done, len(b.pool.tasks_done))
-	clear(&b.pool.tasks_done)
-	sync.mutex_unlock(&b.pool.mutex)
+	// Forget this job's finished tasks (the pool keeps a record of each until
+	// popped); the host's own records stay for it to pop. A worker appends
+	// its record after the task returns, so `pending` can reach 0 first:
+	// wait for all `helpers` of them (each task gets exactly one), then
+	// remove them in one pass.
+	mine :: #force_inline proc(t: thread.Task, job: ^Sw_Bands) -> bool {
+		return t.procedure == sw_band_task && t.data == rawptr(job)
+	}
+	for {
+		sync.mutex_lock(&b.pool.mutex)
+		found := 0
+		for t in b.pool.tasks_done {
+			found += int(mine(t, &job))
+		}
+		if found == helpers {
+			kept := 0
+			for t in b.pool.tasks_done {
+				if !mine(t, &job) {
+					b.pool.tasks_done[kept] = t
+					kept += 1
+				}
+			}
+			resize(&b.pool.tasks_done, kept)
+			sync.atomic_sub(&b.pool.num_done, found)
+			sync.mutex_unlock(&b.pool.mutex)
+			break
+		}
+		sync.mutex_unlock(&b.pool.mutex)
+		thread.yield()
+	}
 }
 
 @(private = "file")
