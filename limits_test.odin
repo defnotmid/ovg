@@ -54,6 +54,7 @@ svg_hostile :: proc(t: ^testing.T, s: ^Limits_Fx, markup: string, loc := #caller
 	text: Svg_Layout
 	svg_layout(&doc, &fonts, &text)
 	defer svg_layout_destroy(&text)
+	svg_renderer_bind(&r, &s.canvas, &doc)
 	clear_rect(&s.canvas, 0, 0, 64, 64, WHITE)
 	layer_stack_begin(&s.layers, &s.canvas, 64, 64, nil, doc.uses_blend)
 	svg_draw(&s.canvas, &s.layers, &r, &doc, &text)
@@ -139,6 +140,7 @@ lottie_hostile :: proc(t: ^testing.T, s: ^Limits_Fx, json: string, loc := #calle
 	testing.expect_value(t, err, Lottie_Error.None, loc = loc)
 	r: Lottie_Renderer
 	defer lottie_renderer_destroy(&r, &s.canvas)
+	lottie_renderer_bind(&r, &s.canvas, &doc)
 	for frame in ([]f32{0, 5}) {
 		clear_rect(&s.canvas, 0, 0, 64, 64, WHITE)
 		layer_stack_begin(&s.layers, &s.canvas, 64, 64, nil, doc.uses_blend)

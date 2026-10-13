@@ -285,8 +285,8 @@ lays the document's text out with a `Font_Collection` into an `Svg_Layout`
 fonts change. `svg_draw` (`svg_draw.odin`) walks the tables with that
 layout and issues canvas and layer calls; document and layout are
 read-only while drawing, so many canvases (threads) can draw one document,
-each with its own `Svg_Renderer` (scratch paths, override table, image
-ids).
+each with its own `Svg_Renderer` (scratch paths, override table, and the
+document's canvas images, made by `svg_renderer_bind`).
 
 ```odin
 doc, err := vg.svg_parse(data, {load_file = my_loader, fonts = &fonts})
@@ -294,7 +294,8 @@ defer vg.svg_destroy(&doc)
 text: vg.Svg_Layout                       // the text laid out: once per document and fonts
 vg.svg_layout(&doc, &fonts, &text)
 defer vg.svg_layout_destroy(&text)
-r: vg.Svg_Renderer
+r: vg.Svg_Renderer                        // one per document and canvas
+vg.svg_renderer_bind(&r, &c, &doc)        // the document's images on this canvas
 vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
 ovs := [?]vg.Svg_Override{{id = "wing", transform = vg.transform_rotation(a)}, {id = "sun", fill = vg.RED}}
 vg.svg_draw(&c, &ls, &r, &doc, &text, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
@@ -400,7 +401,8 @@ allocates nothing once warm.
 ```odin
 doc, err := vg.lottie_parse(data, {load_file = my_loader})   // image assets that aren't data: URIs
 defer vg.lottie_destroy(&doc)
-r: vg.Lottie_Renderer
+r: vg.Lottie_Renderer                     // one per document and canvas
+vg.lottie_renderer_bind(&r, &c, &doc)     // the document's image assets on this canvas
 vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
 vg.lottie_draw(&c, &ls, &r, &doc, vg.lottie_frame_at(&doc, seconds), vg.transform_scaling(w / doc.width, h / doc.height))
 vg.layer_stack_end(&ls, &c)

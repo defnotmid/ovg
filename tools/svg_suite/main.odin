@@ -240,6 +240,7 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 	text: vg.Svg_Layout
 	vg.svg_layout(&doc, fonts, &text)
 	defer vg.svg_layout_destroy(&text)
+	vg.svg_renderer_bind(r, c, &doc)
 
 	vg.set_size(c, w, h)
 	vg.reset(c)
@@ -250,7 +251,7 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 		vg.layer_stack_end(ls, c)
 	}
 	vg.flush(c)
-	vg.svg_renderer_release(r, c, &doc)
+	vg.svg_renderer_unbind(r, c)
 	px := sw.pixels
 	refpx := ref[:w * h * 4]
 	off := 0
@@ -322,6 +323,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	defer vg.layer_stack_destroy(&rls, &rc)
 	rr: vg.Svg_Renderer
 	defer vg.svg_renderer_destroy(&rr, &rc)
+	vg.svg_renderer_bind(&rr, &rc, &doc)
 	text: vg.Svg_Layout
 	vg.svg_layout(&doc, fonts, &text)
 	defer vg.svg_layout_destroy(&text)
@@ -348,6 +350,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	defer vg.layer_stack_destroy(&ls, &c)
 	r: vg.Svg_Renderer
 	defer vg.svg_renderer_destroy(&r, &c)
+	vg.svg_renderer_bind(&r, &c, &doc)
 	sw_best := max(f64)
 	for _ in 0 ..< max(n / 4, 1) {
 		t0 := time.tick_now()

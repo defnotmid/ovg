@@ -49,8 +49,8 @@ Lottie_Renderer :: struct {
 	values:   [dynamic]f32,
 	stops:    [dynamic]Gradient_Stop,
 	dashes:   [dynamic]f32,
-	// Canvas images of document bitmaps, by pixel address.
-	images:   map[uintptr]Image_Id,
+	// Canvas images of the bound document's bitmaps (lottie_renderer_bind).
+	images:   [dynamic]Image_Id,
 	// Per document layer: the override index, or -1.
 	override_of: [dynamic]i32,
 	// Text layers' fonts (set before drawing; borrowed). Without it text
@@ -85,23 +85,32 @@ lottie_renderer_destroy :: proc(r: ^Lottie_Renderer, c: ^Canvas) {
 	delete(r.override_of)
 	delete(r.missing)
 	lottie_text_scratch_destroy(&r.text)
-	for _, id in r.images {
-		delete_image(c, id)
-	}
+	lottie_renderer_unbind(r, c)
 	delete(r.images)
 	r^ = {}
 }
 
-// Frees the canvas images made for `doc` (call before destroying a
-// document the renderer drew).
-lottie_renderer_release :: proc(r: ^Lottie_Renderer, c: ^Canvas, doc: ^Lottie_Document) {
-	for b in doc.bitmaps {
-		key := uintptr(raw_data(b.pixels))
-		if id, ok := r.images[key]; ok {
+// Makes the canvas images of `doc`'s image assets for drawing it on `c`,
+// releasing those of the document bound before. A host drawing several
+// documents keeps a renderer for each.
+lottie_renderer_bind :: proc(r: ^Lottie_Renderer, c: ^Canvas, doc: ^Lottie_Document) {
+	lottie_renderer_unbind(r, c)
+	resize(&r.images, len(doc.bitmaps))
+	for &b, i in doc.bitmaps {
+		// Shared by pixel address: players of several recording canvases
+		// share one texture.
+		r.images[i], _ = create_image_shared(c, image_source_rgba(b.pixels, b.width, b.height), u64(uintptr(raw_data(b.pixels))), stable = true)
+	}
+}
+
+// Releases the bound document's images (before destroying the document).
+lottie_renderer_unbind :: proc(r: ^Lottie_Renderer, c: ^Canvas) {
+	for id in r.images {
+		if image_id_valid(id) {
 			delete_image(c, id)
-			delete_key(&r.images, key)
 		}
 	}
+	clear(&r.images)
 }
 
 // Draws `doc` at `frame` (comp frames: `lottie_frame_at` maps seconds)
@@ -562,17 +571,11 @@ lottie_draw_image :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer) {
 		return
 	}
 	c, r := d.c, d.r
-	b := &d.doc.bitmaps[l.ref]
-	key := uintptr(raw_data(b.pixels))
-	id, found := r.images[key]
-	if !found {
-		err: Error
-		id, err = create_image_shared(c, image_source_rgba(b.pixels, b.width, b.height), u64(key), stable = true)
-		if err != nil {
-			return
-		}
-		r.images[key] = id
+	if int(l.ref) >= len(r.images) || !image_id_valid(r.images[l.ref]) {
+		return // not bound to the document (lottie_renderer_bind)
 	}
+	b := &d.doc.bitmaps[l.ref]
+	id := r.images[l.ref]
 	w, h := f32(b.width), f32(b.height)
 	if l.w > 0 && l.h > 0 {
 		// @2x and downscaled assets stretch to their asset size (lottie-web).

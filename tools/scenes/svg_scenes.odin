@@ -47,6 +47,7 @@ scene_svg :: proc(c: ^vg.Canvas, r: ^Resources) {
 	if !r.svg_ready {
 		r.svg_doc, _ = vg.svg_parse(transmute([]u8)string(SVG_SCENE), {fonts = &r.svg_fonts})
 		vg.svg_layout(&r.svg_doc, &r.svg_fonts, &r.svg_text)
+		vg.svg_renderer_bind(&r.svg, c, &r.svg_doc)
 		r.svg_ready = true
 	}
 	vg.layer_stack_begin(&r.layers, c, W, H)

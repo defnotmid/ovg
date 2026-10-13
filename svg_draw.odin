@@ -30,24 +30,60 @@ Svg_Override :: struct {
 	visible:           Maybe(bool),
 }
 
-// Per-canvas drawing state, reused across draws (no allocation per element
-// once warm).
+// The state drawing one document on one canvas keeps, reused across draws
+// (no allocation per element once warm). `svg_renderer_bind` gives it the
+// document's images; a host drawing several documents keeps a renderer for
+// each.
 Svg_Renderer :: struct {
 	path:        Path,
 	clip:        Path,
 	// Per document id: the override index, or -1.
 	override_of: [dynamic]i32,
-	// Canvas images of document bitmaps, by pixel address (and nearest).
-	images:      map[uintptr]Image_Id,
+	// Canvas images of the bound document's bitmaps, by bitmap: smooth,
+	// then nearest (made only for bitmaps an image draws pixelated).
+	images:      [dynamic][2]Image_Id,
+}
+
+// Makes the canvas images of `doc`'s bitmaps for drawing it on `c`,
+// releasing those of the document bound before.
+svg_renderer_bind :: proc(r: ^Svg_Renderer, c: ^Canvas, doc: ^Svg_Document) {
+	svg_renderer_unbind(r, c)
+	resize(&r.images, len(doc.bitmaps))
+	pixelated := make([]bool, len(doc.bitmaps), context.temp_allocator)
+	for im in doc.images {
+		if im.pixelated && im.bitmap >= 0 {
+			pixelated[im.bitmap] = true
+		}
+	}
+	for &b, i in doc.bitmaps {
+		src := image_source_rgba(b.pixels, b.width, b.height)
+		// Shared by pixel address: players of several recording canvases
+		// share one texture.
+		key := u64(uintptr(raw_data(b.pixels)))
+		r.images[i][0], _ = create_image_shared(c, src, key, stable = true)
+		if pixelated[i] {
+			r.images[i][1], _ = create_image_shared(c, src, key ~ 1, stable = true, flags = {.Nearest})
+		}
+	}
+}
+
+// Releases the bound document's images (before destroying the document).
+svg_renderer_unbind :: proc(r: ^Svg_Renderer, c: ^Canvas) {
+	for pair in r.images {
+		for id in pair {
+			if image_id_valid(id) {
+				delete_image(c, id)
+			}
+		}
+	}
+	clear(&r.images)
 }
 
 svg_renderer_destroy :: proc(r: ^Svg_Renderer, c: ^Canvas) {
+	svg_renderer_unbind(r, c)
 	path_destroy(&r.path)
 	path_destroy(&r.clip)
 	delete(r.override_of)
-	for _, id in r.images {
-		delete_image(c, id)
-	}
 	delete(r.images)
 	r^ = {}
 }
@@ -116,20 +152,6 @@ svg_layout_destroy :: proc(l: ^Svg_Layout) {
 	text_layout_destroy(&l.line)
 	delete(l.pieces)
 	l^ = {}
-}
-
-// Frees the canvas images made for `doc` (call before destroying a
-// document the renderer drew).
-svg_renderer_release :: proc(r: ^Svg_Renderer, c: ^Canvas, doc: ^Svg_Document) {
-	for b in doc.bitmaps {
-		key := uintptr(raw_data(b.pixels))
-		for k in ([2]uintptr{key, key ~ 1}) {
-			if id, ok := r.images[k]; ok {
-				delete_image(c, id)
-				delete_key(&r.images, k)
-			}
-		}
-	}
 }
 
 // Draws `doc` into its `width x height` coordinate system, mapped by
@@ -237,7 +259,7 @@ svg_draw_node :: proc(d: ^Svg_Draw, i: i32, inh: Svg_Inherit, clip_mode: bool) {
 			// the node's layer pops, within this call).
 			ids := make([]Image_Id, len(bms), context.temp_allocator)
 			for bm, i in bms {
-				ids[i] = svg_bitmap_image(c, d.r, doc, bm, false)
+				ids[i] = svg_bitmap_image(d.r, bm, false)
 			}
 			fl.images = ids
 		}
@@ -686,25 +708,14 @@ svg_draw_text :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Colo
 	}
 }
 
-// The canvas image of document bitmap `bm` (made once per renderer).
+// The canvas image of document bitmap `bm` (svg_renderer_bind); none when
+// the renderer isn't bound to the document.
 @(private)
-svg_bitmap_image :: proc(c: ^Canvas, r: ^Svg_Renderer, doc: ^Svg_Document, bm: i32, pixelated: bool) -> Image_Id {
-	b := &doc.bitmaps[bm]
-	key := uintptr(raw_data(b.pixels))
-	if pixelated {
-		key ~= 1
+svg_bitmap_image :: proc(r: ^Svg_Renderer, bm: i32, pixelated: bool) -> Image_Id {
+	if bm < 0 || int(bm) >= len(r.images) {
+		return {}
 	}
-	id, found := r.images[key]
-	if !found {
-		flags: Image_Flags = {.Nearest} if pixelated else {}
-		err: Error
-		id, err = create_image_shared(c, image_source_rgba(b.pixels, b.width, b.height), u64(key), stable = true, flags = flags)
-		if err != nil {
-			return {}
-		}
-		r.images[key] = id
-	}
-	return id
+	return r.images[bm][1 if pixelated else 0]
 }
 
 @(private)
@@ -712,7 +723,7 @@ svg_draw_image :: proc(d: ^Svg_Draw, n: ^Svg_Node) {
 	doc, c, r := d.doc, d.c, d.r
 	im := &doc.images[n.data]
 	b := &doc.bitmaps[im.bitmap]
-	id := svg_bitmap_image(c, r, doc, im.bitmap, im.pixelated)
+	id := svg_bitmap_image(r, im.bitmap, im.pixelated)
 	if !image_id_valid(id) {
 		return
 	}

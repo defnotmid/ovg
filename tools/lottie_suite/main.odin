@@ -139,6 +139,8 @@ main :: proc() {
 			os.exit(1)
 		}
 		defer vg.lottie_destroy(&doc)
+		vg.lottie_renderer_bind(&rd.r, &rd.c, &doc)
+		defer vg.lottie_renderer_unbind(&rd.r, &rd.c)
 		for w in doc.warnings {
 			fmt.println("warning:", w)
 		}
@@ -174,6 +176,7 @@ main :: proc() {
 			fmt.printfln("FAIL %s (does not parse)", filepath.base(f))
 			continue
 		}
+		vg.lottie_renderer_bind(&rd.r, &rd.c, &doc)
 		stem := filepath.stem(f)
 		dir := filepath.dir(f)
 		infos, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
@@ -236,6 +239,7 @@ main :: proc() {
 				fmt.printfln("     %s: %s", stem, w)
 			}
 		}
+		vg.lottie_renderer_unbind(&rd.r, &rd.c)
 		vg.lottie_destroy(&doc)
 		free_all(context.temp_allocator)
 	}
@@ -274,6 +278,7 @@ run_bench :: proc(rd: ^Renderer, path: string, n: int) {
 	defer vg.layer_stack_destroy(&rls, &rec)
 	rr: vg.Lottie_Renderer
 	defer vg.lottie_renderer_destroy(&rr, &rec)
+	vg.lottie_renderer_bind(&rr, &rec, &doc)
 	w, h := u32(doc.width), u32(doc.height)
 	frame_at :: proc(doc: ^vg.Lottie_Document, i, n: int, span: f32) -> f32 {
 		return doc.in_frame + span * f32(i) / f32(max(n, 1))

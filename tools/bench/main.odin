@@ -73,7 +73,7 @@ main :: proc() {
 
 	svg := svg_scene_open(&b, svg_scene_markup(8000))
 	svg_text := svg_scene_open(&b, svg_text_markup(300))
-	lottie := lottie_open(lottie_scene_json(200))
+	lottie := lottie_open(&b, lottie_scene_json(200))
 	text: Text_Work
 	canvas: Canvas_Work
 	works := [?]Workload {
@@ -184,6 +184,7 @@ svg_scene_open :: proc(b: ^Bench, markup: string) -> Svg_Work {
 	}
 	w.doc = doc
 	vg.svg_layout(&w.doc, &b.fonts, &w.text)
+	vg.svg_renderer_bind(&w.renderer, &b.canvas, &w.doc)
 	return w
 }
 
@@ -278,7 +279,7 @@ Lottie_Work :: struct {
 	renderer: vg.Lottie_Renderer,
 }
 
-lottie_open :: proc(json: string) -> Lottie_Work {
+lottie_open :: proc(b: ^Bench, json: string) -> Lottie_Work {
 	w := Lottie_Work{json = json}
 	doc, err := vg.lottie_parse(transmute([]u8)json)
 	if err != nil {
@@ -286,6 +287,7 @@ lottie_open :: proc(json: string) -> Lottie_Work {
 		os.exit(1)
 	}
 	w.doc = doc
+	vg.lottie_renderer_bind(&w.renderer, &b.canvas, &w.doc)
 	return w
 }
 

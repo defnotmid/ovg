@@ -25,6 +25,7 @@ svg_fx_open :: proc(s: ^Svg_Fx, markup: string) -> Svg_Error {
 	err: Svg_Error
 	s.doc, err = svg_parse(transmute([]u8)markup, {fonts = &s.fonts})
 	svg_layout(&s.doc, &s.fonts, &s.text)
+	svg_renderer_bind(&s.r, &s.canvas, &s.doc)
 	return err
 }
 

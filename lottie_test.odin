@@ -24,6 +24,7 @@ lottie_fx_open :: proc(s: ^Lottie_Fx, json: string) -> Lottie_Error {
 	canvas_init(&s.canvas, software_backend(&s.backend))
 	err: Lottie_Error
 	s.doc, err = lottie_parse(transmute([]u8)json)
+	lottie_renderer_bind(&s.r, &s.canvas, &s.doc)
 	return err
 }
 
