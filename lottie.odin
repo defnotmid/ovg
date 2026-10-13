@@ -243,13 +243,9 @@ Lottie_Effect_Kind :: enum u8 {
 	Gaussian_Blur,
 }
 
-// A layer effect (`ef`): its controls' values (each `ef[k].v`) in order,
-// as props in `effect_params` (-1 for a control without a value).
-// Tint: black, white colours, amount (%). Fill: colour at 2, opacity
-// (0..1) at 6. Tritone: highlight, midtone, shadow colours. Drop shadow:
-// colour, opacity (0..255), direction (degrees), distance, softness.
-// Gaussian blur: blurriness, dimensions (1 both, 2 horizontal, 3
-// vertical).
+// A layer effect (`ef`): the controls its kind reads (LOTTIE_EFFECTS), as
+// props in `effect_params`, one per slot of the kind's table row (-1 for a
+// control the file leaves out).
 Lottie_Effect :: struct {
 	kind:   Lottie_Effect_Kind,
 	params: Range,
@@ -257,6 +253,37 @@ Lottie_Effect :: struct {
 
 // At most this many effects per layer apply (each is a filter layer).
 LOTTIE_MAX_EFFECTS :: 4
+
+// The most controls an effect kind reads.
+LOTTIE_EFFECT_MAX_PARAMS :: 5
+
+// One control an effect reads: its index in the effect's `ef` list and its
+// value when the file leaves it out.
+Lottie_Effect_Param :: struct {
+	control: u8,
+	default: [4]f32,
+}
+
+// An effect kind: its After Effects type number (`ty`) and the controls it
+// reads, by slot.
+Lottie_Effect_Info :: struct {
+	type_id: i32,
+	count:   u8,
+	params:  [LOTTIE_EFFECT_MAX_PARAMS]Lottie_Effect_Param,
+}
+
+LOTTIE_EFFECTS :: [Lottie_Effect_Kind]Lottie_Effect_Info {
+	// Black and white mapped to, amount (%).
+	.Tint          = {20, 3, {{0, {0, 0, 0, 1}}, {1, {1, 1, 1, 1}}, {2, {100, 0, 0, 0}}, {}, {}}},
+	// Colour, opacity (0..1).
+	.Fill          = {21, 2, {{2, {1, 0, 0, 1}}, {6, {1, 0, 0, 0}}, {}, {}, {}}},
+	// Shadows, midtones, highlights.
+	.Tritone       = {23, 3, {{2, {0, 0, 0, 1}}, {1, {0.5, 0.5, 0.5, 1}}, {0, {1, 1, 1, 1}}, {}, {}}},
+	// Colour, opacity (0..255), direction (degrees), distance, softness.
+	.Drop_Shadow   = {25, 5, {{0, {0, 0, 0, 1}}, {1, {255, 0, 0, 0}}, {2, {135, 0, 0, 0}}, {3, {5, 0, 0, 0}}, {4, {}}}},
+	// Blurriness, dimensions (1 both, 2 horizontal, 3 vertical).
+	.Gaussian_Blur = {29, 2, {{0, {}}, {1, {1, 0, 0, 0}}, {}, {}, {}}},
+}
 
 // A font of the `fonts` list: text documents name it by `name`; drawn
 // with the host collection's face for `family` and `style`.
@@ -1192,22 +1219,19 @@ lottie_parse_effects :: proc(p: ^Lottie_Parser, arr: json.Array) -> Range {
 			continue
 		}
 		e: Lottie_Effect
-		switch int(lj_num(eo, "ty", -1)) {
-		case 20:
-			e.kind = .Tint
-		case 21:
-			e.kind = .Fill
-		case 23:
-			e.kind = .Tritone
-		case 25:
-			e.kind = .Drop_Shadow
-		case 29:
-			e.kind = .Gaussian_Blur
-		case 5:
+		ty := i32(lj_num(eo, "ty", -1))
+		if ty == 5 {
 			// Expression controls (sliders, checkboxes ...): no pixels.
 			continue
-		case:
-			lottie_warn(p, "effect %q (type %d) is not supported", lj_str(eo, "nm"), int(lj_num(eo, "ty", -1)))
+		}
+		known := false
+		for info, kind in LOTTIE_EFFECTS {
+			if info.type_id == ty {
+				e.kind, known = kind, true
+			}
+		}
+		if !known {
+			lottie_warn(p, "effect %q (type %d) is not supported", lj_str(eo, "nm"), ty)
 			continue
 		}
 		if r.count == LOTTIE_MAX_EFFECTS {
@@ -1215,10 +1239,16 @@ lottie_parse_effects :: proc(p: ^Lottie_Parser, arr: json.Array) -> Range {
 			break
 		}
 		controls := lj_array(eo, "ef")
-		e.params = {u32(len(doc.effect_params)), u32(len(controls))}
-		for cv in controls {
-			co, _ := cv.(json.Object)
-			append(&doc.effect_params, lottie_parse_prop(p, co["v"], .Number))
+		info := LOTTIE_EFFECTS
+		row := info[e.kind]
+		e.params = {u32(len(doc.effect_params)), u32(row.count)}
+		for param in row.params[:row.count] {
+			prop := i32(-1)
+			if int(param.control) < len(controls) {
+				co, _ := controls[param.control].(json.Object)
+				prop = lottie_parse_prop(p, co["v"], .Number)
+			}
+			append(&doc.effect_params, prop)
 		}
 		append(&doc.effects, e)
 		r.count += 1

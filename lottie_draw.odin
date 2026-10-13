@@ -1153,26 +1153,19 @@ Lottie_Effect_Filter :: struct {
 @(private)
 LOTTIE_GAMMA_N :: 16
 
-// Effect control `k` at `t`.
+// Effect `e`'s parameters at `t`, by its kind's slots (LOTTIE_EFFECTS):
+// each as many floats as the control has, over the table's default.
 @(private)
-lottie_effect_param :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, k: u32, t: f32, out: []f32) {
-	if k < e.params.count {
-		lottie_eval(doc, doc.effect_params[e.params.start + k], t, out)
+lottie_effect_values :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, t: f32) -> (v: [LOTTIE_EFFECT_MAX_PARAMS][4]f32) {
+	info := LOTTIE_EFFECTS
+	row := info[e.kind]
+	for k in 0 ..< int(row.count) {
+		v[k] = row.params[k].default
+		if u32(k) < e.params.count {
+			lottie_eval(doc, doc.effect_params[e.params.start + u32(k)], t, v[k][:])
+		}
 	}
-}
-
-@(private)
-lottie_effect_num :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, k: u32, t: f32, def: f32) -> f32 {
-	v := [1]f32{def}
-	lottie_effect_param(doc, e, k, t, v[:])
-	return v[0]
-}
-
-@(private)
-lottie_effect_color :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, k: u32, t: f32, def: Color) -> Color {
-	v := [4]f32{def.r, def.g, def.b, 1}
-	lottie_effect_param(doc, e, k, t, v[:])
-	return {v[0], v[1], v[2], 1}
+	return
 }
 
 // Builds the filter of effect `e` at `t` into `fx` (as lottie-web's SVG
@@ -1210,16 +1203,17 @@ lottie_effect_filter :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, t: f32, f
 		}
 	}
 	fx.filter = {srgb = true}
+	v := lottie_effect_values(doc, e, t)
+	color :: proc "contextless" (v: [4]f32) -> Color {
+		return {v[0], v[1], v[2], 1}
+	}
 	switch e.kind {
 	case .Fill:
-		col := lottie_effect_color(doc, e, 2, t, {1, 0, 0, 1})
-		o := lottie_effect_num(doc, e, 6, t, 1)
+		col, o := color(v[0]), v[1].x
 		p := prim(fx, &n, .Color_Matrix)
 		p.color_matrix = {0, 0, 0, 0, col.r, 0, 0, 0, 0, col.g, 0, 0, 0, 0, col.b, 0, 0, 0, o, 0}
 	case .Tint:
-		black := lottie_effect_color(doc, e, 0, t, BLACK)
-		white := lottie_effect_color(doc, e, 1, t, WHITE)
-		amount := lottie_effect_num(doc, e, 2, t, 100) / 100
+		black, white, amount := color(v[0]), color(v[1]), v[2].x / 100
 		if amount == 0 {
 			return false
 		}
@@ -1232,7 +1226,7 @@ lottie_effect_filter :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, t: f32, f
 		merge.merge_count = 3
 		fx.filter.merge_refs = fx.refs[:]
 	case .Tritone:
-		cols := [3]Color{lottie_effect_color(doc, e, 2, t, BLACK), lottie_effect_color(doc, e, 1, t, {0.5, 0.5, 0.5, 1}), lottie_effect_color(doc, e, 0, t, WHITE)}
+		cols := [3]Color{color(v[0]), color(v[1]), color(v[2])}
 		gray(fx, &n, 1)
 		tones := prim(fx, &n, .Component_Transfer)
 		for c in 0 ..< 3 {
@@ -1242,11 +1236,11 @@ lottie_effect_filter :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, t: f32, f
 			tones.transfer[c] = {kind = .Table, first = u16(2 * LOTTIE_GAMMA_N + c * 3), count = 3}
 		}
 	case .Drop_Shadow:
-		col := lottie_effect_color(doc, e, 0, t, BLACK)
-		col.a = clamp(lottie_effect_num(doc, e, 1, t, 255) / 255, 0, 1)
-		angle := (lottie_effect_num(doc, e, 2, t, 135) - 90) * math.RAD_PER_DEG
-		dist := lottie_effect_num(doc, e, 3, t, 5)
-		sigma := max(lottie_effect_num(doc, e, 4, t, 0), 0) / 4
+		col := color(v[0])
+		col.a = clamp(v[1].x / 255, 0, 1)
+		angle := (v[2].x - 90) * math.RAD_PER_DEG
+		dist := v[3].x
+		sigma := max(v[4].x, 0) / 4
 		if col.a <= 0 {
 			return false
 		}
@@ -1256,8 +1250,8 @@ lottie_effect_filter :: proc(doc: ^Lottie_Document, e: ^Lottie_Effect, t: f32, f
 		p.dx, p.dy = dist * math.cos(angle), dist * math.sin(angle)
 		fx.filter.srgb = false
 	case .Gaussian_Blur:
-		sigma := max(lottie_effect_num(doc, e, 0, t, 0), 0) * 0.3
-		dims := int(lottie_effect_num(doc, e, 1, t, 1))
+		sigma := max(v[0].x, 0) * 0.3
+		dims := int(v[1].x)
 		std := [2]f32{0 if dims == 3 else sigma, 0 if dims == 2 else sigma}
 		if std == {} {
 			return false
