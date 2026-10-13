@@ -101,8 +101,9 @@ SDL_Backend :: struct {
 
 // Prepares the backend on `device`, or on a new headless device when nil
 // (SDL's video subsystem is initialized; without a display the
-// `offscreen` video driver is used).
-init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context.allocator) -> vg.Error {
+// `offscreen` video driver is used). On failure what was made is released
+// (an owned device too): `destroy` is not needed.
+init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context.allocator) -> (err: vg.Error) {
 	b^ = {
 		allocator = allocator,
 		device    = device,
@@ -113,6 +114,9 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		paints    = make([dynamic]Paint, allocator),
 		rows      = make([dynamic]Row, allocator),
 		piece_index = make([dynamic]u32, allocator),
+	}
+	defer if err != nil {
+		destroy(b)
 	}
 	if b.device == nil {
 		if .VIDEO not_in sdl.WasInit({.VIDEO}) && !sdl.Init({.VIDEO}) {
@@ -188,27 +192,31 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 				address_mode_w = .CLAMP_TO_EDGE,
 			},
 		)
+		if s == nil {
+			return .General
+		}
 	}
 
-	white, err := create_texture(b, 1, 1, .R8G8B8A8_UNORM, {.SAMPLER})
-	if err != nil {
-		return err
-	}
-	b.white = white
+	b.white = create_texture(b, 1, 1, .R8G8B8A8_UNORM, {.SAMPLER}) or_return
 	pixel := [4]u8{255, 255, 255, 255}
-	upload(b, b.white, pixel[:], 0, 0, 1, 1)
-	transparent, terr := create_texture(b, 1, 1, .R8G8B8A8_UNORM, {.SAMPLER})
-	if terr != nil {
-		return terr
-	}
-	b.transparent = transparent
+	upload(b, b.white, pixel[:], 0, 0, 1, 1) or_return
+	b.transparent = create_texture(b, 1, 1, .R8G8B8A8_UNORM, {.SAMPLER}) or_return
 	zero := [4]u8{}
-	upload(b, b.transparent, zero[:], 0, 0, 1, 1)
+	upload(b, b.transparent, zero[:], 0, 0, 1, 1) or_return
 	return nil
 }
 
 destroy :: proc(b: ^SDL_Backend) {
 	if b.device == nil {
+		// init failed before having a device: only the tables to free.
+		delete(b.pipelines)
+		delete(b.stencils)
+		delete(b.scratch)
+		delete(b.verts)
+		delete(b.paints)
+		delete(b.rows)
+		delete(b.piece_index)
+		b^ = {}
 		return
 	}
 	_ = sdl.WaitForGPUIdle(b.device)
@@ -228,7 +236,9 @@ destroy :: proc(b: ^SDL_Backend) {
 	}
 	delete(b.scratch)
 	for s in b.samplers {
-		sdl.ReleaseGPUSampler(b.device, s)
+		if s != nil {
+			sdl.ReleaseGPUSampler(b.device, s)
+		}
 	}
 	release_image(b, b.white)
 	release_image(b, b.transparent)
@@ -236,8 +246,12 @@ destroy :: proc(b: ^SDL_Backend) {
 	stream_release(b, &b.vertex_stream)
 	stream_release(b, &b.index_stream)
 	stream_release(b, &b.paint_stream)
-	sdl.ReleaseGPUShader(b.device, b.vert)
-	sdl.ReleaseGPUShader(b.device, b.frag)
+	if b.vert != nil {
+		sdl.ReleaseGPUShader(b.device, b.vert)
+	}
+	if b.frag != nil {
+		sdl.ReleaseGPUShader(b.device, b.frag)
+	}
 	delete(b.verts)
 	delete(b.paints)
 	delete(b.rows)
@@ -436,9 +450,22 @@ sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image,
 	// images such as the glyph atlas sample their untouched texels.
 	if .COLOR_TARGET in usage {
 		cmd := sdl.AcquireGPUCommandBuffer(b.device)
+		if cmd == nil {
+			release_image(b, img)
+			return {}, .General
+		}
 		target := sdl.GPUColorTargetInfo{texture = img.texture, load_op = .CLEAR, store_op = .STORE}
-		sdl.EndGPURenderPass(sdl.BeginGPURenderPass(cmd, &target, 1, nil))
-		_ = sdl.SubmitGPUCommandBuffer(cmd)
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		if pass == nil {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
+			release_image(b, img)
+			return {}, .General
+		}
+		sdl.EndGPURenderPass(pass)
+		if !sdl.SubmitGPUCommandBuffer(cmd) {
+			release_image(b, img)
+			return {}, .General
+		}
 	} else {
 		w, h := max(info.width, 1), max(info.height, 1)
 		zero := make([]u8, int(w * h * vg.bytes_per_pixel(info.format if info.format != .RGB8 else .RGBA8)), context.temp_allocator)
@@ -499,7 +526,14 @@ upload :: proc(b: ^SDL_Backend, img: ^Image, pixels: []u8, x, y, w, h: u32) -> v
 	sdl.UnmapGPUTransferBuffer(b.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(b.device)
+	if cmd == nil {
+		return .General
+	}
 	pass := sdl.BeginGPUCopyPass(cmd)
+	if pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return .General
+	}
 	sdl.UploadToGPUTexture(
 		pass,
 		{transfer_buffer = transfer, pixels_per_row = w, rows_per_layer = h},
@@ -531,7 +565,14 @@ read_texture :: proc(b: ^SDL_Backend, img: Image, allocator := context.allocator
 	defer sdl.ReleaseGPUTransferBuffer(b.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(b.device)
+	if cmd == nil {
+		return nil, .General
+	}
 	pass := sdl.BeginGPUCopyPass(cmd)
+	if pass == nil {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return nil, .General
+	}
 	sdl.DownloadFromGPUTexture(
 		pass,
 		{texture = img.texture, w = img.width, h = img.height, d = 1},

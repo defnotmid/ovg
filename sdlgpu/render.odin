@@ -93,35 +93,66 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	vert_count := len(frame.verts) + len(b.verts)
 	index_count := int(b.piece_index[len(frame.pieces)])
 	paint_count := len(frame.paints) + len(b.paints)
-	stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX})
-	stream_reserve(b, &b.index_stream, index_count * size_of(u32), {.INDEX})
-	stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ})
+	// A frame whose buffers the device can't provide (out of memory, a lost
+	// device) is dropped, not drawn from nil buffers.
+	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX}) ||
+	   !stream_reserve(b, &b.index_stream, index_count * size_of(u32), {.INDEX}) ||
+	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) {
+		return
+	}
 
-	cmd := o.command_buffer if o != nil && o.command_buffer != nil else sdl.AcquireGPUCommandBuffer(b.device)
+	owned := o == nil || o.command_buffer == nil
+	cmd := sdl.AcquireGPUCommandBuffer(b.device) if owned else o.command_buffer
 	if cmd == nil {
 		return
 	}
-	copy_pass := sdl.BeginGPUCopyPass(cmd)
-	if verts := ([^]vg.Vertex)(stream_map(b, &b.vertex_stream, vert_count)); verts != nil {
-		copy(verts[:len(frame.verts)], frame.verts)
-		copy(verts[len(frame.verts):vert_count], b.verts[:])
-		stream_commit(b, &b.vertex_stream, copy_pass, vert_count * size_of(vg.Vertex))
-	}
-	if indices := ([^]u32)(stream_map(b, &b.index_stream, index_count)); indices != nil {
-		write_indices(indices[:index_count], frame.pieces)
-		stream_commit(b, &b.index_stream, copy_pass, index_count * size_of(u32))
-	}
-	if paints := ([^]Paint)(stream_map(b, &b.paint_stream, paint_count)); paints != nil {
-		for params, i in frame.paints {
-			paints[i] = vg.pack_frag_uniforms(params)
+	drop :: proc(cmd: ^sdl.GPUCommandBuffer, owned: bool) {
+		if owned {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
 		}
-		copy(paints[len(frame.paints):paint_count], b.paints[:])
-		stream_commit(b, &b.paint_stream, copy_pass, paint_count * size_of(Paint))
+	}
+	copy_pass := sdl.BeginGPUCopyPass(cmd)
+	if copy_pass == nil {
+		drop(cmd, owned)
+		return
+	}
+	uploaded := true
+	if vert_count > 0 {
+		if verts := ([^]vg.Vertex)(stream_map(b, &b.vertex_stream, vert_count)); verts != nil {
+			copy(verts[:len(frame.verts)], frame.verts)
+			copy(verts[len(frame.verts):vert_count], b.verts[:])
+			stream_commit(b, &b.vertex_stream, copy_pass, vert_count * size_of(vg.Vertex))
+		} else {
+			uploaded = false
+		}
+	}
+	if index_count > 0 {
+		if indices := ([^]u32)(stream_map(b, &b.index_stream, index_count)); indices != nil {
+			write_indices(indices[:index_count], frame.pieces)
+			stream_commit(b, &b.index_stream, copy_pass, index_count * size_of(u32))
+		} else {
+			uploaded = false
+		}
+	}
+	if paint_count > 0 {
+		if paints := ([^]Paint)(stream_map(b, &b.paint_stream, paint_count)); paints != nil {
+			for params, i in frame.paints {
+				paints[i] = vg.pack_frag_uniforms(params)
+			}
+			copy(paints[len(frame.paints):paint_count], b.paints[:])
+			stream_commit(b, &b.paint_stream, copy_pass, paint_count * size_of(Paint))
+		} else {
+			uploaded = false
+		}
 	}
 	sdl.EndGPUCopyPass(copy_pass)
+	if !uploaded {
+		drop(cmd, owned)
+		return
+	}
 	record_rows(b, cmd, images, frame)
 
-	if o != nil && o.command_buffer != nil {
+	if !owned {
 		return
 	}
 	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
@@ -145,15 +176,22 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 
 // ---- streams --------------------------------------------------------------------------
 
+// Grows the stream to hold `size` bytes; false (the stream left empty) when
+// the device can't make its buffers.
 @(private)
-stream_reserve :: proc(b: ^SDL_Backend, s: ^Stream, size: int, usage: sdl.GPUBufferUsageFlags) {
+stream_reserve :: proc(b: ^SDL_Backend, s: ^Stream, size: int, usage: sdl.GPUBufferUsageFlags) -> bool {
 	if u32(size) <= s.capacity && s.buffer != nil {
-		return
+		return true
 	}
 	stream_release(b, s)
 	s.capacity = u32(math.next_power_of_two(max(size, 64 * 1024)))
 	s.buffer = sdl.CreateGPUBuffer(b.device, {usage = usage, size = s.capacity})
 	s.transfer = sdl.CreateGPUTransferBuffer(b.device, {usage = .UPLOAD, size = s.capacity})
+	if s.buffer == nil || s.transfer == nil {
+		stream_release(b, s)
+		return false
+	}
+	return true
 }
 
 @(private)
@@ -596,9 +634,10 @@ record_rows :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer, images: ^vg.Ima
 		case .Copy:
 			flush(&r)
 			end_pass(&r)
-			pass := sdl.BeginGPUCopyPass(cmd)
-			sdl.CopyGPUTextureToTexture(pass, {texture = row.textures[0].texture}, {texture = row.target.texture}, row.target.width, row.target.height, 1, false)
-			sdl.EndGPUCopyPass(pass)
+			if pass := sdl.BeginGPUCopyPass(cmd); pass != nil {
+				sdl.CopyGPUTextureToTexture(pass, {texture = row.textures[0].texture}, {texture = row.target.texture}, row.target.width, row.target.height, 1, false)
+				sdl.EndGPUCopyPass(pass)
+			}
 		case .Program:
 			flush(&r)
 			end_pass(&r)
