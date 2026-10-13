@@ -611,10 +611,9 @@ every part follows:
   collection parses a face for kb on first use and pools `Text_Shaper`s
   (shape configs, scratchpads, glyph storage, layout tables), so layouts
   may run concurrently on one collection; a warm shaper does not allocate.
-  Shaped segments are cached by content (face, script, direction,
-  codepoints, ligature flag; cleared whole past 64 k glyphs), so text drawn
-  every frame costs about what the unshaped layout did (1.1 us for a 42
-  character line; 4.8 us when shaped from scratch). Not handled: explicit
+  Every call shapes what it is given: a `Text_Layout` is data out, kept
+  by the caller and drawn again while its text is unchanged. Not handled:
+  explicit
   bidi controls (U+202A..U+202E, U+2066..U+2069, unsupported by kb), a
   right-to-left paragraph direction, vertical text, font features chosen
   by the caller. `layout_simple` still places plain left-to-right text

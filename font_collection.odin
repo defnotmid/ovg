@@ -68,9 +68,8 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 	if err != nil {
 		return false
 	}
-	// Pooled shapers hold the old face's kb font (configs) and glyphs
-	// shaped with it (cache, keyed by the data address, which new data may
-	// reuse): they go with it.
+	// Pooled shapers hold the old face's kb font (configs, keyed by the
+	// data address, which new data may reuse): they go with it.
 	sync.mutex_lock(&c.shape_lock)
 	for s in c.shapers {
 		shaper_destroy(s)

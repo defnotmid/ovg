@@ -2,8 +2,6 @@ package ovg
 
 import "base:runtime"
 import "core:c"
-import "core:hash/xxhash"
-import "core:slice"
 import "core:sync"
 import kb "vendor:kb_text_shape"
 
@@ -13,8 +11,8 @@ import kb "vendor:kb_text_shape"
 //
 // Font_Collection keeps the shared, read-only state: a kb font per face,
 // parsed on first use. Mutable state (shape configs with their scratchpads,
-// glyph storage, the per-codepoint and per-glyph tables of a layout, a cache
-// of shaped segments) lives in a `Text_Shaper`; the collection pools them so
+// glyph storage, the per-codepoint and per-glyph tables of a layout) lives
+// in a `Text_Shaper`; the collection pools them so
 // concurrent layouts on one collection each take their own, and a warm
 // shaper lays out without allocating.
 
@@ -87,13 +85,6 @@ Text_Shaper :: struct {
 	order:       [dynamic]i32,
 	// Shaped glyphs of the current line.
 	glyphs:      [dynamic]Shaped_Glyph,
-	// Shaped segments by content (face, script, level, codepoints with
-	// their ligature flag): text drawn every frame shapes once. Cleared
-	// whole when it outgrows SHAPE_CACHE_GLYPHS.
-	cache:       map[u64]Shape_Cache_Entry,
-	cache_keys:  [dynamic]u32,
-	cache_rows:  [dynamic]Shaped_Glyph, // clusters relative to the segment
-	key:         [dynamic]u32, // scratch
 }
 
 // One shaped glyph, in font units (y up). The layout reads every field per
@@ -107,15 +98,6 @@ Shaped_Glyph :: struct {
 	// Attached to a base glyph (takes no letter-spacing).
 	mark:    bool,
 }
-
-@(private)
-Shape_Cache_Entry :: struct {
-	key_first, key_count:     i32,
-	glyph_first, glyph_count: i32,
-}
-
-@(private)
-SHAPE_CACHE_GLYPHS :: 1 << 16
 
 @(private)
 shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
@@ -141,10 +123,6 @@ shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
 	s.segs.allocator = allocator
 	s.order.allocator = allocator
 	s.glyphs.allocator = allocator
-	s.cache.allocator = allocator
-	s.cache_keys.allocator = allocator
-	s.cache_rows.allocator = allocator
-	s.key.allocator = allocator
 	_ = kb.InitializeGlyphStorage(&s.storage, kb_allocator, nil)
 	return s
 }
@@ -186,10 +164,6 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 	delete(s.segs)
 	delete(s.order)
 	delete(s.glyphs)
-	delete(s.cache)
-	delete(s.cache_keys)
-	delete(s.cache_rows)
-	delete(s.key)
 	free(s, s.configs.allocator)
 }
 
@@ -330,39 +304,19 @@ shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 	bidi_resolve(s.bidi[a:b], s.level[a:b])
 }
 
-// Shapes one segment, appending its glyphs to the shaper's line glyphs
-// (from the cache when the same segment was shaped before).
+// Shapes one segment, appending its glyphs to the shaper's line glyphs.
 @(private)
 shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segment, pieces: []Text_Piece) {
 	seg.glyph_first = i32(len(s.glyphs))
 	defer seg.glyph_count = i32(len(s.glyphs)) - seg.glyph_first
-
-	clear(&s.key)
-	data := u64(uintptr(raw_data(seg.font.data)))
-	append(&s.key, u32(data), u32(data >> 32), u32(seg.font.info.fontstart), u32(seg.script), u32(seg.level))
-	for i in seg.first ..< seg.first + seg.count {
-		r := u32(s.runes[i])
-		if pieces[s.piece[i]].style.letter_spacing != 0 {
-			r |= 1 << 31
-		}
-		append(&s.key, r)
-	}
-	hash := xxhash.XXH3_64_default(slice.to_bytes(s.key[:]))
-	if e, ok := s.cache[hash]; ok && slice.equal(s.cache_keys[e.key_first:][:e.key_count], s.key[:]) {
-		for g in s.cache_rows[e.glyph_first:][:e.glyph_count] {
-			row := g
-			row.cluster += seg.first
-			append(&s.glyphs, row)
-		}
-		return
-	}
 
 	cfg := shaper_config(fonts, s, seg.font, seg.script)
 	shaped := false
 	if cfg.kb_font != nil {
 		kb.ClearActiveGlyphs(&s.storage)
 		for i in seg.first ..< seg.first + seg.count {
-			gc := cfg.no_liga if s.key[5 + i - seg.first] >> 31 != 0 else nil
+			// Letter-spacing turns ligatures off (CSS).
+			gc := cfg.no_liga if pieces[s.piece[i]].style.letter_spacing != 0 else nil
 			_ = kb.PushGlyph(&s.storage, cfg.kb_font, s.runes[i], gc, c.int(i))
 		}
 		dir: kb.direction = .KBTS_DIRECTION_RTL if seg.level & 1 == 1 else .KBTS_DIRECTION_LTR
@@ -394,19 +348,6 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 		for j in 1 ..< len(rows) {
 			rows[j - 1].advance += font_glyph_kern(seg.font, rows[j - 1].id, rows[j].id)
 		}
-	}
-
-	if len(s.cache_rows) + len(rows) > SHAPE_CACHE_GLYPHS {
-		clear(&s.cache)
-		clear(&s.cache_keys)
-		clear(&s.cache_rows)
-	}
-	s.cache[hash] = {i32(len(s.cache_keys)), i32(len(s.key)), i32(len(s.cache_rows)), i32(len(rows))}
-	append(&s.cache_keys, ..s.key[:])
-	for g in rows {
-		row := g
-		row.cluster -= seg.first
-		append(&s.cache_rows, row)
 	}
 }
 
