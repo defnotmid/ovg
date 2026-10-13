@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 import "core:slice"
 
@@ -305,7 +306,7 @@ path_cache_expand_fill :: proc(c: ^Path_Cache, fringe_width: f32, line_join: Lin
 		if len(c.fan) > 2 {
 			center := c.fan[0]
 			for i in 1 ..< len(c.fan) - 1 {
-				append(&c.fill_verts, center, c.fan[i], c.fan[i + 1])
+				push3(&c.fill_verts, center, c.fan[i], c.fan[i + 1])
 			}
 		}
 		ct.fill = {fill_start, u32(len(c.fill_verts)) - fill_start}
@@ -324,13 +325,13 @@ path_cache_expand_fill :: proc(c: ^Path_Cache, fringe_width: f32, line_join: Lin
 				if .Bevel in p1.flags || .Inner_Bevel in p1.flags {
 					bevel_join(&c.stroke_verts, p0, p1, lw, rw, lu, ru)
 				} else {
-					append(&c.stroke_verts, vtx(p1.pos + p1.dmpos * lw, lu, 1), vtx(p1.pos - p1.dmpos * rw, ru, 1))
+					push2(&c.stroke_verts, vtx(p1.pos + p1.dmpos * lw, lu, 1), vtx(p1.pos - p1.dmpos * rw, ru, 1))
 				}
 			}
 			// Close the loop.
 			a := c.stroke_verts[stroke_start]
 			b := c.stroke_verts[stroke_start + 1]
-			append(&c.stroke_verts, Path_Vertex{a.x, a.y, lu, 1}, Path_Vertex{b.x, b.y, ru, 1})
+			push2(&c.stroke_verts, Path_Vertex{a.x, a.y, lu, 1}, Path_Vertex{b.x, b.y, ru, 1})
 		}
 		ct.stroke = {stroke_start, u32(len(c.stroke_verts)) - stroke_start}
 	}
@@ -389,7 +390,7 @@ path_cache_expand_stroke :: proc(
 						bevel_join(v, p0, p1, stroke_width, stroke_width, uv0, uv1)
 					}
 				} else {
-					append(v, vtx(p1.pos + p1.dmpos * stroke_width, uv0, 1), vtx(p1.pos - p1.dmpos * stroke_width, uv1, 1))
+					push2(v, vtx(p1.pos + p1.dmpos * stroke_width, uv0, 1), vtx(p1.pos - p1.dmpos * stroke_width, uv1, 1))
 				}
 			}
 
@@ -408,7 +409,7 @@ path_cache_expand_stroke :: proc(
 		if ct.closed && u32(len(v)) >= start + 2 {
 			a := v[start]
 			b := v[start + 1]
-			append(v, Path_Vertex{a.x, a.y, uv0, 1}, Path_Vertex{b.x, b.y, uv1, 1})
+			push2(v, Path_Vertex{a.x, a.y, uv0, 1}, Path_Vertex{b.x, b.y, uv1, 1})
 		}
 		ct.stroke = {start, u32(len(v)) - start}
 	}
@@ -547,26 +548,14 @@ curve_divisions :: proc "contextless" (radius, arc, tol: f32) -> int {
 butt_cap_start :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, w, d, aa, uv0, uv1: f32) {
 	ppos := p0.pos - p1.dpos * d
 	dl := orthogonal(p1.dpos)
-	append(
-		v,
-		vtx(ppos + dl * w - p1.dpos * aa, uv0, 0),
-		vtx(ppos - dl * w - p1.dpos * aa, uv1, 0),
-		vtx(ppos + dl * w, uv0, 1),
-		vtx(ppos - dl * w, uv1, 1),
-	)
+	push4(v, vtx(ppos + dl * w - p1.dpos * aa, uv0, 0), vtx(ppos - dl * w - p1.dpos * aa, uv1, 0), vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1))
 }
 
 @(private = "file")
 butt_cap_end :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, w, d, aa, uv0, uv1: f32) {
 	ppos := p0.pos + p1.dpos * d
 	dl := orthogonal(p1.dpos)
-	append(
-		v,
-		vtx(ppos + dl * w, uv0, 1),
-		vtx(ppos - dl * w, uv1, 1),
-		vtx(ppos + dl * w + p1.dpos * aa, uv0, 0),
-		vtx(ppos - dl * w + p1.dpos * aa, uv1, 0),
-	)
+	push4(v, vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1), vtx(ppos + dl * w + p1.dpos * aa, uv0, 0), vtx(ppos - dl * w + p1.dpos * aa, uv1, 0))
 }
 
 @(private = "file")
@@ -576,20 +565,20 @@ round_cap_start :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, w: f32, ncap: i
 	for i in 0 ..< ncap {
 		a := f32(i) / f32(ncap - 1) * math.PI
 		offset := with_basis(from_angle(a), -dl, -p1.dpos) * w
-		append(v, vtx(ppos + offset, uv0, 1), vtx(ppos, 0.5, 1))
+		push2(v, vtx(ppos + offset, uv0, 1), vtx(ppos, 0.5, 1))
 	}
-	append(v, vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1))
+	push2(v, vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1))
 }
 
 @(private = "file")
 round_cap_end :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, w: f32, ncap: int, uv0, uv1: f32) {
 	ppos := p0.pos
 	dl := orthogonal(p1.dpos)
-	append(v, vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1))
+	push2(v, vtx(ppos + dl * w, uv0, 1), vtx(ppos - dl * w, uv1, 1))
 	for i in 0 ..< ncap {
 		a := f32(i) / f32(ncap - 1) * math.PI
 		offset := with_basis(from_angle(a), -dl, p1.dpos) * w
-		append(v, vtx(ppos, 0.5, 1), vtx(ppos + offset, uv0, 1))
+		push2(v, vtx(ppos, 0.5, 1), vtx(ppos + offset, uv0, 1))
 	}
 }
 
@@ -614,14 +603,14 @@ round_join :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, lw, rw, lu, ru: f32,
 		if a1 > a0 {
 			a1 -= math.TAU
 		}
-		append(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
+		push2(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
 		n := clamp(int(math.ceil((a0 - a1) / math.PI * f32(ncap))), 2, ncap)
 		for i in 0 ..< n {
 			u := f32(i) / f32(n - 1)
 			a := a0 + u * (a1 - a0)
-			append(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos + from_angle(a) * rw, ru, 1))
+			push2(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos + from_angle(a) * rw, ru, 1))
 		}
-		append(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
+		push2(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
 	} else {
 		ra, rb := choose_bevel(.Inner_Bevel in p1.flags, p0, p1, -rw)
 		a0 := angle(dl0)
@@ -629,14 +618,14 @@ round_join :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, lw, rw, lu, ru: f32,
 		if a1 < a0 {
 			a1 += math.TAU
 		}
-		append(v, vtx(p1.pos + dl0 * rw, lu, 1), vtx(ra, ru, 1))
+		push2(v, vtx(p1.pos + dl0 * rw, lu, 1), vtx(ra, ru, 1))
 		n := clamp(int(math.ceil((a1 - a0) / math.PI * f32(ncap))), 2, ncap)
 		for i in 0 ..< n {
 			u := f32(i) / f32(n - 1)
 			a := a0 + u * (a1 - a0)
-			append(v, vtx(p1.pos + from_angle(a) * lw, lu, 1), vtx(p1.pos, 0.5, 1))
+			push2(v, vtx(p1.pos + from_angle(a) * lw, lu, 1), vtx(p1.pos, 0.5, 1))
 		}
-		append(v, vtx(p1.pos + dl1 * rw, lu, 1), vtx(rb, ru, 1))
+		push2(v, vtx(p1.pos + dl1 * rw, lu, 1), vtx(rb, ru, 1))
 	}
 }
 
@@ -647,29 +636,59 @@ bevel_join :: proc(v: ^[dynamic]Path_Vertex, p0, p1: Point, lw, rw, lu, ru: f32)
 
 	if .Left in p1.flags {
 		la, lb := choose_bevel(.Inner_Bevel in p1.flags, p0, p1, lw)
-		append(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
+		push2(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
 		if .Bevel in p1.flags {
-			append(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
-			append(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
+			push2(v, vtx(la, lu, 1), vtx(p1.pos - dl0 * rw, ru, 1))
+			push2(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
 		} else {
 			r0 := p1.pos - p1.dmpos * rw
-			append(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos - dl0 * rw, ru, 1))
-			append(v, vtx(r0, ru, 1), vtx(r0, ru, 1))
-			append(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos - dl1 * rw, ru, 1))
+			push2(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos - dl0 * rw, ru, 1))
+			push2(v, vtx(r0, ru, 1), vtx(r0, ru, 1))
+			push2(v, vtx(p1.pos, 0.5, 1), vtx(p1.pos - dl1 * rw, ru, 1))
 		}
-		append(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
+		push2(v, vtx(lb, lu, 1), vtx(p1.pos - dl1 * rw, ru, 1))
 	} else {
 		ra, rb := choose_bevel(.Inner_Bevel in p1.flags, p0, p1, -rw)
-		append(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(ra, ru, 1))
+		push2(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(ra, ru, 1))
 		if .Bevel in p1.flags {
-			append(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(ra, ru, 1))
-			append(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(rb, ru, 1))
+			push2(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(ra, ru, 1))
+			push2(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(rb, ru, 1))
 		} else {
 			l0 := p1.pos + p1.dmpos * lw
-			append(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(p1.pos, 0.5, 1))
-			append(v, vtx(l0, lu, 1), vtx(l0, lu, 1))
-			append(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(p1.pos, 0.5, 1))
+			push2(v, vtx(p1.pos + dl0 * lw, lu, 1), vtx(p1.pos, 0.5, 1))
+			push2(v, vtx(l0, lu, 1), vtx(l0, lu, 1))
+			push2(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(p1.pos, 0.5, 1))
 		}
-		append(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(rb, ru, 1))
+		push2(v, vtx(p1.pos + dl1 * lw, lu, 1), vtx(rb, ru, 1))
 	}
+}
+
+// Appends 2, 3 or 4 vertices with direct writes: append's variadic form
+// copies them through memcpy, which profiles showed as a fifth of a frame.
+@(private = "file")
+push_n :: #force_inline proc(v: ^[dynamic]Path_Vertex, n: int) -> []Path_Vertex {
+	at := len(v)
+	if at + n > cap(v) {
+		reserve(v, max(2 * cap(v), at + n, 64))
+	}
+	(^runtime.Raw_Dynamic_Array)(v).len = at + n
+	return v[at:][:n]
+}
+
+@(private = "file")
+push2 :: #force_inline proc(v: ^[dynamic]Path_Vertex, a, b: Path_Vertex) {
+	out := push_n(v, 2)
+	out[0], out[1] = a, b
+}
+
+@(private = "file")
+push3 :: #force_inline proc(v: ^[dynamic]Path_Vertex, a, b, c: Path_Vertex) {
+	out := push_n(v, 3)
+	out[0], out[1], out[2] = a, b, c
+}
+
+@(private = "file")
+push4 :: #force_inline proc(v: ^[dynamic]Path_Vertex, a, b, c, d: Path_Vertex) {
+	out := push_n(v, 4)
+	out[0], out[1], out[2], out[3] = a, b, c, d
 }

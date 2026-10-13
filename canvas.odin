@@ -576,7 +576,8 @@ emit_piece :: proc(c: ^Canvas, src: []Path_Vertex, paint: u32, strip: bool) {
 		return
 	}
 	base := len(c.verts)
-	resize(&c.verts, base + len(src))
+	// Every new vertex is written below: no zeroing first.
+	non_zero_resize(&c.verts, base + len(src))
 	for v, i in src {
 		c.verts[base + i] = vertex(v.x, v.y, v.u, v.v, paint)
 	}
