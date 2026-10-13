@@ -531,6 +531,23 @@ Paints:
 
 ## Design
 
+**Data out is data in.** ovg is a chain of stages, each reading the tables
+the one before wrote: parse (bytes to document tables), evaluate (a
+document at a time to its values), record (values to a frame's vertices,
+pieces, paints and commands) and render (a frame to pixels). The rules
+every part follows:
+
+- A stage reads tables and writes tables; it doesn't reach back into an
+  earlier stage's inputs.
+- Each value is computed once, at the earliest stage that knows its
+  inputs: what a file fixes at parse, what a frame fixes once per frame.
+- Scratch belongs to a long-lived owner (parser, renderer, canvas) and
+  only grows: once warm, a frame allocates nothing (`tools/bench`, the
+  `*_no_allocation_when_warm` tests).
+- Variable-length data is flat arrays addressed by ranges; payloads few
+  rows carry live in side tables; kinds and properties are enum-indexed
+  table rows (`svg_props`, `LOTTIE_EFFECTS`, `LIMIT_INFO`).
+
 - **`Canvas` records, backends draw.** Drawing calls tessellate paths into
   vertices and record `Command`s; `flush` hands a `Frame` to the backend.
   A backend is a `Backend` value (data pointer + procedures).
