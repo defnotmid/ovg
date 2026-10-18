@@ -32,6 +32,8 @@ Row_Kind :: enum u8 {
 	Copy,
 	// A custom program over `target` (`program`), its quad at `verts`.
 	Program,
+	// Host work (`external`) recorded between passes.
+	External,
 }
 
 // One GPU operation of the frame.
@@ -50,6 +52,7 @@ Row :: struct {
 	// Filter passes run in a render pass of their own.
 	own_pass: bool,
 	program:  ^vg.Program_Run,
+	external: ^vg.Cmd_Run_External,
 }
 
 // A GPU buffer and the transfer buffer that fills it, grown to the largest
@@ -321,6 +324,8 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			info, _ := vg.image_store_info(images, run.target)
 			append(&b.rows, Row{kind = .Program, target = target^, verts = {extra_base(&p), 6}, program = run})
 			emit_quad(&p, f32(info.width), f32(info.height), 0)
+		case vg.Cmd_Run_External:
+			append(&b.rows, Row{kind = .External, external = &c})
 		}
 	}
 }
@@ -644,6 +649,10 @@ record_rows :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer, images: ^vg.Ima
 			flush(&r)
 			end_pass(&r)
 			run_program(&r, row)
+		case .External:
+			flush(&r)
+			end_pass(&r)
+			row.external.fn(row.external.user, cmd)
 		}
 	}
 	flush(&r)

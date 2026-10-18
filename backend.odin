@@ -319,6 +319,7 @@ Command_Type :: union {
 	Cmd_Draw,
 	Cmd_Filter_Image,
 	Cmd_Run_Program,
+	Cmd_Run_External,
 }
 
 Command :: struct {

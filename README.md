@@ -519,6 +519,17 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
   stored. The callback may split the image across threads.
 - Backends without programs leave `create_program` nil, and creating one
   then returns `.Unsupported_Operation`.
+- `run_external(c, fn, user)` runs host work at its place in the frame:
+  `fn(user, gpu)` sees what earlier commands made, and later draws see its
+  output (a 3D render into a canvas image that samples this frame's video
+  frame, say). On SDL_GPU `gpu` is the frame's `^sdl.GPUCommandBuffer`,
+  outside any pass; `fn` records into it (closing the passes it opens)
+  without submitting it or creating textures, and
+  `vgsdl.image_store_texture(&c.images or &player.images, id)` gives an
+  image's texture. The software backend calls `fn` with `gpu = nil`. ovg
+  doesn't track the images `fn` touches (layers neither bound nor redirect
+  it). On a recording canvas `user` must outlive the frame's playback;
+  every `player_render` calls `fn`.
 
 Paints:
 

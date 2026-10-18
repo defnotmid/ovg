@@ -145,3 +145,78 @@ test_program_recording :: proc(t: ^testing.T) {
 	player_render(&p, &rec)
 	testing.expect_value(t, (^[4]u8)(&image_store_get(&p.images, dst).image.pixels[0])^, red)
 }
+
+@(private = "file")
+External_Probe :: struct {
+	images: ^Image_Store,
+	image:  Image_Id,
+	// The image's first pixel when the callback ran.
+	seen:   [4]u8,
+	calls:  int,
+	gpu:    rawptr,
+}
+
+// Records the image's first pixel, then paints the image blue.
+@(private = "file")
+test_external_probe :: proc(user: rawptr, gpu: rawptr) {
+	probe := (^External_Probe)(user)
+	pixels := image_store_get(probe.images, probe.image).image.pixels
+	probe.seen = (^[4]u8)(&pixels[0])^
+	probe.calls += 1
+	probe.gpu = gpu
+	for i := 0; i < len(pixels); i += 4 {
+		(^[4]u8)(&pixels[i])^ = {0, 0, 255, 255}
+	}
+}
+
+// An external run sees what the commands before it made, and the commands
+// after it see its output, live and in recorded frames (every render).
+@(test)
+test_run_external :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	red, blue := [4]u8{255, 0, 0, 255}, [4]u8{0, 0, 255, 255}
+	record :: proc(c: ^Canvas, probe: ^External_Probe, red: ^[4]u8) {
+		set_size(c, 4, 4)
+		fill, _ := create_program(c, {cpu = test_program_fill, cpu_user = red})
+		probe.image, _ = create_image_empty(c, 2, 2, .RGBA8, {.Premultiplied})
+		run_program(c, fill, probe.image, nil)
+		run_external(c, test_external_probe, probe)
+		p: Path
+		defer path_destroy(&p)
+		path_rect(&p, 0, 0, 4, 4)
+		fill_path(c, &p, paint_image(probe.image, 0, 0, 4, 4, 0))
+	}
+
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	live := External_Probe{images = &c.images, gpu = &b}
+	record(&c, &live, &red)
+	flush(&c)
+	testing.expect_value(t, live.calls, 1)
+	testing.expect_value(t, live.seen, red)
+	testing.expect_value(t, live.gpu, nil)
+	testing.expect_value(t, (^[4]u8)(&b.pixels[(2 * 4 + 1) * 4])^, blue)
+
+	p: Player
+	player_init(&p, software_backend(&b))
+	defer player_destroy(&p)
+	rc: Canvas
+	canvas_init_recording(&rc)
+	defer canvas_destroy(&rc)
+	rec: Recorded_Frame
+	defer recorded_frame_destroy(&rec)
+	played := External_Probe{images = &p.images}
+	record(&rc, &played, &red)
+	canvas_take(&rc, &rec)
+	player_apply(&p, &rec)
+	for i in 1 ..= 2 {
+		(^[4]u8)(&b.pixels[(2 * 4 + 1) * 4])^ = {}
+		player_render(&p, &rec)
+		testing.expect_value(t, played.calls, i)
+		testing.expect_value(t, played.seen, red)
+		testing.expect_value(t, (^[4]u8)(&b.pixels[(2 * 4 + 1) * 4])^, blue)
+	}
+}

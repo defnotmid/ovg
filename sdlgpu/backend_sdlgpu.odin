@@ -365,7 +365,13 @@ sdl_delete_program :: proc(data: rawptr, program: vg.Backend_Program) {
 // The texture behind a canvas image, for compositing it in host UI code.
 // nil if the id is unknown.
 image_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id) -> ^sdl.GPUTexture {
-	entry := vg.image_store_get(&c.images, id)
+	return image_store_texture(&c.images, id)
+}
+
+// The texture behind an image of a store: a canvas's or a player's
+// (`vg.Player.images`), e.g. in a `vg.run_external` callback.
+image_store_texture :: proc(images: ^vg.Image_Store, id: vg.Image_Id) -> ^sdl.GPUTexture {
+	entry := vg.image_store_get(images, id)
 	if entry == nil || entry.image.user == nil {
 		return nil
 	}

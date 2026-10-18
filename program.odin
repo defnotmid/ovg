@@ -185,6 +185,34 @@ run_program :: proc(c: ^Canvas, id: Program_Id, target: Image_Id, uniforms: []u8
 	return nil
 }
 
+// Host work run at its place in the frame (`run_external`). `gpu` is the
+// backend's handle for the frame's GPU work (SDL_GPU: the
+// `^sdl.GPUCommandBuffer`, outside any pass); nil on the software backend.
+External_Proc :: #type proc(user: rawptr, gpu: rawptr)
+
+// Calls `fn(user, gpu)`.
+Cmd_Run_External :: struct {
+	fn:   External_Proc,
+	user: rawptr,
+}
+
+// Runs `fn(user, gpu)` when the frame renders, after the commands recorded
+// before it and before those after it: GPU work the host records there
+// (3D renders into canvas images, say) reads what earlier commands made
+// and later draws read its output. The images it touches are the host's
+// own business (`sdlgpu.image_store_texture` gives their textures): ovg
+// neither tracks them nor bounds layers by them, and layer stand-ins don't
+// apply. On SDL_GPU `fn` records into the command buffer it gets (closing
+// any pass it opens) without submitting it or creating textures, which
+// would submit; render targets and passes resume after it. On a
+// recording canvas `user` must stay valid until the frame is played, and
+// every `player_render` of the frame calls `fn` again.
+run_external :: proc(c: ^Canvas, fn: External_Proc, user: rawptr) {
+	if fn != nil {
+		append(&c.commands, Command{type = Cmd_Run_External{fn, user}})
+	}
+}
+
 frame_bytes :: #force_inline proc "contextless" (f: Frame, r: Range) -> []u8 {
 	return f.bytes[r.start:][:r.count]
 }
