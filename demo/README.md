@@ -42,15 +42,14 @@ Every number is in `facts.lua` with its source:
 ## Files
 
 `video.lua` sets up the video, the beat-synced glitch cuts and the HUD;
-`scenes/` holds one file per scene; `timeline.lua` says on which beat
-everything happens; `beat.lua` is the clock and easing; `track.lua`
-synthesizes the soundtrack from the same timeline when the script loads
-(why_onimite's instruments, a D minor house pattern), once per render
-through `shared()`, registered with `audio_add("track.wav", ...)`.
+`scenes/` holds one file per scene; `track.lua` is the soundtrack, an
+odawg `song{}` (D minor house, its sections named after the scenes, its
+parts the pops and stutters the picture answers to); `timeline.lua` reads
+from it on which beat everything happens; `beat.lua` is the clock and
+easing on the song's beat.
 
-Mix (`onimite audio analyze`): -14.0 LUFS integrated, -1.5 dBTP true
-peak. Render with `build/onimite_speed`: 1688 frames in 3.6 s (4.8 s wall
-including the synthesis, 180 MB peak RSS).
+Mix (`onimite audio analyze`): -14.8 LUFS integrated, -1.5 dBTP true
+peak. Render: 1688 frames in 3.9 s wall, 154 MB peak RSS.
 
 ## Media
 
@@ -58,4 +57,4 @@ including the synthesis, 180 MB peak RSS).
 - Fonts (OFL), copied from onimite's `examples/why_onimite/media`: Bebas
   Neue, Space Grotesk, JetBrains Mono, Instrument Serif, Noto Sans Arabic
   Bold.
-- The soundtrack is synthesized; there are no other media.
+- The soundtrack is composed by odawg from `track.lua`; there are no other media.
