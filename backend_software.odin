@@ -271,6 +271,48 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 				}
 			}
 		}
+	case Cmd_Draw_Shapes:
+		frag: Frag
+		row := max(u32)
+		for inst in frame.shapes[c.instances.start:][:c.instances.count] {
+			if inst.paint != row {
+				frag = make_frag(images, cmd, frame.paints[inst.paint])
+				row = inst.paint
+			}
+			r.frag = &frag
+			raster_shape(&r, inst)
+		}
+	}
+}
+
+// Every pixel center of the instance's bounds: its coverage (shape.odin)
+// times the paint, as the shader does.
+@(private = "file")
+raster_shape :: proc(r: ^Raster, inst: Shape_Instance) {
+	b := shape_device_bounds(inst.shape, inst.transform)
+	x0 := max(r.x0, i32(math.floor(b.minx)))
+	y0 := max(r.y0, i32(math.floor(b.miny)))
+	x1 := min(r.x1, i32(math.ceil(b.maxx)))
+	y1 := min(r.y1, i32(math.ceil(b.maxy)))
+	inv := transform_inverse(inst.transform)
+	epp := shape_ems_per_pixel(inst.transform)
+	data := inst.shape.data
+	for y in y0 ..< y1 {
+		py := f32(y) + 0.5
+		for x in x0 ..< x1 {
+			px := f32(x) + 0.5
+			cov := shape_coverage(data, transform_point(inv, px, py), epp, inst.even_odd)
+			if cov <= 0 {
+				continue
+			}
+			src, keep := shade(r.frag, px, py, 0.5, 1)
+			if !keep {
+				continue
+			}
+			tx, ty := u32(x - r.ox), u32(y - r.oy)
+			dst := load_texel(r.target, tx, ty)
+			store_texel(r.target, tx, ty, apply_blend(r.blend, src * cov, dst))
+		}
 	}
 }
 

@@ -313,6 +313,9 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			if row.verts.count > 0 {
 				append(&b.rows, row)
 			}
+		case vg.Cmd_Draw_Shapes:
+		// Not drawn by this backend yet (the shape pipeline comes with the
+		// curve store).
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:

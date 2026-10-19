@@ -307,6 +307,19 @@ Cmd_Draw :: struct {
 	stencil: Stencil_Mode,
 	paint:   u32,
 }
+// Shape instances `Frame.shapes[instances]`, each filled by coverage
+// (shape.odin) with its own paint row; one command covers a run of them
+// that share the command's image, blend and scissor.
+Cmd_Draw_Shapes :: struct {
+	instances: Range,
+}
+// A shape drawn under `transform` (shape units to drawing coordinates).
+Shape_Instance :: struct {
+	shape:     ^Shape,
+	transform: Transform2D,
+	paint:     u32,
+	even_odd:  bool,
+}
 // `Frame.filters[filter]` from the command's image into `target_image`.
 Cmd_Filter_Image :: struct {
 	target_image: Image_Id,
@@ -317,6 +330,7 @@ Command_Type :: union {
 	Cmd_Set_Render_Target,
 	Cmd_Clear_Rect,
 	Cmd_Draw,
+	Cmd_Draw_Shapes,
 	Cmd_Filter_Image,
 	Cmd_Run_Program,
 	Cmd_Run_External,
@@ -348,6 +362,7 @@ Frame :: struct {
 	// they index (`Cmd_Filter_Image.filter`, `Cmd_Run_Program.run`).
 	filters:   []Image_Filter,
 	runs:      []Program_Run,
+	shapes:    []Shape_Instance,
 }
 
 frame_pieces :: #force_inline proc "contextless" (f: Frame, cmd: Command) -> []Piece {

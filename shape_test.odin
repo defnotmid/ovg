@@ -1,0 +1,174 @@
+package ovg
+
+import "core:testing"
+
+@(private = "file")
+coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {
+	full := transform_multiply(shape_local(s), t)
+	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), shape_ems_per_pixel(full), even_odd)
+}
+
+// Area of the pixel at (x, y) the shape covers, from 16x16 crisp samples.
+@(private = "file")
+area_at :: proc(s: ^Shape, t: Transform2D, x, y: f32) -> f32 {
+	full := transform_multiply(shape_local(s), t)
+	inv := transform_inverse(full)
+	epp := shape_ems_per_pixel(full) / 64
+	sum: f32
+	for sy in 0 ..< 16 {
+		for sx in 0 ..< 16 {
+			p := transform_point(inv, x - 0.5 + (f32(sx) + 0.5) / 16, y - 0.5 + (f32(sy) + 0.5) / 16)
+			sum += shape_coverage(s.data, p, epp, false)
+		}
+	}
+	return sum / 256
+}
+
+@(test)
+test_shape_square :: proc(t: ^testing.T) {
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 10.3, 10.3, 10.4, 10.4)
+	s, ok := shape_from_path(&p)
+	defer shape_destroy(&s)
+	testing.expect(t, ok)
+	id := TRANSFORM_IDENTITY
+	near :: proc(a, b: f32) -> bool {return abs(a - b) < 1e-3}
+	testing.expect(t, near(coverage_at(&s, id, 15.5, 15.5), 1))
+	testing.expect(t, near(coverage_at(&s, id, 9.5, 15.5), 0))
+	// Edges: the part of the pixel inside.
+	testing.expect(t, near(coverage_at(&s, id, 10.5, 15.5), 0.7))
+	testing.expect(t, near(coverage_at(&s, id, 15.5, 20.5), 0.7))
+	testing.expect(t, near(coverage_at(&s, id, 20.5, 15.5), 0.7))
+	// Under a scale and a translation the edge moves with the shape.
+	tr := Transform2D{2, 0, 0, 2, 0.25, 0}
+	testing.expect(t, near(coverage_at(&s, tr, 20.85, 30.5), 0.5))
+}
+
+@(test)
+test_shape_fill_rules :: proc(t: ^testing.T) {
+	// Two squares wound the same way: the inner one is a hole only under
+	// even-odd.
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 30, 30)
+	path_rect(&p, 10, 10, 10, 10)
+	s, _ := shape_from_path(&p)
+	defer shape_destroy(&s)
+	id := TRANSFORM_IDENTITY
+	testing.expect(t, abs(coverage_at(&s, id, 15.5, 15.5) - 1) < 1e-3)
+	testing.expect(t, coverage_at(&s, id, 15.5, 15.5, true) < 1e-3)
+	testing.expect(t, abs(coverage_at(&s, id, 5.5, 15.5, true) - 1) < 1e-3)
+}
+
+@(test)
+test_shape_quadratics_kept :: proc(t: ^testing.T) {
+	// path_quad_to stores raised cubics: they come back as one quadratic.
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 0, 0)
+	path_quad_to(&p, 10, 20, 20, 0)
+	path_quad_to(&p, 10, -20, 0, 0)
+	b: Shape_Builder
+	defer shape_builder_destroy(&b)
+	shape_add_path(&b, &p)
+	testing.expect_value(t, len(b.curves), 2)
+	testing.expect_value(t, b.curves[0], Shape_Curve{{0, 0}, {10, 20}, {20, 0}})
+}
+
+@(test)
+test_shape_curves_match_area :: proc(t: ^testing.T) {
+	// A circle (cubics, split into quadratics) and rotated glyphs: each edge
+	// pixel's coverage against the area the curves cover. The rays' blend
+	// is an approximation of area (corners stray most).
+	check :: proc(t: ^testing.T, s: ^Shape, tr: Transform2D, x0, y0, x1, y1: int, mean_max, max_max: f32) {
+		sum, worst: f32
+		n := 0
+		for y in y0 ..< y1 {
+			for x in x0 ..< x1 {
+				c := coverage_at(s, tr, f32(x) + 0.5, f32(y) + 0.5)
+				a := area_at(s, tr, f32(x) + 0.5, f32(y) + 0.5)
+				if (a <= 0 && c <= 0) || (a >= 1 && c >= 1) {
+					continue
+				}
+				sum += abs(c - a)
+				worst = max(worst, abs(c - a))
+				n += 1
+			}
+		}
+		testing.expect(t, n > 0)
+		testing.expectf(t, sum / f32(n) < mean_max, "mean error %v over %v edge pixels", sum / f32(n), n)
+		testing.expectf(t, worst < max_max, "worst error %v", worst)
+	}
+
+	p: Path
+	defer path_destroy(&p)
+	path_circle(&p, 20, 20, 15.3)
+	circle, _ := shape_from_path(&p)
+	defer shape_destroy(&circle)
+	check(t, &circle, TRANSFORM_IDENTITY, 2, 2, 38, 38, 0.05, 0.15)
+
+	font, err := font_load(DEFAULT_FONT_DATA)
+	testing.expect_value(t, err, Error.None)
+	defer font_destroy(&font)
+	sc := font_scale_for_em(&font, 14)
+	for r in "aRg@" {
+		g, ok := shape_from_glyph(&font, font_glyph_index(&font, r))
+		testing.expect(t, ok)
+		defer shape_destroy(&g)
+		tr := transform_multiply(transform_scaling(sc, sc), transform_rotation(0.3))
+		tr = transform_multiply(tr, transform_translation(20, 20))
+		check(t, &g, tr, 0, 0, 40, 40, 0.07, 0.45)
+	}
+	_, ok := shape_from_glyph(&font, font_glyph_index(&font, ' '))
+	testing.expect(t, !ok)
+}
+
+@(test)
+test_sw_fill_shape :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 40, 20)
+	clear_rect(&c, 0, 0, 40, 20, WHITE)
+
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 10, 10)
+	s, _ := shape_from_path(&p)
+	defer shape_destroy(&s)
+	fill_shape(&c, &s, paint_color(rgb(255, 0, 0)), transform_translation(2, 5))
+	fill_shape(&c, &s, paint_color(rgb(0, 0, 255)), transform_translation(22.5, 5))
+	// Both instances share one command, each with its own paint row.
+	if d, ok := c.commands[len(c.commands) - 1].type.(Cmd_Draw_Shapes); testing.expect(t, ok) {
+		testing.expect_value(t, d.instances.count, 2)
+	}
+	flush(&c)
+
+	at :: proc(b: ^Software_Backend, x, y: int) -> [4]u8 {
+		i := (y * int(b.width) + x) * 4
+		return {b.pixels[i], b.pixels[i + 1], b.pixels[i + 2], b.pixels[i + 3]}
+	}
+	testing.expect_value(t, at(&b, 6, 9), [4]u8{255, 0, 0, 255})
+	testing.expect_value(t, at(&b, 1, 9), [4]u8{255, 255, 255, 255})
+	testing.expect_value(t, at(&b, 27, 9), [4]u8{0, 0, 255, 255})
+	// Half the pixel at x = 22 is inside the second square.
+	testing.expect_value(t, at(&b, 22, 9), [4]u8{128, 128, 255, 255})
+}
+
+@(test)
+test_font_glyph_shape :: proc(t: ^testing.T) {
+	font, _ := font_load(DEFAULT_FONT_DATA)
+	defer font_destroy(&font)
+	a := font_glyph_shape(&font, font_glyph_index(&font, 'a'))
+	testing.expect(t, a != nil)
+	// Built once, then the same shape.
+	testing.expect_value(t, font_glyph_shape(&font, font_glyph_index(&font, 'a')), a)
+	testing.expect(t, font_glyph_shape(&font, font_glyph_index(&font, ' ')) == nil)
+	// Shape units to font units (y down): 'a' sits on the baseline.
+	_, _, _, y1 := shape_bounds(a)
+	testing.expect(t, abs(transform_point(shape_local(a), 0, y1).y) < 40)
+}

@@ -9,6 +9,7 @@ separate file in [LICENSES/](LICENSES).
 | nanovg | femtovg's origin: the tessellation, antialiasing and shader design ovg inherits through it | `LICENSES/nanovg-Zlib.txt` |
 | stb_truetype, stb_image | linked (used under MIT) | `LICENSES/stb-MIT.txt` |
 | kb_text_shape | linked (text shaping) | `LICENSES/kb_text_shape-Zlib.txt` |
+| Slug (Eric Lengyel's reference shaders, Copyright 2017; dual MIT OR Apache-2.0, used under MIT; the patent is dedicated to the public domain) | `shape.odin` and the shape shader: the per-pixel coverage algorithm (root eligibility codes, band rays, coverage blend) | `LICENSES/Slug-MIT.txt` |
 | resvg test suite | `tools/svg_suite/tests` (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/resvg-MIT.txt` |
 | Skia skottie resources | `tools/lottie_suite/tests` | `LICENSES/Skia-BSD-3-Clause.txt` |
 | lottie-web test animations | `tools/lottie_suite/tests` | `LICENSES/lottie-web-MIT.txt` |

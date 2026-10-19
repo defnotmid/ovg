@@ -526,6 +526,10 @@ command_bounds :: proc(c: ^Canvas, cmd: ^Command) -> (b: Bounds, ok: bool) {
 		for piece in c.pieces[cmd.pieces.start:][:cmd.pieces.count] {
 			b = verts_bounds(b, c.verts[piece.verts.start:][:piece.verts.count])
 		}
+	case Cmd_Draw_Shapes:
+		for inst in c.shapes[v.instances.start:][:v.instances.count] {
+			b = bounds_union(b, shape_device_bounds(inst.shape, inst.transform))
+		}
 	case:
 		return
 	}

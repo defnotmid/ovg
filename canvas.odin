@@ -22,6 +22,7 @@ Canvas :: struct {
 	bytes:                 [dynamic]u8,
 	filters:               [dynamic]Image_Filter,
 	runs:                  [dynamic]Program_Run,
+	shapes:                [dynamic]Shape_Instance,
 	images:                Image_Store,
 	programs:              Slot_Map(Backend_Program),
 	gradients:             Gradient_Store,
@@ -55,6 +56,7 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		verts           = make([dynamic]Vertex, allocator),
 		pieces          = make([dynamic]Piece, allocator),
 		paints          = make([dynamic]Params, allocator),
+		shapes          = make([dynamic]Shape_Instance, allocator),
 		bytes           = make([dynamic]u8, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
@@ -88,6 +90,7 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.bytes)
 	delete(c.filters)
 	delete(c.runs)
+	delete(c.shapes)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
 	gradient_store_destroy(&c.gradients)
@@ -423,6 +426,60 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	push_draw(c, cmd, .Cover_Even_Odd if even_odd else .Cover_Non_Zero, fill, start)
 }
 
+// Fills a shape (shape.odin) with `paint` under the current transform, by
+// per-pixel coverage: no tessellation, so a shape built once draws at any
+// transform for the cost of its bounds. `local` maps the shape's source
+// units (its path's, or a glyph's font units, y down) to current units.
+// The paint's fill rule applies; feathering is not supported.
+fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY) {
+	st := state(c)
+	t := transform_multiply(shape_local(s), transform_multiply(local, st.transform))
+	if outside_target(c, shape_device_bounds(s, t)) {
+		return
+	}
+	flavor := paint.flavor
+	flavor_mul_alpha(&flavor, st.alpha)
+	cmd := Command {
+		composite_operation = st.composite_operation,
+		scissor_rect        = current_scissor_rect(c),
+	}
+	attach_paint_image(c, &cmd, &flavor)
+	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, {}, st.scissor, c.fringe_width, c.fringe_width, -1)
+	params.spread = f32(paint.spread)
+	push_shape(c, cmd, {s, t, add_paint(c, params), paint.fill_rule == .Even_Odd})
+}
+
+// Device bounds of a shape under `t` (shape units to drawing coordinates),
+// grown by the pixel its edge coverage reaches.
+@(private)
+shape_device_bounds :: proc "contextless" (s: ^Shape, t: Transform2D) -> Bounds {
+	x0, y0, x1, y1 := shape_bounds(s)
+	b := EMPTY_BOUNDS
+	for p in ([4]Vec2{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}) {
+		q := transform_point(t, p.x, p.y)
+		b = {min(b.minx, q.x), min(b.miny, q.y), max(b.maxx, q.x), max(b.maxy, q.y)}
+	}
+	return {b.minx - 1, b.miny - 1, b.maxx + 1, b.maxy + 1}
+}
+
+// Appends a shape instance, extending the frame's last command when it is
+// a shape draw with the same image, blend and scissor.
+@(private)
+push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance) {
+	append(&c.shapes, inst)
+	at := u32(len(c.shapes) - 1)
+	if n := len(c.commands); n > 0 {
+		last := &c.commands[n - 1]
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+			d.instances.count += 1
+			return
+		}
+	}
+	cmd := base
+	cmd.type = Cmd_Draw_Shapes{{at, 1}}
+	append(&c.commands, cmd)
+}
+
 stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	p := p
 	if len(paint.stroke.dash) > 0 {
@@ -651,10 +708,11 @@ Canvas_Mark :: struct {
 	bytes:    int,
 	filters:  int,
 	runs:     int,
+	shapes:   int,
 }
 
 canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
-	return {len(c.commands), len(c.verts), len(c.pieces), len(c.paints), len(c.bytes), len(c.filters), len(c.runs)}
+	return {len(c.commands), len(c.verts), len(c.pieces), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes)}
 }
 
 // Drops everything recorded since `m`. The render target must be the one
@@ -668,6 +726,7 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	resize(&c.bytes, m.bytes)
 	resize(&c.filters, m.filters)
 	resize(&c.runs, m.runs)
+	resize(&c.shapes, m.shapes)
 }
 
 // ---- flush ----------------------------------------------------------------------
@@ -684,13 +743,14 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	clear(&c.verts)
 	clear(&c.pieces)
 	clear(&c.paints)
+	clear(&c.shapes)
 	frame_end(c)
 }
 
 // The frame recorded so far, as `flush` hands it over.
 @(private)
 canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
-	return {c.verts[:], c.pieces[:], c.paints[:], c.commands[:], c.bytes[:], c.filters[:], c.runs[:]}
+	return {verts = c.verts[:], pieces = c.pieces[:], paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:]}
 }
 
 @(private)
@@ -715,6 +775,7 @@ Recorded_Frame :: struct {
 	bytes:       [dynamic]u8,
 	filters:     [dynamic]Image_Filter,
 	runs:        [dynamic]Program_Run,
+	shapes:      [dynamic]Shape_Instance,
 	image_ops:   [dynamic]Image_Op,
 	pixels:      [dynamic]u8,
 	program_ops: [dynamic]Program_Op,
@@ -728,6 +789,7 @@ recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
 	delete(f.bytes)
 	delete(f.filters)
 	delete(f.runs)
+	delete(f.shapes)
 	delete(f.image_ops)
 	delete(f.pixels)
 	delete(f.program_ops)
@@ -750,6 +812,7 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	swap_clear(&c.bytes, &out.bytes)
 	swap_clear(&c.filters, &out.filters)
 	swap_clear(&c.runs, &out.runs)
+	swap_clear(&c.shapes, &out.shapes)
 	swap_clear(&c.images.ops, &out.image_ops)
 	swap_clear(&c.images.pixels, &out.pixels)
 	swap_clear(&c.program_ops, &out.program_ops)

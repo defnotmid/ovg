@@ -26,6 +26,17 @@ Font :: struct {
 	// Has bitmap colour glyphs (sbix, CBDT), which are not drawn: glyphs
 	// without an outline count as missing for fallback.
 	bitmap_colour:  bool,
+	// The glyphs' shapes (shape.odin), each built on first use and kept
+	// for the font's life; made with the first. Freed by `font_destroy`.
+	shapes:         ^Font_Shapes,
+}
+
+@(private)
+Font_Shapes :: struct {
+	lock:      sync.Mutex,
+	// nil for glyphs without an outline.
+	glyphs:    map[Glyph_Index]^Shape,
+	allocator: mem.Allocator,
 }
 
 Font_Id :: struct {
@@ -64,7 +75,50 @@ font_load :: proc(data: []u8, index: i32 = 0) -> (font: Font, err: Error) {
 font_destroy :: proc(f: ^Font) {
 	colr_destroy(f.colr)
 	f.colr = nil
+	if fs := f.shapes; fs != nil {
+		for _, s in fs.glyphs {
+			if s != nil {
+				shape_destroy(s)
+				free(s, fs.allocator)
+			}
+		}
+		delete(fs.glyphs)
+		free(fs, fs.allocator)
+		f.shapes = nil
+	}
 	font_kb_destroy(f)
+}
+
+// The glyph's shape, built on first use (safe from several threads) and
+// owned by the font until `font_destroy`; nil for glyphs without an outline. Shape units map to
+// font units, y down, the pen at the origin (`shape_local`).
+font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
+	fs := sync.atomic_load_explicit(&f.shapes, .Acquire)
+	if fs == nil {
+		fresh := new(Font_Shapes)
+		fresh.glyphs = make(map[Glyph_Index]^Shape)
+		fresh.allocator = context.allocator
+		if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); won {
+			fs = fresh
+		} else {
+			delete(fresh.glyphs)
+			free(fresh)
+			fs = old
+		}
+	}
+	sync.mutex_lock(&fs.lock)
+	defer sync.mutex_unlock(&fs.lock)
+	if s, ok := fs.glyphs[g]; ok {
+		return s
+	}
+	context.allocator = fs.allocator
+	shape, ok := shape_from_glyph(f, g)
+	s: ^Shape
+	if ok {
+		s = new_clone(shape)
+	}
+	fs.glyphs[g] = s
+	return s
 }
 
 // The glyph for `r`, or 0 when the face lacks it or has only a bitmap for it.
