@@ -690,4 +690,6 @@ MIT, see [LICENSE](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md]
 The mascot, a chameleon (it changes colour, its tail is a spiral and its tongue a
 curve), is drawn by `tools/mascot` (`odin run tools/mascot -- assets`):
 `assets/logo.svg` keeps its skins (green, pink, blue), eyes, mouths and tongue
-as layers a script can switch by id.
+as layers a script can switch by id, each colour one traced path, plus a
+hidden `silhouette` (the whole chameleon as one outline) for
+`svg_element_path(&doc, &p, "silhouette")`.

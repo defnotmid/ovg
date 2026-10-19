@@ -159,9 +159,10 @@ svg_layout_destroy :: proc(l: ^Svg_Layout) {
 // shape with a fill (paths, rects, circles, ellipses, lines, polygons,
 // instances of `use`) under its transforms, and the text glyphs when `text`
 // is the document's layout. With `id`, only that element's subtree (its
-// first instance), under its ancestors' transforms; `found` is false when
-// no element has the id. Skipped as `svg_draw` skips them: display="none",
-// visibility="hidden", opacity 0. Ignored: strokes, images, clip paths,
+// first instance), under its ancestors' transforms, even when the element
+// itself is display="none" (kept for this, as for overrides); `found` is
+// false when no element has the id. Skipped as `svg_draw` skips them:
+// display="none" below it, visibility="hidden", opacity 0. Ignored: strokes, images, clip paths,
 // masks, filters and nested viewport clips. `rule` is the fill rule of the
 // shapes (text fills non-zero); `mixed` when they differ, so no one rule
 // fills the result exactly as drawn.
@@ -180,7 +181,7 @@ svg_element_path :: proc(doc: ^Svg_Document, out: ^Path, id := "", text: ^Svg_La
 			t = transform_multiply(t, doc.nodes[j].transform)
 		}
 	}
-	w := Svg_Path_Walk{doc = doc, text = text, out = out}
+	w := Svg_Path_Walk{doc = doc, text = text, out = out, start = start}
 	svg_path_node(&w, start, t)
 	return w.rule, w.mixed, true
 }
@@ -190,6 +191,7 @@ Svg_Path_Walk :: struct {
 	doc:         ^Svg_Document,
 	text:        ^Svg_Layout,
 	out:         ^Path,
+	start:       i32,
 	rule:        Fill_Rule,
 	seen, mixed: bool,
 }
@@ -198,7 +200,7 @@ Svg_Path_Walk :: struct {
 svg_path_node :: proc(w: ^Svg_Path_Walk, i: i32, parent: Transform2D) {
 	doc := w.doc
 	n := &doc.nodes[i]
-	if .Off in n.flags || n.opacity <= 0 {
+	if (.Off in n.flags && i != w.start) || n.opacity <= 0 {
 		return
 	}
 	t := transform_multiply(n.transform, parent)

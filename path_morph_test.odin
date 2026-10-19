@@ -324,6 +324,7 @@ test_svg_element_path :: proc(t: ^testing.T) {
 	<rect x="20" y="40" width="5" height="5" fill="none" stroke="black"/>
 	<rect x="30" y="40" width="5" height="5" opacity="0"/>
 	<g id="shown"><rect x="90" y="40" width="5" height="5"/></g>
+	<g id="spare" display="none"><rect x="40" y="40" width="5" height="5"/><rect x="50" y="40" width="5" height="5" display="none"/></g>
 </svg>`
 	doc, err := svg_parse(transmute([]u8)string(markup))
 	defer svg_destroy(&doc)
@@ -356,6 +357,14 @@ test_svg_element_path :: proc(t: ^testing.T) {
 	testing.expect(t, found)
 	testing.expect_value(t, n, 3)
 	testing.expect(t, filled(&p, 2 * (10 + 10), 2 * (5 + 5), .Non_Zero))
+
+	// Asked for by id, a display="none" element gives its geometry (not
+	// that of its own hidden children).
+	path_reset(&p)
+	_, _, found = svg_element_path(&doc, &p, "spare")
+	_, n = flat_area(&p)
+	testing.expect(t, found)
+	testing.expect_value(t, n, 1)
 
 	_, _, found = svg_element_path(&doc, &p, "nope")
 	testing.expect(t, !found)
