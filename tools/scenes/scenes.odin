@@ -89,6 +89,7 @@ ALL := [?]Scene {
 	{"lottie_text_fx", scene_lottie_text_fx},
 	{"emoji", scene_emoji},
 	{"curves", scene_curves},
+	{"curves_alpha", scene_curves_alpha},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the

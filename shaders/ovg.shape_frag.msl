@@ -28,20 +28,20 @@ struct KernelContext_0
 };
 
 
-#line 790
+#line 795
 float shape_word_f_0(uint i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 790
+#line 795
     return (as_type<float>((kernelContext_0->shapes_0[i_0])));
 }
 
 
-#line 792
+#line 797
 uint shape_root_code_0(float y1_0, float y2_0, float y3_0)
 {
 
-#line 798
+#line 803
     return (11892U >> ((((as_type<uint>((y3_0))) >> 29U) & 4U) | (((((as_type<uint>((y2_0))) >> 30U) & 2U) | (((as_type<uint>((y1_0))) >> 31U) & 4294967293U)) & 4294967291U))) & 257U;
 }
 
@@ -50,7 +50,7 @@ uint shape_root_code_0(float y1_0, float y2_0, float y3_0)
 float2 shape_solve_0(float2 p1_0, float2 p2_0, float2 p3_0, int axis_0)
 {
 
-#line 804
+#line 809
     int other_0 = int(1) - axis_0;
     float2 a_0 = p1_0 - p2_0 * float2(2.0f)  + p3_0;
     float2 b_0 = p1_0 - p2_0;
@@ -60,73 +60,73 @@ float2 shape_solve_0(float2 p1_0, float2 p2_0, float2 p3_0, int axis_0)
     float _S1 = (b_0[axis_0] - d_0) * ra_0;
     float _S2 = (b_0[axis_0] + d_0) * ra_0;
 
-#line 811
+#line 816
     float t1_0;
 
-#line 811
+#line 816
     float t2_0;
     if((abs(a_0[axis_0])) < 0.0000152587890625f)
     {
 
-#line 813
+#line 818
         float t1_1 = p1_0[axis_0] * rb_0;
 
-#line 813
+#line 818
         t1_0 = t1_1;
 
-#line 813
+#line 818
         t2_0 = t1_1;
 
-#line 812
+#line 817
     }
     else
     {
 
-#line 812
+#line 817
         t1_0 = _S1;
 
-#line 812
+#line 817
         t2_0 = _S2;
 
-#line 812
+#line 817
     }
 
 
 
     float _S3 = b_0[other_0] * 2.0f;
 
-#line 816
+#line 821
     return float2((a_0[other_0] * t1_0 - _S3) * t1_0 + p1_0[other_0], (a_0[other_0] * t2_0 - _S3) * t2_0 + p1_0[other_0]);
 }
 
 float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 819
+#line 824
     float ywgt_0;
 
-#line 819
+#line 824
     float ycov_0;
 
-#line 819
+#line 824
     float ywgt_1;
 
-#line 819
+#line 824
     float ycov_1;
     float2 _S4 = float2(1.0f)  / epp_0;
     int h_count_0 = int(kernelContext_1->shapes_0[s_0]);
     int v_count_0 = int(kernelContext_1->shapes_0[s_0 + 1U]);
 
-#line 822
+#line 827
     float _S5 = shape_word_f_0(s_0 + 2U, kernelContext_1);
 
-#line 822
+#line 827
     float _S6 = shape_word_f_0(s_0 + 3U, kernelContext_1);
 
-#line 822
+#line 827
     float _S7 = shape_word_f_0(s_0 + 4U, kernelContext_1);
 
-#line 822
+#line 827
     float _S8 = shape_word_f_0(s_0 + 5U, kernelContext_1);
 
 
@@ -138,60 +138,27 @@ float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, Ker
 
     uint _S10 = s_0 + 12U;
 
-#line 831
+#line 836
     uint hb_0 = _S10 + 2U * uint(clamp(int(rc_0.y * _S6 + _S8), int(0), h_count_0 - int(1)));
     uint _S11 = s_0 + kernelContext_1->shapes_0[hb_0 + 1U];
     uint _S12 = kernelContext_1->shapes_0[hb_0];
 
-#line 833
+#line 838
     float xwgt_0 = 0.0f;
 
-#line 833
+#line 838
     uint k_0 = 0U;
 
-#line 833
+#line 838
     float xcov_0 = 0.0f;
     for(;;)
     {
 
-#line 834
+#line 839
         if(k_0 < _S12)
         {
         }
         else
-        {
-
-#line 834
-            break;
-        }
-
-#line 835
-        uint c_0 = _S9 + 6U * kernelContext_1->shapes_0[_S11 + k_0];
-
-#line 835
-        float _S13 = shape_word_f_0(c_0, kernelContext_1);
-
-#line 835
-        float _S14 = shape_word_f_0(c_0 + 1U, kernelContext_1);
-        float2 p1_1 = float2(_S13, _S14) - rc_0;
-
-#line 836
-        float _S15 = shape_word_f_0(c_0 + 2U, kernelContext_1);
-
-#line 836
-        float _S16 = shape_word_f_0(c_0 + 3U, kernelContext_1);
-        float2 p2_1 = float2(_S15, _S16) - rc_0;
-
-#line 837
-        float _S17 = shape_word_f_0(c_0 + 4U, kernelContext_1);
-
-#line 837
-        float _S18 = shape_word_f_0(c_0 + 5U, kernelContext_1);
-        float2 p3_1 = float2(_S17, _S18) - rc_0;
-        float _S19 = _S4.x;
-
-#line 839
-        if((max(max(p1_1.x, p2_1.x), p3_1.x) * _S19) < -0.5f)
         {
 
 #line 839
@@ -199,39 +166,72 @@ float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, Ker
         }
 
 #line 840
+        uint c_0 = _S9 + 6U * kernelContext_1->shapes_0[_S11 + k_0];
+
+#line 840
+        float _S13 = shape_word_f_0(c_0, kernelContext_1);
+
+#line 840
+        float _S14 = shape_word_f_0(c_0 + 1U, kernelContext_1);
+        float2 p1_1 = float2(_S13, _S14) - rc_0;
+
+#line 841
+        float _S15 = shape_word_f_0(c_0 + 2U, kernelContext_1);
+
+#line 841
+        float _S16 = shape_word_f_0(c_0 + 3U, kernelContext_1);
+        float2 p2_1 = float2(_S15, _S16) - rc_0;
+
+#line 842
+        float _S17 = shape_word_f_0(c_0 + 4U, kernelContext_1);
+
+#line 842
+        float _S18 = shape_word_f_0(c_0 + 5U, kernelContext_1);
+        float2 p3_1 = float2(_S17, _S18) - rc_0;
+        float _S19 = _S4.x;
+
+#line 844
+        if((max(max(p1_1.x, p2_1.x), p3_1.x) * _S19) < -0.5f)
+        {
+
+#line 844
+            break;
+        }
+
+#line 845
         uint code_0 = shape_root_code_0(p1_1.y, p2_1.y, p3_1.y);
         if(code_0 != 0U)
         {
 
-#line 842
+#line 847
             float2 r_0 = shape_solve_0(p1_1, p2_1, p3_1, int(1)) * float2(_S19) ;
             if((code_0 & 1U) != 0U)
             {
 
-#line 844
+#line 849
                 float _S20 = r_0.x;
 
-#line 844
+#line 849
                 float xcov_1 = xcov_0 + clamp(_S20 + 0.5f, 0.0f, 1.0f);
 
-#line 844
+#line 849
                 ywgt_0 = max(xwgt_0, clamp(1.0f - abs(_S20) * 2.0f, 0.0f, 1.0f));
 
-#line 844
+#line 849
                 ycov_0 = xcov_1;
 
-#line 843
+#line 848
             }
             else
             {
 
-#line 843
+#line 848
                 ywgt_0 = xwgt_0;
 
-#line 843
+#line 848
                 ycov_0 = xcov_0;
 
-#line 843
+#line 848
             }
 
 
@@ -239,101 +239,68 @@ float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, Ker
             if(code_0 > 1U)
             {
 
-#line 848
+#line 853
                 float _S21 = r_0.y;
 
-#line 848
+#line 853
                 float xcov_2 = ycov_0 - clamp(_S21 + 0.5f, 0.0f, 1.0f);
 
-#line 848
+#line 853
                 ywgt_1 = max(ywgt_0, clamp(1.0f - abs(_S21) * 2.0f, 0.0f, 1.0f));
 
-#line 848
+#line 853
                 ycov_1 = xcov_2;
 
-#line 847
+#line 852
             }
             else
             {
 
-#line 847
+#line 852
                 ywgt_1 = ywgt_0;
 
-#line 847
+#line 852
                 ycov_1 = ycov_0;
 
-#line 847
+#line 852
             }
 
-#line 847
+#line 852
             xwgt_0 = ywgt_1;
 
-#line 847
+#line 852
             xcov_0 = ycov_1;
 
-#line 841
+#line 846
         }
 
-#line 834
+#line 839
         k_0 = k_0 + 1U;
 
-#line 834
+#line 839
     }
 
-#line 856
+#line 861
     uint vb_0 = _S10 + 2U * uint(h_count_0 + bx_0);
     uint _S22 = s_0 + kernelContext_1->shapes_0[vb_0 + 1U];
     uint _S23 = kernelContext_1->shapes_0[vb_0];
 
-#line 858
+#line 863
     ywgt_0 = 0.0f;
 
-#line 858
+#line 863
     k_0 = 0U;
 
-#line 858
+#line 863
     ycov_0 = 0.0f;
     for(;;)
     {
 
-#line 859
+#line 864
         if(k_0 < _S23)
         {
         }
         else
-        {
-
-#line 859
-            break;
-        }
-
-#line 860
-        uint c_1 = _S9 + 6U * kernelContext_1->shapes_0[_S22 + k_0];
-
-#line 860
-        float _S24 = shape_word_f_0(c_1, kernelContext_1);
-
-#line 860
-        float _S25 = shape_word_f_0(c_1 + 1U, kernelContext_1);
-        float2 p1_2 = float2(_S24, _S25) - rc_0;
-
-#line 861
-        float _S26 = shape_word_f_0(c_1 + 2U, kernelContext_1);
-
-#line 861
-        float _S27 = shape_word_f_0(c_1 + 3U, kernelContext_1);
-        float2 p2_2 = float2(_S26, _S27) - rc_0;
-
-#line 862
-        float _S28 = shape_word_f_0(c_1 + 4U, kernelContext_1);
-
-#line 862
-        float _S29 = shape_word_f_0(c_1 + 5U, kernelContext_1);
-        float2 p3_2 = float2(_S28, _S29) - rc_0;
-        float _S30 = _S4.y;
-
-#line 864
-        if((max(max(p1_2.y, p2_2.y), p3_2.y) * _S30) < -0.5f)
         {
 
 #line 864
@@ -341,45 +308,78 @@ float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, Ker
         }
 
 #line 865
+        uint c_1 = _S9 + 6U * kernelContext_1->shapes_0[_S22 + k_0];
+
+#line 865
+        float _S24 = shape_word_f_0(c_1, kernelContext_1);
+
+#line 865
+        float _S25 = shape_word_f_0(c_1 + 1U, kernelContext_1);
+        float2 p1_2 = float2(_S24, _S25) - rc_0;
+
+#line 866
+        float _S26 = shape_word_f_0(c_1 + 2U, kernelContext_1);
+
+#line 866
+        float _S27 = shape_word_f_0(c_1 + 3U, kernelContext_1);
+        float2 p2_2 = float2(_S26, _S27) - rc_0;
+
+#line 867
+        float _S28 = shape_word_f_0(c_1 + 4U, kernelContext_1);
+
+#line 867
+        float _S29 = shape_word_f_0(c_1 + 5U, kernelContext_1);
+        float2 p3_2 = float2(_S28, _S29) - rc_0;
+        float _S30 = _S4.y;
+
+#line 869
+        if((max(max(p1_2.y, p2_2.y), p3_2.y) * _S30) < -0.5f)
+        {
+
+#line 869
+            break;
+        }
+
+#line 870
         uint code_1 = shape_root_code_0(p1_2.x, p2_2.x, p3_2.x);
         if(code_1 != 0U)
         {
 
-#line 867
+#line 872
             float2 r_1 = shape_solve_0(p1_2, p2_2, p3_2, int(0)) * float2(_S30) ;
             if((code_1 & 1U) != 0U)
             {
 
-#line 869
+#line 874
                 float _S31 = r_1.x;
 
-#line 869
+#line 874
                 float ycov_2 = ycov_0 - clamp(_S31 + 0.5f, 0.0f, 1.0f);
 
-#line 869
+#line 874
                 ywgt_1 = max(ywgt_0, clamp(1.0f - abs(_S31) * 2.0f, 0.0f, 1.0f));
 
-#line 869
+#line 874
                 ycov_1 = ycov_2;
 
-#line 868
+#line 873
             }
             else
             {
 
-#line 868
+#line 873
                 ywgt_1 = ywgt_0;
 
-#line 868
+#line 873
                 ycov_1 = ycov_0;
 
-#line 868
+#line 873
             }
 
-#line 868
+#line 873
             float ywgt_2;
 
-#line 868
+#line 873
             float ycov_3;
 
 
@@ -387,56 +387,56 @@ float shape_coverage_0(uint s_0, float2 rc_0, float2 epp_0, bool even_odd_0, Ker
             if(code_1 > 1U)
             {
 
-#line 873
+#line 878
                 float _S32 = r_1.y;
 
-#line 873
+#line 878
                 float ycov_4 = ycov_1 + clamp(_S32 + 0.5f, 0.0f, 1.0f);
 
-#line 873
+#line 878
                 ywgt_2 = max(ywgt_1, clamp(1.0f - abs(_S32) * 2.0f, 0.0f, 1.0f));
 
-#line 873
+#line 878
                 ycov_3 = ycov_4;
 
-#line 872
+#line 877
             }
             else
             {
 
-#line 872
+#line 877
                 ywgt_2 = ywgt_1;
 
-#line 872
+#line 877
                 ycov_3 = ycov_1;
 
-#line 872
+#line 877
             }
 
-#line 872
+#line 877
             ywgt_0 = ywgt_2;
 
-#line 872
+#line 877
             ycov_0 = ycov_3;
 
-#line 866
+#line 871
         }
 
-#line 859
+#line 864
         k_0 = k_0 + 1U;
 
-#line 859
+#line 864
     }
 
-#line 879
+#line 884
     float _S33 = max(abs(xcov_0 * xwgt_0 + ycov_0 * ywgt_0) / max(xwgt_0 + ywgt_0, 0.0000152587890625f), min(abs(xcov_0), abs(ycov_0)));
     if(even_odd_0)
     {
 
-#line 881
+#line 886
         float _S34 = _S33 * 0.5f;
 
-#line 881
+#line 886
         return 1.0f - abs(1.0f - (_S34 - floor(_S34)) * 2.0f);
     }
     return clamp(_S33, 0.0f, 1.0f);
@@ -1081,51 +1081,51 @@ struct pixelInput_0
 };
 
 
-#line 887 "ovg.slang"
+#line 892 "ovg.slang"
 [[fragment]] pixelOutput_0 fs_shape(pixelInput_0 _S103 [[stage_in]], float4 position_0 [[position]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 887
+#line 892
     thread KernelContext_0 kernelContext_25;
 
-#line 887
+#line 892
     (&kernelContext_25)->shapes_0 = shapes_1;
 
-#line 887
+#line 892
     (&kernelContext_25)->paints_0 = paints_1;
 
-#line 887
+#line 892
     (&kernelContext_25)->tex_texture_0 = tex_texture_1;
 
-#line 887
+#line 892
     (&kernelContext_25)->tex_sampler_0 = tex_sampler_1;
     (&kernelContext_25)->paint_index_0 = _S103.data_1.y;
 
-#line 888
+#line 893
     float _S104 = shape_coverage_0(_S103.data_1.x, _S103.rc_1, _S103.epp_1, ((_S103.data_1.z) & 1U) != 0U, &kernelContext_25);
 
     if(_S104 <= 0.0f)
     {
 
-#line 891
+#line 896
         discard_fragment();
 
-#line 890
+#line 895
     }
 
-#line 890
+#line 895
     int _S105 = shader_type_0(&kernelContext_25);
 
-#line 890
+#line 895
     float4 _S106 = fill_color_0(_S105, _S103.fpos_3, &kernelContext_25);
 
-#line 890
+#line 895
     float _S107 = stroke_mask_0(float2(0.5f, 1.0f), &kernelContext_25);
 
-#line 890
+#line 895
     float _S108 = scissor_mask_0(_S103.fpos_3, &kernelContext_25);
 
-#line 890
+#line 895
     pixelOutput_0 _S109 = { _S106 * float4((_S107 * _S108 * _S104))  };
 
 

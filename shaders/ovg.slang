@@ -747,7 +747,9 @@ struct Shape_Instance {
     uint4 data;
 };
 
-// Vertex uniform slot 1: the draw's first instance.
+// Vertex uniform slot 1: the draw's first instance (x) and, when not 0,
+// one more than the paint row every instance takes instead of its own (y:
+// a run's coverage mask is drawn in white).
 struct Shape_Draw {
     uint4 base;
 };
@@ -782,6 +784,9 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.fpos = d;
     o.epp = epp;
     o.data = s.data;
+    if (shape_draw.base.y != 0u) {
+        o.data.y = shape_draw.base.y - 1u;
+    }
     float2 p = d - view.size.zw;
     o.position = float4(2.0 * p.x / view.size.x - 1.0, 1.0 - 2.0 * p.y / view.size.y, 0, 1);
     return o;

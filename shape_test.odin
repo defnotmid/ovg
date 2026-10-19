@@ -241,3 +241,83 @@ test_font_shapes_own_allocator :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, dark > 30)
 }
+
+@(test)
+test_translucent_text_fills_as_one :: proc(t: ^testing.T) {
+	// Overlapping glyphs (negative spacing), drawn translucent three ways
+	// (global alpha, a translucent colour, a translucent gradient): each must
+	// equal the run drawn opaque and composited at that alpha, with no
+	// darker overlaps.
+	font, _ := font_load(DEFAULT_FONT_DATA)
+	defer font_destroy(&font)
+	sc := font_scale_for_em(&font, 40)
+	glyphs: [dynamic]Positioned_Glyph
+	defer delete(glyphs)
+	x: f32 = 4
+	for r in "OVERLAP" {
+		g := font_glyph_index(&font, r)
+		append(&glyphs, Positioned_Glyph{g, x, 40})
+		adv, _ := font_glyph_advance(&font, g)
+		x += f32(adv) * sc - 12
+	}
+	W, H :: 180, 56
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, W, H)
+
+	// The opaque run on transparent: its alpha is the run's coverage.
+	clear_rect(&c, 0, 0, W, H, TRANSPARENT)
+	fill_glyph_outlines(&c, &font, glyphs[:], sc, paint_color(WHITE), nil)
+	flush(&c)
+	cover := make([]f32, W * H)
+	defer delete(cover)
+	for i in 0 ..< W * H {
+		cover[i] = f32(b.pixels[i * 4 + 3]) / 255
+	}
+	bg := Color{0.06, 0.08, 0.1, 1}
+	check :: proc(t: ^testing.T, b: ^Software_Backend, cover: []f32, bg: Color, a: f32, name: string) {
+		worst := 0
+		for i in 0 ..< len(cover) {
+			k := cover[i] * a
+			want := [3]f32{bg.r + (1 - bg.r) * k, bg.g + (1 - bg.g) * k, bg.b + (1 - bg.b) * k}
+			for ch in 0 ..< 3 {
+				worst = max(worst, abs(int(b.pixels[i * 4 + ch]) - int(want[ch] * 255 + 0.5)))
+			}
+		}
+		testing.expectf(t, worst <= 2, "%v: off by %v from the opaque run at alpha %v", name, worst, a)
+	}
+
+	clear_rect(&c, 0, 0, W, H, bg)
+	set_global_alpha(&c, 0.5)
+	fill_glyph_outlines(&c, &font, glyphs[:], sc, paint_color(WHITE), nil)
+	set_global_alpha(&c, 1)
+	flush(&c)
+	check(t, &b, cover, bg, 0.5, "global alpha")
+
+	clear_rect(&c, 0, 0, W, H, bg)
+	fill_glyph_outlines(&c, &font, glyphs[:], sc, paint_color({1, 1, 1, 0.5}), nil)
+	flush(&c)
+	check(t, &b, cover, bg, 0.5, "translucent colour")
+
+	clear_rect(&c, 0, 0, W, H, bg)
+	fill_glyph_outlines(&c, &font, glyphs[:], sc, paint_linear_gradient(0, 0, W, 0, {1, 1, 1, 0.5}, {1, 1, 1, 0.5}), nil)
+	flush(&c)
+	check(t, &b, cover, bg, 0.5, "translucent gradient")
+
+	// The glyphs do overlap: drawn one by one they darken there.
+	clear_rect(&c, 0, 0, W, H, bg)
+	for g in glyphs {
+		fill_glyph_outlines(&c, &font, {g}, sc, paint_color({1, 1, 1, 0.5}), nil)
+	}
+	flush(&c)
+	brighter := 0
+	for i in 0 ..< W * H {
+		want := bg.r + (1 - bg.r) * cover[i] * 0.5
+		brighter += int(int(b.pixels[i * 4]) > int(want * 255 + 0.5) + 8)
+	}
+	testing.expect(t, brighter > 20)
+}

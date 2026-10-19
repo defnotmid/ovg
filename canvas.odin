@@ -439,7 +439,50 @@ fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENT
 		return
 	}
 	cmd, row := shape_paint(c, paint)
-	push_shape(c, cmd, {s, t, row, paint.fill_rule == .Even_Odd})
+	push_shape(c, cmd, {s, t, row, paint.fill_rule == .Even_Odd}, false)
+}
+
+// Whether shapes filled with `paint` under the current state can overlap
+// without showing it: opaque colours blended source-over with no global
+// alpha. Otherwise a run fills as one (`Cmd_Draw_Shapes.union_coverage`).
+@(private)
+paint_opaque :: proc(c: ^Canvas, paint: Paint) -> bool {
+	st := state(c)
+	if st.alpha < 1 || st.composite_operation != composite_state_from_op(.Source_Over) {
+		return false
+	}
+	opaque :: proc(gc: Gradient_Colors) -> bool {
+		switch g in gc {
+		case Two_Stop_Gradient:
+			return g.start_color.a >= 1 && g.end_color.a >= 1
+		case Multi_Stop_Gradient:
+			if g.tint < 1 {
+				return false
+			}
+			for s in g.stops {
+				if s.color.a < 1 {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	switch f in paint.flavor {
+	case Paint_Color:
+		return f.a >= 1
+	case Paint_Image:
+		return false
+	case Paint_Linear_Gradient:
+		return opaque(f.colors)
+	case Paint_Box_Gradient:
+		return opaque(f.colors)
+	case Paint_Radial_Gradient:
+		return opaque(f.colors)
+	case Paint_Conic_Gradient:
+		return opaque(f.colors)
+	}
+	return false
 }
 
 // The command state and paint row for shapes filled with `paint` under the
@@ -461,17 +504,16 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 
 // `fill_shape` with a paint row from `shape_paint`.
 @(private)
-push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd: bool) {
+push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd, union_coverage: bool) {
 	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
 	if outside_target(c, shape_device_bounds(s, t)) {
 		return
 	}
-	push_shape(c, cmd, {s, t, row, even_odd})
+	push_shape(c, cmd, {s, t, row, even_odd}, union_coverage)
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),
 // grown by the pixel its edge coverage reaches.
-@(private)
 shape_device_bounds :: proc "contextless" (s: ^Shape, t: Transform2D) -> Bounds {
 	x0, y0, x1, y1 := shape_bounds(s)
 	b := EMPTY_BOUNDS
@@ -483,20 +525,21 @@ shape_device_bounds :: proc "contextless" (s: ^Shape, t: Transform2D) -> Bounds 
 }
 
 // Appends a shape instance, extending the frame's last command when it is
-// a shape draw with the same image, blend and scissor.
+// a shape draw with the same image, blend and scissor (and, filling as one,
+// the same paint).
 @(private)
-push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance) {
+push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, union_coverage: bool) {
 	append(&c.shapes, inst)
 	at := u32(len(c.shapes) - 1)
 	if n := len(c.commands); n > 0 {
 		last := &c.commands[n - 1]
-		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.union_coverage == union_coverage && (!union_coverage || c.shapes[at - 1].paint == inst.paint) && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
 			d.instances.count += 1
 			return
 		}
 	}
 	cmd := base
-	cmd.type = Cmd_Draw_Shapes{{at, 1}}
+	cmd.type = Cmd_Draw_Shapes{{at, 1}, union_coverage}
 	append(&c.commands, cmd)
 }
 

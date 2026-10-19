@@ -58,6 +58,9 @@ Row :: struct {
 	own_pass: bool,
 	program:  ^vg.Program_Run,
 	external: ^vg.Cmd_Run_External,
+	// Shapes: when not 0, one more than the paint row all the instances
+	// take instead of their own.
+	paint_override: u32,
 }
 
 // A GPU buffer and the transfer buffer that fills it, grown to the largest
@@ -349,6 +352,10 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			if !placed || c.instances.count == 0 {
 				continue
 			}
+			if c.union_coverage {
+				plan_shape_union(&p, cmd, c)
+				continue
+			}
 			row := draw_row(&p, cmd, .None)
 			row.kind = .Shapes
 			row.key.shapes = true
@@ -459,6 +466,72 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 	x1, y1 := x0 + f32(c.w), y0 + f32(c.h)
 	append(&p.b.verts, vg.vertex(x0, y0, 0.5, 1, paint), vg.vertex(x1, y0, 0.5, 1, paint), vg.vertex(x1, y1, 0.5, 1, paint))
 	append(&p.b.verts, vg.vertex(x0, y0, 0.5, 1, paint), vg.vertex(x1, y1, 0.5, 1, paint), vg.vertex(x0, y1, 0.5, 1, paint))
+}
+
+// A shape run filling as one (`union_coverage`): its coverages drawn in
+// white, source-over, into a cleared 8-bit mask over the run's bounds (a
+// scratch texture, sized in powers of two), then one quad of the run's
+// paint through the mask (the glyph alpha-mask path) into the target. The
+// software backend does the same steps.
+@(private = "file")
+plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
+	b := p.b
+	instances := p.frame.shapes[c.instances.start:][:c.instances.count]
+	bounds := vg.EMPTY_BOUNDS
+	for inst in instances {
+		ib := vg.shape_device_bounds(inst.shape, inst.transform)
+		bounds = {min(bounds.minx, ib.minx), min(bounds.miny, ib.miny), max(bounds.maxx, ib.maxx), max(bounds.maxy, ib.maxy)}
+	}
+	rect := vg.Rect{bounds.minx, bounds.miny, bounds.maxx - bounds.minx, bounds.maxy - bounds.miny}
+	if sr, ok := cmd.scissor_rect.?; ok {
+		rect = vg.rect_intersect(rect, sr)
+	}
+	area := target_rect(p.target, p.origin, rect)
+	if area.w <= 0 || area.h <= 0 {
+		return
+	}
+	mw := u32(math.next_power_of_two(int(max(area.w, 64))))
+	mh := u32(math.next_power_of_two(int(max(area.h, 64))))
+	scratch := scratch_image(b, {width = mw, height = mh, format = .Gray8})
+	if scratch == nil {
+		return
+	}
+	mask := scratch^
+	stencil_texture(b, mw, mh)
+	// The mask's pixel (0, 0) is the area's corner, in drawing coordinates.
+	corner := [2]i32{area.x + p.origin.x, area.y + p.origin.y}
+	x0, y0 := f32(corner.x), f32(corner.y)
+	x1, y1 := x0 + f32(area.w), y0 + f32(area.h)
+	inside := sdl.Rect{0, 0, area.w, area.h}
+
+	solid :: proc(p: ^Planner, color: [4]f32) -> u32 {
+		params := vg.default_params()
+		params.shader_type = .Fill_Color
+		params.inner_col = color
+		params.outer_col = color
+		params.stroke_mult = 1
+		params.stroke_thr = -1
+		return add_paint(p, vg.pack_frag_uniforms(params))
+	}
+	clear_paint := solid(p, {0, 0, 0, 0})
+	append(&b.rows, Row{kind = .Draw, target = mask, origin = corner, key = {vg.composite_state_from_op(.Copy), .None, mask.format, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = inside, verts = {extra_base(p), 6}})
+	append(&b.verts, vg.vertex(x0, y0, 0.5, 1, clear_paint), vg.vertex(x1, y0, 0.5, 1, clear_paint), vg.vertex(x1, y1, 0.5, 1, clear_paint))
+	append(&b.verts, vg.vertex(x0, y0, 0.5, 1, clear_paint), vg.vertex(x1, y1, 0.5, 1, clear_paint), vg.vertex(x0, y1, 0.5, 1, clear_paint))
+
+	white := solid(p, {1, 1, 1, 1})
+	append(&b.rows, Row{kind = .Shapes, target = mask, origin = corner, key = {vg.composite_state_from_op(.Source_Over), .None, mask.format, true}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = inside, verts = c.instances, paint_override = white + 1})
+
+	params := p.frame.paints[instances[0].paint]
+	params.glyph_texture_type = 1
+	paint := add_paint(p, vg.pack_frag_uniforms(params))
+	row := draw_row(p, cmd, .None)
+	row.textures[1] = texture_binding(b, &mask)
+	row.scissor = area
+	row.verts = {extra_base(p), 6}
+	append(&b.rows, row)
+	u1, v1 := f32(area.w) / f32(mw), f32(area.h) / f32(mh)
+	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y0, u1, 0, paint), vg.vertex(x1, y1, u1, v1, paint))
+	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y1, u1, v1, paint), vg.vertex(x0, y1, 0, v1, paint))
 }
 
 // One filter quad from `src` (and `backdrop`) into `dst`, a pass of its own
@@ -714,6 +787,7 @@ continues :: proc(pending, row: Row) -> bool {
 		row.origin == pending.origin &&
 		row.key == pending.key &&
 		row.textures == pending.textures &&
+		row.paint_override == pending.paint_override &&
 		row.scissor == pending.scissor \
 	)
 }
@@ -754,7 +828,7 @@ flush :: proc(r: ^Recorder) {
 	if row.kind == .Shapes {
 		// The instances index from the draw's first (SV_InstanceID counts
 		// from 0 in every draw).
-		base := [4]u32{row.verts.start, 0, 0, 0}
+		base := [4]u32{row.verts.start, row.paint_override, 0, 0}
 		sdl.PushGPUVertexUniformData(r.cmd, 1, &base, size_of(base))
 		sdl.DrawGPUPrimitives(r.pass, 6, row.verts.count, 0, 0)
 	} else if row.indexed {

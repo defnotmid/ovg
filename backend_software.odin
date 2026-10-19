@@ -23,6 +23,8 @@ Software_Backend :: struct {
 	origin:    [2]i32,
 	// The intermediate of a blur's two passes, reused.
 	blur_tmp:  []u8,
+	// The coverage mask of a shape run that fills as one, reused.
+	mask:      []u8,
 	// Borrowed task pool (the caller owns it) the heaviest filters
 	// (feTurbulence) run row bands on; nil runs them on the calling thread.
 	pool:      ^thread.Pool,
@@ -36,6 +38,7 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.pixels, b.allocator)
 	delete(b.stencil, b.allocator)
 	delete(b.blur_tmp, b.allocator)
+	delete(b.mask, b.allocator)
 	b^ = {}
 }
 
@@ -272,6 +275,10 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 			}
 		}
 	case Cmd_Draw_Shapes:
+		if c.union_coverage {
+			raster_shape_union(b, &r, images, frame, cmd, c)
+			return
+		}
 		frag: Frag
 		row := max(u32)
 		for inst in frame.shapes[c.instances.start:][:c.instances.count] {
@@ -281,6 +288,71 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 			}
 			r.frag = &frag
 			raster_shape(&r, inst)
+		}
+	}
+}
+
+// A run filling as one, as the GPU backend draws it: each instance's
+// coverage source-over white into an 8-bit mask over the run's bounds, then
+// the paint blended once through the mask.
+@(private = "file")
+raster_shape_union :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
+	instances := frame.shapes[c.instances.start:][:c.instances.count]
+	if len(instances) == 0 {
+		return
+	}
+	area := EMPTY_BOUNDS
+	for inst in instances {
+		ib := shape_device_bounds(inst.shape, inst.transform)
+		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
+	}
+	x0 := max(r.x0, i32(math.floor(area.minx)))
+	y0 := max(r.y0, i32(math.floor(area.miny)))
+	x1 := min(r.x1, i32(math.ceil(area.maxx)))
+	y1 := min(r.y1, i32(math.ceil(area.maxy)))
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	w, h := int(x1 - x0), int(y1 - y0)
+	if len(b.mask) < w * h {
+		delete(b.mask, b.allocator)
+		b.mask = make([]u8, w * h, b.allocator)
+	}
+	mask := b.mask[:w * h]
+	mem.zero_slice(mask)
+	for inst in instances {
+		ib := shape_device_bounds(inst.shape, inst.transform)
+		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
+		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
+		inv := transform_inverse(inst.transform)
+		epp := shape_ems_per_pixel(inst.transform)
+		for y in iy0 ..< iy1 {
+			for x in ix0 ..< ix1 {
+				cov := shape_coverage(inst.shape.data, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), epp, inst.even_odd)
+				if cov <= 0 {
+					continue
+				}
+				m := &mask[int(y - y0) * w + int(x - x0)]
+				m^ = to_unorm8(cov + f32(m^) / 255 * (1 - cov))
+			}
+		}
+	}
+	frag := make_frag(images, cmd, frame.paints[instances[0].paint])
+	for y in y0 ..< y1 {
+		py := f32(y) + 0.5
+		for x in x0 ..< x1 {
+			m := mask[int(y - y0) * w + int(x - x0)]
+			if m == 0 {
+				continue
+			}
+			px := f32(x) + 0.5
+			src, keep := shade(&frag, px, py, 0.5, 1)
+			if !keep {
+				continue
+			}
+			tx, ty := u32(x - r.ox), u32(y - r.oy)
+			dst := load_texel(r.target, tx, ty)
+			store_texel(r.target, tx, ty, apply_blend(r.blend, src * (f32(m) / 255), dst))
 		}
 	}
 }

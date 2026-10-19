@@ -58,3 +58,33 @@ scene_curves :: proc(c: ^vg.Canvas, r: ^Resources) {
 		vg.fill_shape(c, shape, vg.paint_color(vg.rgba(0, 160, 80, 140)), vg.transform_translation(60, 10))
 	}
 }
+
+// Translucent text whose glyphs overlap fills as one (union coverage):
+// global alpha, a translucent colour, a translucent gradient, under a
+// rotation and a scissor.
+scene_curves_alpha :: proc(c: ^vg.Canvas, r: ^Resources) {
+	vg.clear_rect(c, 0, 0, W, H, vg.rgb(16, 20, 24))
+	run :: proc(c: ^vg.Canvas, r: ^Resources, s: string, x0, y, size, spacing: f32, paint: vg.Paint) {
+		x := x0
+		clear(&r.glyphs)
+		sc := vg.font_scale_for_em(&r.font, size)
+		for ch in s {
+			g := vg.font_glyph_index(&r.font, ch)
+			append(&r.glyphs, vg.Positioned_Glyph{g, x, y})
+			adv, _ := vg.font_glyph_advance(&r.font, g)
+			x += f32(adv) * sc + spacing
+		}
+		vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], sc, paint, &r.scratch)
+	}
+	vg.save(c)
+	vg.set_global_alpha(c, 0.5)
+	run(c, r, "OVERLAP", 6, 48, 44, -10, vg.paint_color(vg.WHITE))
+	vg.restore(c)
+	run(c, r, "OVERLAP", 6, 100, 44, -10, vg.paint_color(vg.rgba(255, 255, 255, 128)))
+	vg.save(c)
+	vg.translate(c, 30, 120)
+	vg.rotate(c, 0.12)
+	vg.scissor(c, 0, 0, 200, 60)
+	run(c, r, "fading", 0, 40, 48, -8, vg.paint_linear_gradient(0, 0, 200, 0, vg.rgba(255, 200, 40, 200), vg.rgba(80, 160, 255, 90)))
+	vg.restore(c)
+}

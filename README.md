@@ -626,9 +626,11 @@ every part follows:
   font's shape (`font_glyph_shape`: built on first use with the font's
   allocator, the context's at `font_load`, whatever the drawing code runs
   under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
-  outline or tessellation work, and draws in one call. Glyphs are
-  separate fills, so translucent glyphs that overlap darken where they meet
-  (one path would not). Feathered and aliased paints fill the outlines as one
+  outline or tessellation work, and draws in one call. Opaque runs draw
+  each glyph as it is; a run with global alpha, a translucent paint or
+  another blend fills as one (its coverages united in an 8-bit mask, the
+  paint blended once through it), so overlapping glyphs never darken where
+  they meet. Feathered and aliased paints fill the outlines as one
   path. `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
   (baked at one scale). Both take glyph ids, so shaped runs draw as is.
   The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its
