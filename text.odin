@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:mem"
 import "core:sync"
 import "core:unicode/utf8"
@@ -29,6 +30,10 @@ Font :: struct {
 	// The glyphs' shapes (shape.odin), each built on first use and kept
 	// for the font's life; made with the first. Freed by `font_destroy`.
 	shapes:         ^Font_Shapes,
+	// What the font allocates with when it builds on first use (its
+	// shapes), whatever allocator the drawing code runs under: the
+	// context's at `font_load`; the heap for a font made otherwise.
+	allocator:      mem.Allocator,
 }
 
 @(private)
@@ -37,6 +42,12 @@ Font_Shapes :: struct {
 	// nil for glyphs without an outline.
 	glyphs:    map[Glyph_Index]^Shape,
 	allocator: mem.Allocator,
+}
+
+// The font's allocator (`Font.allocator`).
+@(private)
+font_allocator :: proc(f: ^Font) -> mem.Allocator {
+	return f.allocator if f.allocator.procedure != nil else runtime.heap_allocator()
 }
 
 Font_Id :: struct {
@@ -60,6 +71,7 @@ font_load :: proc(data: []u8, index: i32 = 0) -> (font: Font, err: Error) {
 	}
 	font.data = data
 	font.index = index
+	font.allocator = context.allocator
 	font.colr = colr_open(&font)
 	if font.colr == nil {
 		base := int(font.info.fontstart)
@@ -95,14 +107,15 @@ font_destroy :: proc(f: ^Font) {
 font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 	fs := sync.atomic_load_explicit(&f.shapes, .Acquire)
 	if fs == nil {
-		fresh := new(Font_Shapes)
-		fresh.glyphs = make(map[Glyph_Index]^Shape)
-		fresh.allocator = context.allocator
+		allocator := font_allocator(f)
+		fresh := new(Font_Shapes, allocator)
+		fresh.glyphs = make(map[Glyph_Index]^Shape, allocator)
+		fresh.allocator = allocator
 		if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); won {
 			fs = fresh
 		} else {
 			delete(fresh.glyphs)
-			free(fresh)
+			free(fresh, allocator)
 			fs = old
 		}
 	}

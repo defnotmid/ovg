@@ -1,5 +1,7 @@
 package ovg
 
+import "core:mem"
+import "core:slice"
 import "core:testing"
 
 @(private = "file")
@@ -186,4 +188,56 @@ test_shape_solidity :: proc(t: ^testing.T) {
 	defer shape_destroy(&s)
 	testing.expect(t, coverage_at(&s, TRANSFORM_IDENTITY, 15.5, 15.5) < 1e-3)
 	testing.expect(t, abs(coverage_at(&s, TRANSFORM_IDENTITY, 5.5, 15.5) - 1) < 1e-3)
+}
+
+@(test)
+test_font_shapes_own_allocator :: proc(t: ^testing.T) {
+	// The first glyph is built under a short-lived arena: the font's shapes
+	// still come from the font's allocator, and survive the arena.
+	font, _ := font_load(DEFAULT_FONT_DATA)
+	defer font_destroy(&font)
+	buf := make([]u8, 1 << 16)
+	defer delete(buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, buf)
+	g := font_glyph_index(&font, 'g')
+	s: ^Shape
+	{
+		context.allocator = mem.arena_allocator(&arena)
+		s = font_glyph_shape(&font, g)
+	}
+	testing.expect(t, s != nil)
+	inside :: proc(p: rawptr, buf: []u8) -> bool {
+		return uintptr(p) >= uintptr(raw_data(buf)) && uintptr(p) < uintptr(raw_data(buf)) + uintptr(len(buf))
+	}
+	testing.expect(t, !inside(s, buf) && !inside(raw_data(s.data), buf) && !inside(font.shapes, buf))
+	// The arena's memory is reused: drawing still sees the shape intact.
+	free_all(mem.arena_allocator(&arena))
+	mem.set(raw_data(buf), 0xAA, len(buf))
+
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 40, 40)
+	clear_rect(&c, 0, 0, 40, 40, WHITE)
+	sc := font_scale_for_em(&font, 30)
+	fill_glyph_outlines(&c, &font, {{g, 8, 26}}, sc, paint_color(BLACK), nil)
+	flush(&c)
+	drawn := slice.clone(b.pixels)
+	defer delete(drawn)
+
+	fresh, _ := font_load(DEFAULT_FONT_DATA)
+	defer font_destroy(&fresh)
+	clear_rect(&c, 0, 0, 40, 40, WHITE)
+	fill_glyph_outlines(&c, &fresh, {{g, 8, 26}}, sc, paint_color(BLACK), nil)
+	flush(&c)
+	testing.expect(t, string(drawn) == string(b.pixels))
+	dark := 0
+	for k := 0; k < len(drawn); k += 4 {
+		dark += int(drawn[k] < 128)
+	}
+	testing.expect(t, dark > 30)
 }

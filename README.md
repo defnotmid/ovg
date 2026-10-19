@@ -623,8 +623,9 @@ every part follows:
   edge pixel is off by 0.02–0.05 on average; corners stray most (up to
   ~0.3), as Slug's two rays overestimate them.
 - **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
-  font's shape (`font_glyph_shape`: built on first use, owned by the font,
-  freed by `font_destroy`), all sharing one paint row: a run costs no
+  font's shape (`font_glyph_shape`: built on first use with the font's
+  allocator, the context's at `font_load`, whatever the drawing code runs
+  under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
   outline or tessellation work, and draws in one call. Glyphs are
   separate fills, so translucent glyphs that overlap darken where they meet
   (one path would not). Feathered and aliased paints fill the outlines as one
