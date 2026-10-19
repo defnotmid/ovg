@@ -1,9 +1,9 @@
 package ovg
 
 import "core:encoding/endian"
+import "core:hash"
 import "core:os"
 import stbi "vendor:stb/image"
-import zlib "vendor:zlib"
 
 // Decodes a PNG/JPEG/BMP/GIF/TGA/... (anything stb_image reads) and uploads
 // it as an RGBA8 image.
@@ -27,9 +27,9 @@ load_image_file :: proc(c: ^Canvas, path: string, flags: Image_Flags = {}) -> (I
 }
 
 // Writes tightly packed top-down RGBA8 pixels as a PNG file: every row
-// Paeth-filtered, deflated with zlib's run-length strategy (on rendered frames
-// about 6-10x faster than stb_image_write and smaller), streamed out as IDAT
-// chunks of up to PNG_CHUNK bytes.
+// Paeth-filtered, deflated as runs of the previous byte (deflate.odin; on
+// rendered frames several times faster than stb_image_write and smaller),
+// streamed out as IDAT chunks of about PNG_CHUNK bytes.
 write_png :: proc(path: string, pixels: []u8, width, height: u32) -> Error {
 	if width == 0 || height == 0 || len(pixels) < int(width) * int(height) * 4 {
 		return .Unsupported_Format
@@ -65,56 +65,55 @@ encode_png :: proc(pixels: []u8, width, height: u32, allocator := context.alloca
 @(private)
 png_write :: proc(pixels: []u8, width, height: u32, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> Error {
 	stride := int(width) * 4
-	ok := true
-	// One buffer per chunk: length and type, then the data, then the CRC.
-	chunk := make([]u8, 8 + PNG_CHUNK + 4)
-	defer delete(chunk)
-	emit :: proc(chunk: []u8, type: string, n: int, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> bool {
-		endian.put_u32(chunk[0:4], .Big, u32(n))
-		copy(chunk[4:8], type)
-		crc := zlib.crc32(0, raw_data(chunk[4:]), zlib.uInt(4 + n))
-		endian.put_u32(chunk[8 + n:][:4], .Big, u32(crc))
-		return sink(ctx, chunk[:8 + n + 4])
-	}
-
-	ok &&= sink(ctx, {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
-	ihdr := chunk[8:]
+	ok := sink(ctx, {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	head: [8 + 13 + 4]u8
+	ihdr := head[8:]
 	endian.put_u32(ihdr[0:4], .Big, width)
 	endian.put_u32(ihdr[4:8], .Big, height)
 	copy(ihdr[8:13], []u8{8, 6, 0, 0, 0}) // 8 bits, RGBA, deflate, adaptive filtering, no interlace
-	ok &&= emit(chunk, "IHDR", 13, ctx, sink)
+	ok &&= png_chunk(head[:], "IHDR", ctx, sink)
 
-	z: zlib.z_stream
-	if zlib.deflateInit2(&z, 1, zlib.DEFLATED, 15, 9, zlib.RLE) != zlib.OK {
-		return .Out_Of_Memory
-	}
-	defer zlib.deflateEnd(&z)
+	// The compressed stream builds up behind room for a chunk header, so
+	// each IDAT goes out in place.
+	z: Deflate
+	deflate_init(&z, 8)
+	defer deflate_destroy(&z)
 	rows := make([]u8, stride * 2 + 1)
 	defer delete(rows)
 	zero, row := rows[:stride], rows[stride:]
-	z.next_out, z.avail_out = raw_data(chunk[8:]), PNG_CHUNK
 	for y in 0 ..< int(height) {
 		cur := pixels[y * stride:][:stride]
 		prev := y > 0 ? pixels[(y - 1) * stride:][:stride] : zero
 		png_filter_paeth(row, cur, prev)
-		z.next_in, z.avail_in = raw_data(row), zlib.uInt(len(row))
-		last := y == int(height) - 1
-		for ok {
-			r := zlib.deflate(&z, last ? zlib.FINISH : zlib.NO_FLUSH)
-			if r != zlib.OK && r != zlib.STREAM_END && r != zlib.BUF_ERROR {
-				return .General
-			}
-			if z.avail_out == 0 || r == zlib.STREAM_END {
-				ok &&= emit(chunk, "IDAT", PNG_CHUNK - int(z.avail_out), ctx, sink)
-				z.next_out, z.avail_out = raw_data(chunk[8:]), PNG_CHUNK
-			}
-			if r == zlib.STREAM_END || (!last && z.avail_in == 0) {
-				break
-			}
+		deflate_write(&z, row)
+		if len(z.out) - 8 >= PNG_CHUNK && ok {
+			ok &&= png_idat(&z, ctx, sink)
 		}
 	}
-	ok &&= emit(chunk, "IEND", 0, ctx, sink)
+	deflate_finish(&z)
+	ok &&= png_idat(&z, ctx, sink)
+	iend: [12]u8
+	ok &&= png_chunk(iend[:], "IEND", ctx, sink)
 	return ok ? nil : .Io
+}
+
+// Sends `chunk`: its data sits between 8 bytes of room for the length and
+// type and 4 for the CRC, which are filled in here.
+@(private = "file")
+png_chunk :: proc(chunk: []u8, type: string, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> bool {
+	n := len(chunk) - 12
+	endian.put_u32(chunk[0:4], .Big, u32(n))
+	copy(chunk[4:8], type)
+	endian.put_u32(chunk[8 + n:][:4], .Big, hash.crc32(chunk[4:8 + n]))
+	return sink(ctx, chunk)
+}
+
+@(private = "file")
+png_idat :: proc(z: ^Deflate, ctx: rawptr, sink: proc(ctx: rawptr, data: []u8) -> bool) -> bool {
+	resize(&z.out, len(z.out) + 4)
+	ok := png_chunk(z.out[:], "IDAT", ctx, sink)
+	resize(&z.out, 8)
+	return ok
 }
 
 @(private)

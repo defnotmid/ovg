@@ -9,7 +9,6 @@ separate file in [LICENSES/](LICENSES).
 | nanovg | femtovg's origin: the tessellation, antialiasing and shader design ovg inherits through it | `LICENSES/nanovg-Zlib.txt` |
 | stb_truetype, stb_image | linked (used under MIT) | `LICENSES/stb-MIT.txt` |
 | kb_text_shape | linked (text shaping) | `LICENSES/kb_text_shape-Zlib.txt` |
-| zlib | linked, the system library (PNG writing) | `LICENSES/zlib-Zlib.txt` |
 | resvg test suite | `tools/svg_suite/tests` (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/resvg-MIT.txt` |
 | Skia skottie resources | `tools/lottie_suite/tests` | `LICENSES/Skia-BSD-3-Clause.txt` |
 | lottie-web test animations | `tools/lottie_suite/tests` | `LICENSES/lottie-web-MIT.txt` |
