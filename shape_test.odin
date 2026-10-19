@@ -172,3 +172,18 @@ test_font_glyph_shape :: proc(t: ^testing.T) {
 	_, _, _, y1 := shape_bounds(a)
 	testing.expect(t, abs(transform_point(shape_local(a), 0, y1).y) < 40)
 }
+
+@(test)
+test_shape_solidity :: proc(t: ^testing.T) {
+	// The inner square is drawn the same way round as the outer one, then
+	// declared a hole: under non-zero it cuts out, as with fill_path.
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 30, 30)
+	path_rect(&p, 10, 10, 10, 10)
+	path_solidity(&p, .Hole)
+	s, _ := shape_from_path(&p)
+	defer shape_destroy(&s)
+	testing.expect(t, coverage_at(&s, TRANSFORM_IDENTITY, 15.5, 15.5) < 1e-3)
+	testing.expect(t, abs(coverage_at(&s, TRANSFORM_IDENTITY, 5.5, 15.5) - 1) < 1e-3)
+}

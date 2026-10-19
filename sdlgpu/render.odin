@@ -20,6 +20,8 @@ Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
 	stencil: vg.Stencil_Mode,
 	format:  sdl.GPUTextureFormat,
+	// The shape pipeline (shapes.odin) instead of the triangle one.
+	shapes:  bool,
 }
 
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
@@ -28,6 +30,9 @@ Paint :: [14][4]f32
 Row_Kind :: enum u8 {
 	// Triangles from `verts` into `target`.
 	Draw,
+	// Shape instances `verts` (a range of the frame's shapes), one quad
+	// each.
+	Shapes,
 	// `textures[0]`'s texture copied into `target`.
 	Copy,
 	// A custom program over `target` (`program`), its quad at `verts`.
@@ -68,6 +73,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	b := (^SDL_Backend)(data)
 	o := (^Output)(uintptr(out))
 	b.frame += 1
+	store_begin_frame(b)
 	evict_textures(b, &b.stencils)
 	evict_textures(b, &b.scratch)
 
@@ -96,11 +102,13 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	vert_count := len(frame.verts) + len(b.verts)
 	index_count := int(b.piece_index[len(frame.pieces)])
 	paint_count := len(frame.paints) + len(b.paints)
+	instance_count := len(frame.shapes)
 	// A frame whose buffers the device can't provide (out of memory, a lost
 	// device) is dropped, not drawn from nil buffers.
 	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX}) ||
 	   !stream_reserve(b, &b.index_stream, index_count * size_of(u32), {.INDEX}) ||
-	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) {
+	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) ||
+	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) {
 		return
 	}
 
@@ -113,6 +121,11 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		if owned {
 			_ = sdl.CancelGPUCommandBuffer(cmd)
 		}
+	}
+	// New shapes go into the store first (passes of their own).
+	if !store_upload(b, cmd) {
+		drop(cmd, owned)
+		return
 	}
 	copy_pass := sdl.BeginGPUCopyPass(cmd)
 	if copy_pass == nil {
@@ -144,6 +157,17 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 			}
 			copy(paints[len(frame.paints):paint_count], b.paints[:])
 			stream_commit(b, &b.paint_stream, copy_pass, paint_count * size_of(Paint))
+		} else {
+			uploaded = false
+		}
+	}
+	if instance_count > 0 {
+		// Written once, straight into the mapped transfer buffer.
+		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
+			for inst, i in frame.shapes {
+				out[i] = gpu_shape_instance(inst, b.shape_offsets[i])
+			}
+			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
 		} else {
 			uploaded = false
 		}
@@ -291,6 +315,7 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 		at += vg.piece_index_count(piece)
 	}
 	b.piece_index[len(frame.pieces)] = at
+	resize(&b.shape_offsets, len(frame.shapes))
 	stencil_texture(b, screen.width, screen.height)
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
@@ -314,8 +339,20 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				append(&b.rows, row)
 			}
 		case vg.Cmd_Draw_Shapes:
-		// Not drawn by this backend yet (the shape pipeline comes with the
-		// curve store).
+			placed := true
+			for inst, i in frame.shapes[c.instances.start:][:c.instances.count] {
+				offset, ok := store_place(b, inst.shape)
+				b.shape_offsets[int(c.instances.start) + i] = offset
+				placed &&= ok
+			}
+			if !placed || c.instances.count == 0 {
+				continue
+			}
+			row := draw_row(&p, cmd, .None)
+			row.kind = .Shapes
+			row.key.shapes = true
+			row.verts = c.instances
+			append(&b.rows, row)
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
@@ -361,7 +398,7 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command, stencil: vg.Stencil_Mode) -> Row 
 		kind = .Draw,
 		target = p.target,
 		origin = p.origin,
-		key = {cmd.composite_operation, stencil, p.target.format},
+		key = {cmd.composite_operation, stencil, p.target.format, false},
 		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, glyph)},
 		scissor = scissor,
 	}
@@ -436,7 +473,7 @@ plan_filter_pass :: proc(p: ^Planner, src, backdrop, dst: ^Image, paint: Paint) 
 	append(&p.b.rows, Row {
 		kind     = .Draw,
 		target   = dst^,
-		key      = {vg.composite_state_from_op(.Copy), .None, dst.format},
+		key      = {vg.composite_state_from_op(.Copy), .None, dst.format, false},
 		textures = {texture_binding(p.b, src), texture_binding(p.b, backdrop)},
 		scissor  = {0, 0, i32(dst.width), i32(dst.height)},
 		verts    = {extra_base(p), 6},
@@ -634,7 +671,7 @@ record_rows :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer, images: ^vg.Ima
 	}
 	for row in b.rows {
 		switch row.kind {
-		case .Draw:
+		case .Draw, .Shapes:
 			if r.gathering && continues(r.pending, row) {
 				r.pending.verts.count += row.verts.count
 				continue
@@ -667,6 +704,7 @@ record_rows :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer, images: ^vg.Ima
 @(private = "file")
 continues :: proc(pending, row: Row) -> bool {
 	return(
+		row.kind == pending.kind &&
 		!pending.own_pass &&
 		!row.own_pass &&
 		row.indexed == pending.indexed &&
@@ -710,7 +748,13 @@ flush :: proc(r: ^Recorder) {
 		sdl.SetGPUScissor(r.pass, row.scissor)
 		r.scissor = row.scissor
 	}
-	if row.indexed {
+	if row.kind == .Shapes {
+		// The instances index from the draw's first (SV_InstanceID counts
+		// from 0 in every draw).
+		base := [4]u32{row.verts.start, 0, 0, 0}
+		sdl.PushGPUVertexUniformData(r.cmd, 1, &base, size_of(base))
+		sdl.DrawGPUPrimitives(r.pass, 6, row.verts.count, 0, 0)
+	} else if row.indexed {
 		sdl.DrawGPUIndexedPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0, 0)
 	} else {
 		sdl.DrawGPUPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0)
@@ -753,8 +797,11 @@ begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 	if r.b.index_stream.buffer != nil {
 		sdl.BindGPUIndexBuffer(r.pass, {buffer = r.b.index_stream.buffer}, ._32BIT)
 	}
-	paints := r.b.paint_stream.buffer
-	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &paints, 1)
+	storage := [2]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer}
+	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], 2 if storage[1] != nil else 1)
+	if instances := r.b.instance_stream.buffer; instances != nil {
+		sdl.BindGPUVertexStorageBuffers(r.pass, 0, &instances, 1)
+	}
 	sdl.SetGPUStencilReference(r.pass, 0)
 	// The vertex shader subtracts the origin (zw) before mapping to NDC.
 	view := [4]f32{f32(target.width), f32(target.height), f32(origin.x), f32(origin.y)}
@@ -1063,6 +1110,28 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 			color_write_mask = {} if key.stencil == .Winding || key.stencil == .Clear else {.R, .G, .B, .A},
 			enable_color_write_mask = true,
 		},
+	}
+	if key.shapes {
+		// No vertex input: the shader pulls its instances.
+		info := sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = b.shape_vert,
+			fragment_shader = b.shape_frag,
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
+			multisample_state = {sample_count = ._1},
+			depth_stencil_state = stencil_state(.None),
+			target_info = {
+				color_target_descriptions = &color,
+				num_color_targets = 1,
+				depth_stencil_format = b.stencil_format,
+				has_depth_stencil_target = true,
+			},
+		}
+		p := sdl.CreateGPUGraphicsPipeline(b.device, info)
+		if p != nil {
+			b.pipelines[key] = p
+		}
+		return p
 	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
 		vertex_shader = b.vert,

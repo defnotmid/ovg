@@ -3085,77 +3085,311 @@ float4 inner_col_0(KernelContext_0 thread* kernelContext_28)
 }
 
 
+#line 112
+int blur_edge_0(KernelContext_0 thread* kernelContext_29)
+{
+
+#line 112
+    float4 _S221 = P_1(int(12), kernelContext_29);
+
+#line 112
+    return int(_S221.w);
+}
+
+
+#line 109
+float2 blur_direction_0(KernelContext_0 thread* kernelContext_30)
+{
+
+#line 109
+    float4 _S222 = P_1(int(11), kernelContext_30);
+
+#line 109
+    return _S222.yz;
+}
+
+
+#line 110
+int blur_taps_0(KernelContext_0 thread* kernelContext_31)
+{
+
+#line 110
+    float4 _S223 = P_1(int(11), kernelContext_31);
+
+#line 110
+    return int(_S223.w);
+}
+
+
+#line 111
+float3 blur_coeff_0(KernelContext_0 thread* kernelContext_32)
+{
+
+#line 111
+    float4 _S224 = P_1(int(12), kernelContext_32);
+
+#line 111
+    return _S224.xyz;
+}
+
+
+#line 195
+float4 blur_tap_0(float2 p_9, float2 ext_0, bool clamp_edge_0, KernelContext_0 thread* kernelContext_33)
+{
+
+#line 195
+    float2 _S225;
+    if(clamp_edge_0)
+    {
+
+#line 196
+        _S225 = clamp(p_9, float2(0.5f, 0.5f), ext_0 - float2(0.5f) );
+
+#line 196
+    }
+    else
+    {
+
+#line 198
+        float _S226 = p_9.x;
+
+#line 198
+        bool _S227;
+
+#line 198
+        if(_S226 < 0.0f)
+        {
+
+#line 198
+            _S227 = true;
+
+#line 198
+        }
+        else
+        {
+
+#line 198
+            _S227 = (p_9.y) < 0.0f;
+
+#line 198
+        }
+
+#line 198
+        if(_S227)
+        {
+
+#line 198
+            _S227 = true;
+
+#line 198
+        }
+        else
+        {
+
+#line 198
+            _S227 = _S226 > (ext_0.x);
+
+#line 198
+        }
+
+#line 198
+        if(_S227)
+        {
+
+#line 198
+            _S227 = true;
+
+#line 198
+        }
+        else
+        {
+
+#line 198
+            _S227 = (p_9.y) > (ext_0.y);
+
+#line 198
+        }
+
+#line 198
+        if(_S227)
+        {
+
+#line 199
+            return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
+
+#line 199
+        _S225 = p_9;
+
+#line 196
+    }
+
+#line 201
+    return ((kernelContext_33->tex_texture_0).sample((kernelContext_33->tex_sampler_0), (_S225 / ext_0), level((0.0f))));
+}
+
+
+float4 render_filtered_image_0(float2 fpos_1, KernelContext_0 thread* kernelContext_34)
+{
+
+#line 205
+    float2 _S228 = extent_0(kernelContext_34);
+
+#line 205
+    int _S229 = blur_edge_0(kernelContext_34);
+
+    bool _S230 = _S229 == int(1);
+
+#line 207
+    float2 _S231 = blur_direction_0(kernelContext_34);
+
+#line 207
+    int _S232 = blur_taps_0(kernelContext_34);
+
+#line 207
+    float3 _S233 = blur_coeff_0(kernelContext_34);
+
+
+    thread float3 coeff_0 = _S233;
+    float _S234 = _S233.x;
+
+#line 211
+    float4 _S235 = ((kernelContext_34->tex_texture_0).sample((kernelContext_34->tex_sampler_0), (fpos_1 / _S228), level((0.0f)))) * float4(_S234) ;
+
+    coeff_0.xy = _S233.xy * _S233.yz;
+
+#line 213
+    int i_7 = int(1);
+
+#line 213
+    float4 color_sum_0 = _S235;
+
+#line 213
+    float coeff_sum_0 = _S234;
+    for(;;)
+    {
+
+#line 214
+        if(i_7 <= int(24))
+        {
+        }
+        else
+        {
+
+#line 214
+            break;
+        }
+
+#line 215
+        if(i_7 > _S232)
+        {
+
+#line 216
+            break;
+        }
+        float2 d_2 = float2(float(i_7))  * _S231;
+
+#line 218
+        float4 _S236 = blur_tap_0(fpos_1 - d_2, _S228, _S230, kernelContext_34);
+        float4 color_sum_1 = color_sum_0 + _S236 * float4(coeff_0.x) ;
+
+#line 219
+        float4 _S237 = blur_tap_0(fpos_1 + d_2, _S228, _S230, kernelContext_34);
+        float4 color_sum_2 = color_sum_1 + _S237 * float4(coeff_0.x) ;
+        float coeff_sum_1 = coeff_sum_0 + 2.0f * coeff_0.x;
+        coeff_0.xy = coeff_0.xy * coeff_0.yz;
+
+#line 214
+        i_7 = i_7 + int(1);
+
+#line 214
+        color_sum_0 = color_sum_2;
+
+#line 214
+        coeff_sum_0 = coeff_sum_1;
+
+#line 214
+    }
+
+#line 214
+    float4 _S238 = apply_tex_type_0(color_sum_0 / float4(coeff_sum_0) , kernelContext_34);
+
+#line 224
+    return _S238;
+}
+
+
 #line 98
-float4 outer_col_0(KernelContext_0 thread* kernelContext_29)
+float4 outer_col_0(KernelContext_0 thread* kernelContext_35)
 {
 
 #line 98
-    float4 _S221 = P_1(int(7), kernelContext_29);
+    float4 _S239 = P_1(int(7), kernelContext_35);
 
 #line 98
-    return _S221;
+    return _S239;
 }
 
 
 #line 93
-float2 transform_point_0(int base_0, float2 p_9, KernelContext_0 thread* kernelContext_30)
+float2 transform_point_0(int base_0, float2 p_10, KernelContext_0 thread* kernelContext_36)
 {
 
 #line 93
-    float4 _S222 = P_1(base_0, kernelContext_30);
-    float3 _S223 = _S222.xyz * float3(p_9.x) ;
+    float4 _S240 = P_1(base_0, kernelContext_36);
+    float3 _S241 = _S240.xyz * float3(p_10.x) ;
 
 #line 94
-    float4 _S224 = P_1(base_0 + int(1), kernelContext_30);
+    float4 _S242 = P_1(base_0 + int(1), kernelContext_36);
 
 #line 94
-    float3 _S225 = _S223 + _S224.xyz * float3(p_9.y) ;
+    float3 _S243 = _S241 + _S242.xyz * float3(p_10.y) ;
 
 #line 94
-    float4 _S226 = P_1(base_0 + int(2), kernelContext_30);
+    float4 _S244 = P_1(base_0 + int(2), kernelContext_36);
 
 #line 94
-    return (_S225 + _S226.xyz).xy;
+    return (_S243 + _S244.xyz).xy;
 }
 
 
 #line 93
-float2 transform_point_1(int base_1, float2 p_10, KernelContext_0 thread* kernelContext_31)
+float2 transform_point_1(int base_1, float2 p_11, KernelContext_0 thread* kernelContext_37)
 {
 
 #line 93
-    float4 _S227 = P_1(base_1, kernelContext_31);
-    float3 _S228 = _S227.xyz * float3(p_10.x) ;
+    float4 _S245 = P_1(base_1, kernelContext_37);
+    float3 _S246 = _S245.xyz * float3(p_11.x) ;
 
 #line 94
-    float4 _S229 = P_1(base_1 + int(1), kernelContext_31);
+    float4 _S247 = P_1(base_1 + int(1), kernelContext_37);
 
 #line 94
-    float3 _S230 = _S228 + _S229.xyz * float3(p_10.y) ;
+    float3 _S248 = _S246 + _S247.xyz * float3(p_11.y) ;
 
 #line 94
-    float4 _S231 = P_1(base_1 + int(2), kernelContext_31);
+    float4 _S249 = P_1(base_1 + int(2), kernelContext_37);
 
 #line 94
-    return (_S230 + _S231.xyz).xy;
+    return (_S248 + _S249.xyz).xy;
 }
 
 
 #line 163
-float focal_t_0(float2 pt_0, KernelContext_0 thread* kernelContext_32)
+float focal_t_0(float2 pt_0, KernelContext_0 thread* kernelContext_38)
 {
 
 #line 163
-    float2 _S232 = extent_1(kernelContext_32);
-    float r_1 = _S232.x;
+    float2 _S250 = extent_1(kernelContext_38);
+    float r_1 = _S250.x;
 
 #line 164
-    float2 _S233 = extent_1(kernelContext_32);
-    float fr_0 = _S233.y;
+    float2 _S251 = extent_1(kernelContext_38);
+    float fr_0 = _S251.y;
 
 #line 165
-    float4 _S234 = P_1(int(13), kernelContext_32);
-    float2 f_0 = _S234.zw;
+    float4 _S252 = P_1(int(13), kernelContext_38);
+    float2 f_0 = _S252.zw;
     float2 cd_0 = - f_0;
     float dr_0 = r_1 - fr_0;
     float2 pd_0 = pt_0 - f_0;
@@ -3190,10 +3424,10 @@ float focal_t_0(float2 pt_0, KernelContext_0 thread* kernelContext_32)
         return hi_1;
     }
     float sq_0 = sqrt(max(b_2 * b_2 - a_4 * c_11, 0.0f));
-    bool _S235 = a_4 > 0.0f;
+    bool _S253 = a_4 > 0.0f;
 
 #line 177
-    if(_S235)
+    if(_S253)
     {
 
 #line 177
@@ -3217,7 +3451,7 @@ float focal_t_0(float2 pt_0, KernelContext_0 thread* kernelContext_32)
     }
 
 #line 179
-    if(_S235)
+    if(_S253)
     {
 
 #line 179
@@ -3240,24 +3474,24 @@ float focal_t_0(float2 pt_0, KernelContext_0 thread* kernelContext_32)
 
 
 #line 113
-float spread_0(KernelContext_0 thread* kernelContext_33)
+float spread_0(KernelContext_0 thread* kernelContext_39)
 {
 
 #line 113
-    float4 _S236 = P_1(int(13), kernelContext_33);
+    float4 _S254 = P_1(int(13), kernelContext_39);
 
 #line 113
-    return _S236.x;
+    return _S254.x;
 }
 
 
 #line 150
-float spread_t_0(float t_3, KernelContext_0 thread* kernelContext_34)
+float spread_t_0(float t_3, KernelContext_0 thread* kernelContext_40)
 {
 
 #line 150
-    float _S237 = spread_0(kernelContext_34);
-    int s_6 = int(_S237);
+    float _S255 = spread_0(kernelContext_40);
+    int s_6 = int(_S255);
     if(s_6 == int(1))
     {
 
@@ -3265,12 +3499,12 @@ float spread_t_0(float t_3, KernelContext_0 thread* kernelContext_34)
         float m_1 = t_3 - 2.0f * floor(t_3 * 0.5f);
 
 #line 153
-        float _S238;
+        float _S256;
         if(m_1 > 1.0f)
         {
 
 #line 154
-            _S238 = 2.0f - m_1;
+            _S256 = 2.0f - m_1;
 
 #line 154
         }
@@ -3278,13 +3512,13 @@ float spread_t_0(float t_3, KernelContext_0 thread* kernelContext_34)
         {
 
 #line 154
-            _S238 = m_1;
+            _S256 = m_1;
 
 #line 154
         }
 
 #line 154
-        return _S238;
+        return _S256;
     }
     if(s_6 == int(2))
     {
@@ -3299,319 +3533,83 @@ float spread_t_0(float t_3, KernelContext_0 thread* kernelContext_34)
 
 
 #line 102
-float radius_0(KernelContext_0 thread* kernelContext_35)
+float radius_0(KernelContext_0 thread* kernelContext_41)
 {
 
 #line 102
-    float4 _S239 = P_1(int(9), kernelContext_35);
+    float4 _S257 = P_1(int(9), kernelContext_41);
 
 #line 102
-    return _S239.z;
+    return _S257.z;
 }
 
 
 #line 119
-float sd_round_rect_0(float2 pt_1, float2 ext_0, float rad_0)
+float sd_round_rect_0(float2 pt_1, float2 ext_1, float rad_0)
 {
-    float2 d_2 = abs(pt_1) - (ext_0 - float2(rad_0, rad_0));
-    return min(max(d_2.x, d_2.y), 0.0f) + length(max(d_2, float2(0.0f) )) - rad_0;
+    float2 d_3 = abs(pt_1) - (ext_1 - float2(rad_0, rad_0));
+    return min(max(d_3.x, d_3.y), 0.0f) + length(max(d_3, float2(0.0f) )) - rad_0;
 }
 
 
 #line 103
-float feather_0(KernelContext_0 thread* kernelContext_36)
+float feather_0(KernelContext_0 thread* kernelContext_42)
 {
 
 #line 103
-    float4 _S240 = P_1(int(9), kernelContext_36);
+    float4 _S258 = P_1(int(9), kernelContext_42);
 
 #line 103
-    return _S240.w;
+    return _S258.w;
 }
 
 
 #line 182
-float gradient_t_0(float2 fpos_1, KernelContext_0 thread* kernelContext_37)
+float gradient_t_0(float2 fpos_2, KernelContext_0 thread* kernelContext_43)
 {
 
 #line 182
-    float2 _S241 = transform_point_1(int(3), fpos_1, kernelContext_37);
+    float2 _S259 = transform_point_1(int(3), fpos_2, kernelContext_43);
 
 #line 182
-    float4 _S242 = P_1(int(13), kernelContext_37);
+    float4 _S260 = P_1(int(13), kernelContext_43);
 
-    if((_S242.y) != 0.0f)
+    if((_S260.y) != 0.0f)
     {
 
 #line 184
-        float _S243 = focal_t_0(_S241, kernelContext_37);
+        float _S261 = focal_t_0(_S259, kernelContext_43);
 
 #line 184
-        float _S244 = spread_t_0(_S243, kernelContext_37);
+        float _S262 = spread_t_0(_S261, kernelContext_43);
 
 #line 184
-        return _S244;
+        return _S262;
     }
 
 #line 184
-    float2 _S245 = extent_1(kernelContext_37);
+    float2 _S263 = extent_1(kernelContext_43);
 
 #line 184
-    float _S246 = radius_0(kernelContext_37);
-    float _S247 = sd_round_rect_0(_S241, _S245, _S246);
+    float _S264 = radius_0(kernelContext_43);
+    float _S265 = sd_round_rect_0(_S259, _S263, _S264);
 
 #line 185
-    float _S248 = feather_0(kernelContext_37);
+    float _S266 = feather_0(kernelContext_43);
 
 #line 185
-    float _S249 = _S247 + _S248 * 0.5f;
+    float _S267 = _S265 + _S266 * 0.5f;
 
 #line 185
-    float _S250 = feather_0(kernelContext_37);
+    float _S268 = feather_0(kernelContext_43);
 
 #line 185
-    float _S251 = spread_t_0(_S249 / _S250, kernelContext_37);
+    float _S269 = spread_t_0(_S267 / _S268, kernelContext_43);
 
 #line 185
-    return _S251;
-}
-
-
-#line 112
-int blur_edge_0(KernelContext_0 thread* kernelContext_38)
-{
-
-#line 112
-    float4 _S252 = P_1(int(12), kernelContext_38);
-
-#line 112
-    return int(_S252.w);
-}
-
-
-#line 109
-float2 blur_direction_0(KernelContext_0 thread* kernelContext_39)
-{
-
-#line 109
-    float4 _S253 = P_1(int(11), kernelContext_39);
-
-#line 109
-    return _S253.yz;
-}
-
-
-#line 110
-int blur_taps_0(KernelContext_0 thread* kernelContext_40)
-{
-
-#line 110
-    float4 _S254 = P_1(int(11), kernelContext_40);
-
-#line 110
-    return int(_S254.w);
-}
-
-
-#line 111
-float3 blur_coeff_0(KernelContext_0 thread* kernelContext_41)
-{
-
-#line 111
-    float4 _S255 = P_1(int(12), kernelContext_41);
-
-#line 111
-    return _S255.xyz;
-}
-
-
-#line 195
-float4 blur_tap_0(float2 p_11, float2 ext_1, bool clamp_edge_0, KernelContext_0 thread* kernelContext_42)
-{
-
-#line 195
-    float2 _S256;
-    if(clamp_edge_0)
-    {
-
-#line 196
-        _S256 = clamp(p_11, float2(0.5f, 0.5f), ext_1 - float2(0.5f) );
-
-#line 196
-    }
-    else
-    {
-
-#line 198
-        float _S257 = p_11.x;
-
-#line 198
-        bool _S258;
-
-#line 198
-        if(_S257 < 0.0f)
-        {
-
-#line 198
-            _S258 = true;
-
-#line 198
-        }
-        else
-        {
-
-#line 198
-            _S258 = (p_11.y) < 0.0f;
-
-#line 198
-        }
-
-#line 198
-        if(_S258)
-        {
-
-#line 198
-            _S258 = true;
-
-#line 198
-        }
-        else
-        {
-
-#line 198
-            _S258 = _S257 > (ext_1.x);
-
-#line 198
-        }
-
-#line 198
-        if(_S258)
-        {
-
-#line 198
-            _S258 = true;
-
-#line 198
-        }
-        else
-        {
-
-#line 198
-            _S258 = (p_11.y) > (ext_1.y);
-
-#line 198
-        }
-
-#line 198
-        if(_S258)
-        {
-
-#line 199
-            return float4(0.0f, 0.0f, 0.0f, 0.0f);
-        }
-
-#line 199
-        _S256 = p_11;
-
-#line 196
-    }
-
-#line 201
-    return ((kernelContext_42->tex_texture_0).sample((kernelContext_42->tex_sampler_0), (_S256 / ext_1), level((0.0f))));
-}
-
-
-float4 render_filtered_image_0(float2 fpos_2, KernelContext_0 thread* kernelContext_43)
-{
-
-#line 205
-    float2 _S259 = extent_0(kernelContext_43);
-
-#line 205
-    int _S260 = blur_edge_0(kernelContext_43);
-
-    bool _S261 = _S260 == int(1);
-
-#line 207
-    float2 _S262 = blur_direction_0(kernelContext_43);
-
-#line 207
-    int _S263 = blur_taps_0(kernelContext_43);
-
-#line 207
-    float3 _S264 = blur_coeff_0(kernelContext_43);
-
-
-    thread float3 coeff_0 = _S264;
-    float _S265 = _S264.x;
-
-#line 211
-    float4 _S266 = ((kernelContext_43->tex_texture_0).sample((kernelContext_43->tex_sampler_0), (fpos_2 / _S259), level((0.0f)))) * float4(_S265) ;
-
-    coeff_0.xy = _S264.xy * _S264.yz;
-
-#line 213
-    int i_7 = int(1);
-
-#line 213
-    float4 color_sum_0 = _S266;
-
-#line 213
-    float coeff_sum_0 = _S265;
-    for(;;)
-    {
-
-#line 214
-        if(i_7 <= int(24))
-        {
-        }
-        else
-        {
-
-#line 214
-            break;
-        }
-
-#line 215
-        if(i_7 > _S263)
-        {
-
-#line 216
-            break;
-        }
-        float2 d_3 = float2(float(i_7))  * _S262;
-
-#line 218
-        float4 _S267 = blur_tap_0(fpos_2 - d_3, _S259, _S261, kernelContext_43);
-        float4 color_sum_1 = color_sum_0 + _S267 * float4(coeff_0.x) ;
-
-#line 219
-        float4 _S268 = blur_tap_0(fpos_2 + d_3, _S259, _S261, kernelContext_43);
-        float4 color_sum_2 = color_sum_1 + _S268 * float4(coeff_0.x) ;
-        float coeff_sum_1 = coeff_sum_0 + 2.0f * coeff_0.x;
-        coeff_0.xy = coeff_0.xy * coeff_0.yz;
-
-#line 214
-        i_7 = i_7 + int(1);
-
-#line 214
-        color_sum_0 = color_sum_2;
-
-#line 214
-        coeff_sum_0 = coeff_sum_1;
-
-#line 214
-    }
-
-#line 214
-    float4 _S269 = apply_tex_type_0(color_sum_0 / float4(coeff_sum_0) , kernelContext_43);
-
-#line 224
     return _S269;
 }
 
-
-#line 188
 float conic_fraction_0(float2 fpos_3, KernelContext_0 thread* kernelContext_44)
 {
 
@@ -3622,63 +3620,175 @@ float conic_fraction_0(float2 fpos_3, KernelContext_0 thread* kernelContext_44)
 }
 
 
+#line 671
+float4 fill_color_0(int type_1, float2 fpos_4, KernelContext_0 thread* kernelContext_45)
+{
+
+#line 672
+    if(type_1 == int(0))
+    {
+
+#line 672
+        float4 _S271 = inner_col_0(kernelContext_45);
+
+#line 672
+        float4 _S272 = outer_col_0(kernelContext_45);
+
+#line 672
+        float _S273 = gradient_t_0(fpos_4, kernelContext_45);
+        return mix(_S271, _S272, float4(_S273) );
+    }
+    else
+    {
+
+#line 674
+        if(type_1 == int(3))
+        {
+
+#line 674
+            float _S274 = gradient_t_0(fpos_4, kernelContext_45);
+
+            float4 _S275 = ((kernelContext_45->tex_texture_0).sample((kernelContext_45->tex_sampler_0), (float2(_S274, 0.0f)), level((0.0f))));
+
+#line 676
+            float4 _S276 = inner_col_0(kernelContext_45);
+
+#line 676
+            return _S275 * _S276;
+        }
+        else
+        {
+
+#line 677
+            if(type_1 == int(1))
+            {
+
+#line 677
+                float2 _S277 = transform_point_0(int(3), fpos_4, kernelContext_45);
+
+#line 677
+                float2 _S278 = extent_0(kernelContext_45);
+
+#line 677
+                float4 _S279 = apply_tex_type_0(((kernelContext_45->tex_texture_0).sample((kernelContext_45->tex_sampler_0), (_S277 / _S278), level((0.0f)))), kernelContext_45);
+
+#line 677
+                float4 _S280 = inner_col_0(kernelContext_45);
+
+                return _S279 * _S280;
+            }
+            else
+            {
+
+#line 680
+                if(type_1 == int(8))
+                {
+
+#line 680
+                    float4 _S281 = inner_col_0(kernelContext_45);
+
+#line 680
+                    float4 _S282 = outer_col_0(kernelContext_45);
+
+#line 680
+                    float _S283 = conic_fraction_0(fpos_4, kernelContext_45);
+                    return mix(_S281, _S282, float4(_S283) );
+                }
+                else
+                {
+
+#line 682
+                    if(type_1 == int(9))
+                    {
+
+#line 682
+                        float _S284 = conic_fraction_0(fpos_4, kernelContext_45);
+                        float4 _S285 = ((kernelContext_45->tex_texture_0).sample((kernelContext_45->tex_sampler_0), (float2(_S284, 0.0f)), level((0.0f))));
+
+#line 683
+                        float4 _S286 = inner_col_0(kernelContext_45);
+
+#line 683
+                        return _S285 * _S286;
+                    }
+
+#line 680
+                }
+
+#line 677
+            }
+
+#line 674
+        }
+
+#line 672
+    }
+
+#line 672
+    float4 _S287 = inner_col_0(kernelContext_45);
+
+#line 685
+    return _S287;
+}
+
+
 #line 99
-float2 scissor_ext_0(KernelContext_0 thread* kernelContext_45)
+float2 scissor_ext_0(KernelContext_0 thread* kernelContext_46)
 {
 
 #line 99
-    float4 _S271 = P_1(int(8), kernelContext_45);
+    float4 _S288 = P_1(int(8), kernelContext_46);
 
 #line 99
-    return _S271.xy;
+    return _S288.xy;
 }
 
 
 #line 100
-float2 scissor_scale_0(KernelContext_0 thread* kernelContext_46)
+float2 scissor_scale_0(KernelContext_0 thread* kernelContext_47)
 {
 
 #line 100
-    float4 _S272 = P_1(int(8), kernelContext_46);
+    float4 _S289 = P_1(int(8), kernelContext_47);
 
 #line 100
-    return _S272.zw;
+    return _S289.zw;
 }
 
 
 #line 125
-float scissor_mask_0(float2 p_12, KernelContext_0 thread* kernelContext_47)
+float scissor_mask_0(float2 p_12, KernelContext_0 thread* kernelContext_48)
 {
 
 #line 125
-    float2 _S273 = transform_point_1(int(0), p_12, kernelContext_47);
-    float2 _S274 = abs(_S273);
+    float2 _S290 = transform_point_1(int(0), p_12, kernelContext_48);
+    float2 _S291 = abs(_S290);
 
 #line 126
-    float2 _S275 = scissor_ext_0(kernelContext_47);
+    float2 _S292 = scissor_ext_0(kernelContext_48);
 
 #line 126
-    float2 sc_0 = _S274 - _S275;
-    float2 _S276 = float2(0.5f, 0.5f);
+    float2 sc_0 = _S291 - _S292;
+    float2 _S293 = float2(0.5f, 0.5f);
 
 #line 127
-    float2 _S277 = scissor_scale_0(kernelContext_47);
+    float2 _S294 = scissor_scale_0(kernelContext_48);
 
 #line 127
-    float2 sc_1 = _S276 - sc_0 * _S277;
+    float2 sc_1 = _S293 - sc_0 * _S294;
     return clamp(sc_1.x, 0.0f, 1.0f) * clamp(sc_1.y, 0.0f, 1.0f);
 }
 
 
 #line 108
-int glyph_texture_type_0(KernelContext_0 thread* kernelContext_48)
+int glyph_texture_type_0(KernelContext_0 thread* kernelContext_49)
 {
 
 #line 108
-    float4 _S278 = P_1(int(11), kernelContext_48);
+    float4 _S295 = P_1(int(11), kernelContext_49);
 
 #line 108
-    return int(_S278.x);
+    return int(_S295.x);
 }
 
 
@@ -3693,345 +3803,229 @@ struct pixelOutput_0
 struct pixelInput_0
 {
     float2 ftcoord_1 [[user(TEXCOORD)]];
-    float2 fpos_4 [[user(TEXCOORD_1)]];
+    float2 fpos_5 [[user(TEXCOORD_1)]];
     [[flat]] uint paint_0 [[user(TEXCOORD_2)]];
 };
 
 
-#line 670
-[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S279 [[stage_in]], float4 position_1 [[position]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]], texture2d<float, access::sample> glyphtex_texture_1 [[texture(1)]], sampler glyphtex_sampler_1 [[sampler(1)]])
+#line 689
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S296 [[stage_in]], float4 position_1 [[position]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]], texture2d<float, access::sample> glyphtex_texture_1 [[texture(1)]], sampler glyphtex_sampler_1 [[sampler(1)]])
 {
 
-#line 670
-    thread KernelContext_0 kernelContext_49;
+#line 689
+    thread KernelContext_0 kernelContext_50;
 
-#line 670
-    (&kernelContext_49)->paints_0 = paints_1;
+#line 689
+    (&kernelContext_50)->paints_0 = paints_1;
 
-#line 670
-    (&kernelContext_49)->tex_texture_0 = tex_texture_1;
+#line 689
+    (&kernelContext_50)->tex_texture_0 = tex_texture_1;
 
-#line 670
-    (&kernelContext_49)->tex_sampler_0 = tex_sampler_1;
+#line 689
+    (&kernelContext_50)->tex_sampler_0 = tex_sampler_1;
 
-#line 670
-    (&kernelContext_49)->glyphtex_texture_0 = glyphtex_texture_1;
+#line 689
+    (&kernelContext_50)->glyphtex_texture_0 = glyphtex_texture_1;
 
-#line 670
-    (&kernelContext_49)->glyphtex_sampler_0 = glyphtex_sampler_1;
-    (&kernelContext_49)->paint_index_0 = _S279.paint_0;
+#line 689
+    (&kernelContext_50)->glyphtex_sampler_0 = glyphtex_sampler_1;
+    (&kernelContext_50)->paint_index_0 = _S296.paint_0;
 
-#line 671
-    int _S280 = shader_type_0(&kernelContext_49);
+#line 690
+    int _S297 = shader_type_0(&kernelContext_50);
 
-    if(_S280 >= int(10))
+    if(_S297 >= int(10))
     {
 
-#line 673
-        float4 _S281 = render_filter_0(_S280, _S279.fpos_4, &kernelContext_49);
+#line 692
+        float4 _S298 = render_filter_0(_S297, _S296.fpos_5, &kernelContext_50);
 
-#line 673
-        pixelOutput_0 _S282 = { _S281 };
-        return _S282;
+#line 692
+        pixelOutput_0 _S299 = { _S298 };
+        return _S299;
     }
 
-#line 674
+#line 693
     float stroke_alpha_0;
 
 
-    if(_S280 != int(6))
+    if(_S297 != int(6))
     {
 
-#line 677
-        float _S283 = stroke_mask_0(_S279.ftcoord_1, &kernelContext_49);
+#line 696
+        float _S300 = stroke_mask_0(_S296.ftcoord_1, &kernelContext_50);
 
-#line 677
-        float _S284 = stroke_thr_0(&kernelContext_49);
+#line 696
+        float _S301 = stroke_thr_0(&kernelContext_50);
 
-        if(_S283 < _S284)
+        if(_S300 < _S301)
         {
 
-#line 680
+#line 699
             discard_fragment();
 
-#line 679
+#line 698
         }
 
-#line 679
-        stroke_alpha_0 = _S283;
+#line 698
+        stroke_alpha_0 = _S300;
 
-#line 677
+#line 696
     }
     else
     {
 
-#line 677
+#line 696
         stroke_alpha_0 = 1.0f;
 
-#line 677
+#line 696
     }
 
-#line 677
+#line 696
     float4 result_0;
 
-#line 687
-    if(_S280 == int(0))
+#line 706
+    if(_S297 == int(6))
     {
 
-#line 687
-        float4 _S285 = inner_col_0(&kernelContext_49);
+#line 706
+        float4 _S302 = apply_tex_type_0((((&kernelContext_50)->tex_texture_0).sample(((&kernelContext_50)->tex_sampler_0), (_S296.ftcoord_1), level((0.0f)))), &kernelContext_50);
 
-#line 687
-        float4 _S286 = outer_col_0(&kernelContext_49);
+#line 706
+        float4 _S303 = inner_col_0(&kernelContext_50);
 
-#line 687
-        float _S287 = gradient_t_0(_S279.fpos_4, &kernelContext_49);
-
-#line 687
-        result_0 = mix(_S285, _S286, float4(_S287) );
-
-#line 687
+#line 706
+        pixelOutput_0 _S304 = { _S302 * _S303 };
+        return _S304;
     }
     else
     {
 
-#line 689
-        if(_S280 == int(3))
+#line 708
+        if(_S297 == int(2))
         {
 
-#line 689
-            float _S288 = gradient_t_0(_S279.fpos_4, &kernelContext_49);
+#line 708
+            result_0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
 
-            float4 _S289 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S288, 0.0f)), level((0.0f))));
-
-#line 691
-            float4 _S290 = inner_col_0(&kernelContext_49);
-
-#line 691
-            result_0 = _S289 * _S290;
-
-#line 689
+#line 708
         }
         else
         {
-            if(_S280 == int(1))
+
+#line 710
+            if(_S297 == int(4))
             {
 
-#line 692
-                float2 _S291 = transform_point_0(int(3), _S279.fpos_4, &kernelContext_49);
+#line 710
+                float4 _S305 = render_filtered_image_0(_S296.fpos_5, &kernelContext_50);
 
-#line 692
-                float2 _S292 = extent_0(&kernelContext_49);
+#line 710
+                result_0 = _S305;
 
-#line 692
-                float4 _S293 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S291 / _S292), level((0.0f)))), &kernelContext_49);
-
-#line 692
-                float4 _S294 = inner_col_0(&kernelContext_49);
-
-#line 692
-                result_0 = _S293 * _S294;
-
-#line 692
+#line 710
             }
             else
             {
-                if(_S280 == int(6))
-                {
 
-#line 695
-                    float4 _S295 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S279.ftcoord_1), level((0.0f)))), &kernelContext_49);
+#line 710
+                float4 _S306 = fill_color_0(_S297, _S296.fpos_5, &kernelContext_50);
 
-#line 695
-                    float4 _S296 = inner_col_0(&kernelContext_49);
+#line 710
+                result_0 = _S306;
 
-#line 695
-                    pixelOutput_0 _S297 = { _S295 * _S296 };
-                    return _S297;
-                }
-                else
-                {
-
-#line 697
-                    if(_S280 == int(2))
-                    {
-
-#line 697
-                        result_0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
-
-#line 697
-                    }
-                    else
-                    {
-
-#line 699
-                        if(_S280 == int(4))
-                        {
-
-#line 699
-                            float4 _S298 = render_filtered_image_0(_S279.fpos_4, &kernelContext_49);
-
-#line 699
-                            result_0 = _S298;
-
-#line 699
-                        }
-                        else
-                        {
-
-#line 701
-                            if(_S280 == int(8))
-                            {
-
-#line 701
-                                float4 _S299 = inner_col_0(&kernelContext_49);
-
-#line 701
-                                float4 _S300 = outer_col_0(&kernelContext_49);
-
-#line 701
-                                float _S301 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
-
-#line 701
-                                result_0 = mix(_S299, _S300, float4(_S301) );
-
-#line 701
-                            }
-                            else
-                            {
-
-#line 703
-                                if(_S280 == int(9))
-                                {
-
-#line 703
-                                    float _S302 = conic_fraction_0(_S279.fpos_4, &kernelContext_49);
-                                    float4 _S303 = (((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (float2(_S302, 0.0f)), level((0.0f))));
-
-#line 704
-                                    float4 _S304 = inner_col_0(&kernelContext_49);
-
-#line 704
-                                    result_0 = _S303 * _S304;
-
-#line 703
-                                }
-                                else
-                                {
-
-#line 703
-                                    float4 _S305 = inner_col_0(&kernelContext_49);
-
-#line 703
-                                    result_0 = _S305;
-
-#line 703
-                                }
-
-#line 701
-                            }
-
-#line 699
-                        }
-
-#line 697
-                    }
-
-#line 695
-                }
-
-#line 692
+#line 710
             }
 
-#line 689
+#line 708
         }
 
-#line 687
+#line 706
     }
 
-#line 687
-    float _S306 = scissor_mask_0(_S279.fpos_4, &kernelContext_49);
+#line 706
+    float _S307 = scissor_mask_0(_S296.fpos_5, &kernelContext_50);
 
-#line 687
-    int _S307 = glyph_texture_type_0(&kernelContext_49);
+#line 706
+    int _S308 = glyph_texture_type_0(&kernelContext_50);
 
-#line 711
-    if(_S307 != int(0))
+#line 718
+    if(_S308 != int(0))
     {
 
-#line 712
-        float4 _S308 = (((&kernelContext_49)->glyphtex_texture_0).sample(((&kernelContext_49)->glyphtex_sampler_0), (_S279.ftcoord_1), level((0.0f))));
+#line 719
+        float4 _S309 = (((&kernelContext_50)->glyphtex_texture_0).sample(((&kernelContext_50)->glyphtex_sampler_0), (_S296.ftcoord_1), level((0.0f))));
 
-#line 712
+#line 719
         float4 mask_0;
-        if(_S307 == int(1))
+        if(_S308 == int(1))
         {
 
-#line 713
-            mask_0 = float4(_S308.x) ;
+#line 720
+            mask_0 = float4(_S309.x) ;
 
-#line 713
+#line 720
         }
         else
         {
-            float4 _S309 = float4(1.0f, 1.0f, 1.0f, 1.0f);
-            float _S310 = _S308.w;
+            float4 _S310 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+            float _S311 = _S309.w;
 
-#line 717
-            mask_0 = float4(_S308.xyz * float3(_S310) , _S310);
+#line 724
+            mask_0 = float4(_S309.xyz * float3(_S311) , _S311);
 
-#line 717
-            result_0 = _S309;
+#line 724
+            result_0 = _S310;
 
-#line 713
+#line 720
         }
 
-#line 713
-        result_0 = result_0 * (mask_0 * float4(_S306) );
+#line 720
+        result_0 = result_0 * (mask_0 * float4(_S307) );
 
-#line 711
+#line 718
     }
     else
     {
 
-#line 711
-        bool _S311;
+#line 718
+        bool _S312;
 
-#line 720
-        if(_S280 != int(2))
+#line 727
+        if(_S297 != int(2))
         {
 
-#line 720
-            _S311 = _S280 != int(4);
+#line 727
+            _S312 = _S297 != int(4);
 
-#line 720
+#line 727
         }
         else
         {
 
-#line 720
-            _S311 = false;
+#line 727
+            _S312 = false;
 
-#line 720
+#line 727
         }
 
-#line 720
-        if(_S311)
+#line 727
+        if(_S312)
         {
 
-#line 720
-            result_0 = result_0 * float4((stroke_alpha_0 * _S306)) ;
+#line 727
+            result_0 = result_0 * float4((stroke_alpha_0 * _S307)) ;
 
-#line 720
+#line 727
         }
 
-#line 711
+#line 718
     }
 
-#line 711
-    pixelOutput_0 _S312 = { result_0 };
+#line 718
+    pixelOutput_0 _S313 = { result_0 };
 
-#line 723
-    return _S312;
+#line 730
+    return _S313;
 }
 

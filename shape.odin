@@ -1,7 +1,9 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 import "core:mem"
+import "core:sync"
 import "core:slice"
 import stbtt "vendor:stb/truetype"
 
@@ -34,6 +36,9 @@ import stbtt "vendor:stb/truetype"
 
 Shape :: struct {
 	data:      []u32,
+	// Unique for the process's life: GPU backends find their copy of the
+	// shape by it, so a shape may be moved.
+	id:        u64,
 	// Shape units to the units the shape was built in (path units, or font
 	// units with y down): `p = origin + q * extent`.
 	origin:    Vec2,
@@ -46,10 +51,59 @@ SHAPE_HEADER :: 12
 @(private)
 SHAPE_MAX_BANDS :: 32
 
+// Frees the shape and every GPU backend's copy of it.
 shape_destroy :: proc(s: ^Shape) {
+	if s.id != 0 {
+		sync.mutex_lock(&shape_stores.lock)
+		for st in shape_stores.list {
+			st.forget(st.data, s.id)
+		}
+		sync.mutex_unlock(&shape_stores.lock)
+	}
 	delete(s.data, s.allocator)
 	s^ = {}
 }
+
+// A backend that keeps copies of shapes (in GPU memory) registers here, so
+// a shape's copies are freed with it: `forget` runs from `shape_destroy`,
+// on whatever thread destroys the shape.
+Shape_Store_Hook :: struct {
+	data:   rawptr,
+	forget: proc(data: rawptr, id: u64),
+}
+
+shape_store_register :: proc(h: Shape_Store_Hook) {
+	sync.mutex_lock(&shape_stores.lock)
+	defer sync.mutex_unlock(&shape_stores.lock)
+	if shape_stores.list == nil {
+		shape_stores.list = make([dynamic]Shape_Store_Hook, runtime.heap_allocator())
+	}
+	append(&shape_stores.list, h)
+}
+
+shape_store_unregister :: proc(data: rawptr) {
+	sync.mutex_lock(&shape_stores.lock)
+	defer sync.mutex_unlock(&shape_stores.lock)
+	for h, i in shape_stores.list {
+		if h.data == data {
+			unordered_remove(&shape_stores.list, i)
+			break
+		}
+	}
+	if len(shape_stores.list) == 0 {
+		delete(shape_stores.list)
+		shape_stores.list = nil
+	}
+}
+
+@(private = "file")
+shape_stores: struct {
+	lock: sync.Mutex,
+	list: [dynamic]Shape_Store_Hook,
+}
+
+@(private = "file")
+shape_next_id: u64
 
 // Shape units to the shape's source units.
 shape_local :: proc "contextless" (s: ^Shape) -> Transform2D {
@@ -74,6 +128,8 @@ Shape_Builder :: struct {
 	curves:      [dynamic]Shape_Curve,
 	start, last: Vec2,
 	open:        bool,
+	// Where the current contour's curves start.
+	contour:     int,
 	// Cubic approximation tolerance in source units; 0 picks 1/4096 of the
 	// shape's size when built.
 	tol:         f32,
@@ -92,6 +148,27 @@ shape_builder_reset :: proc(b: ^Shape_Builder) {
 shape_move_to :: proc(b: ^Shape_Builder, p: Vec2) {
 	shape_close(b)
 	b.start, b.last, b.open = p, p, true
+	b.contour = len(b.curves)
+}
+
+// Winds the current contour as `.Solid` (positive area, y down) or
+// `.Hole`, reversing it if needed, as fill_path does (path_solidity).
+shape_solidity :: proc(b: ^Shape_Builder, s: Solidity) {
+	curves := b.curves[b.contour:]
+	area: f32
+	for c in curves {
+		area += (c.p2.x - c.p1.x) * (c.p2.y + c.p1.y) + (c.p3.x - c.p2.x) * (c.p3.y + c.p2.y)
+	}
+	if (s == .Solid && area < 0) || (s == .Hole && area > 0) {
+		slice.reverse(curves)
+		for &c in curves {
+			c.p1, c.p3 = c.p3, c.p1
+		}
+		if b.open {
+			// The contour now starts where it ended.
+			b.start, b.last = b.last, b.start
+		}
+	}
 }
 
 shape_line_to :: proc(b: ^Shape_Builder, p: Vec2) {
@@ -173,7 +250,10 @@ shape_add_path :: proc(b: ^Shape_Builder, p: ^Path) {
 			shape_cubic_to(b, coords[0], coords[1], coords[2])
 		case .Close:
 			shape_close(b)
-		case .Solid, .Hole:
+		case .Solid:
+			shape_solidity(b, .Solid)
+		case .Hole:
+			shape_solidity(b, .Hole)
 		}
 	}
 	shape_close(b)
@@ -223,7 +303,7 @@ shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator) -> (s: Sh
 	if extent <= 0 {
 		return {}, false
 	}
-	s = {origin = lo, extent = extent, allocator = allocator}
+	s = {origin = lo, extent = extent, allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}
 	inv := 1 / extent
 	curves := make([]Shape_Curve, len(b.curves), context.temp_allocator)
 	for c, i in b.curves {
@@ -471,7 +551,6 @@ shape_coverage :: proc "contextless" (s: []u32, rc: Vec2, ems_per_pixel: Vec2, e
 
 // Shape units spanned by one pixel along each axis under `t` (shape units
 // to device pixels): what `fwidth` of the shape coordinate gives a shader.
-@(private)
 shape_ems_per_pixel :: proc "contextless" (t: Transform2D) -> Vec2 {
 	inv := transform_inverse(t)
 	return {abs(inv[0]) + abs(inv[2]), abs(inv[1]) + abs(inv[3])}

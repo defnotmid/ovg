@@ -55,6 +55,8 @@ Resources :: struct {
 	// The Lottie text and effects scene.
 	lottie_fx_doc:   vg.Lottie_Document,
 	lottie_fx_ready: bool,
+	// Shapes built for one frame, destroyed at the next `draw_frame`.
+	frame_shapes:    [dynamic]^vg.Shape,
 }
 
 FONT_DATA :: #load("../../assets/Vera.ttf")
@@ -86,11 +88,17 @@ ALL := [?]Scene {
 	{"lottie", scene_lottie},
 	{"lottie_text_fx", scene_lottie_text_fx},
 	{"emoji", scene_emoji},
+	{"curves", scene_curves},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the
 // scene. The caller flushes.
 draw_frame :: proc(c: ^vg.Canvas, s: Scene, r: ^Resources) {
+	for shape in r.frame_shapes {
+		vg.shape_destroy(shape)
+		free(shape)
+	}
+	clear(&r.frame_shapes)
 	vg.set_size(c, W, H)
 	vg.clear_rect(c, 0, 0, W, H, vg.TRANSPARENT)
 	s.draw(c, r)
@@ -110,6 +118,12 @@ resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_stack_destroy(&r.layers, c)
 	vg.glyph_atlas_destroy(&r.atlas, c)
 	vg.font_store_destroy(&r.fonts)
+	vg.font_destroy(&r.font)
+	for shape in r.frame_shapes {
+		vg.shape_destroy(shape)
+		free(shape)
+	}
+	delete(r.frame_shapes)
 	vg.path_destroy(&r.scratch)
 	vg.path_destroy(&r.path)
 	delete(r.glyphs)

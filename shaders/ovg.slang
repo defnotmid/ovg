@@ -666,6 +666,25 @@ float4 render_filter(int type, float2 fpos) {
     return composite_pixel(filter_op(), P(4), s, b);
 }
 
+// The paint's color at `fpos` for the fill types (gradients, images,
+// solid colors).
+float4 fill_color(int type, float2 fpos) {
+    if (type == FILL_GRADIENT) {
+        return lerp(inner_col(), outer_col(), gradient_t(fpos));
+    } else if (type == FILL_IMAGE_GRADIENT) {
+        // The ramp is the stops; inner_col carries the paint's alpha.
+        return tex.SampleLevel(float2(gradient_t(fpos), 0.0), 0) * inner_col();
+    } else if (type == FILL_IMAGE) {
+        float2 pt = transform_point(3, fpos) / extent();
+        return apply_tex_type(tex.SampleLevel(pt, 0)) * inner_col();
+    } else if (type == FILL_GRADIENT_CONIC) {
+        return lerp(inner_col(), outer_col(), conic_fraction(fpos));
+    } else if (type == FILL_IMAGE_GRADIENT_CONIC) {
+        return tex.SampleLevel(float2(conic_fraction(fpos), 0.0), 0) * inner_col();
+    }
+    return inner_col();
+}
+
 [shader("fragment")]
 float4 fs_main(VS_Out i) : SV_Target {
     paint_index = i.paint;
@@ -684,26 +703,14 @@ float4 fs_main(VS_Out i) : SV_Target {
     // Textures are sampled at level 0: there are no mipmaps, and no
     // derivatives are needed after the discard above.
     float4 result;
-    if (type == FILL_GRADIENT) {
-        result = lerp(inner_col(), outer_col(), gradient_t(i.fpos));
-    } else if (type == FILL_IMAGE_GRADIENT) {
-        // The ramp is the stops; inner_col carries the paint's alpha.
-        result = tex.SampleLevel(float2(gradient_t(i.fpos), 0.0), 0) * inner_col();
-    } else if (type == FILL_IMAGE) {
-        float2 pt = transform_point(3, i.fpos) / extent();
-        result = apply_tex_type(tex.SampleLevel(pt, 0)) * inner_col();
-    } else if (type == TEXTURE_COPY_UNCLIPPED) {
+    if (type == TEXTURE_COPY_UNCLIPPED) {
         return apply_tex_type(tex.SampleLevel(i.ftcoord, 0)) * inner_col();
     } else if (type == STENCIL) {
         result = float4(1, 1, 1, 1);
     } else if (type == FILTER_IMAGE) {
         result = render_filtered_image(i.fpos);
-    } else if (type == FILL_GRADIENT_CONIC) {
-        result = lerp(inner_col(), outer_col(), conic_fraction(i.fpos));
-    } else if (type == FILL_IMAGE_GRADIENT_CONIC) {
-        result = tex.SampleLevel(float2(conic_fraction(i.fpos), 0.0), 0) * inner_col();
     } else {
-        result = inner_col();
+        result = fill_color(type, i.fpos);
     }
 
     float scissor = scissor_mask(i.fpos);
@@ -721,4 +728,168 @@ float4 fs_main(VS_Out i) : SV_Target {
         result *= stroke_alpha * scissor;
     }
     return result;
+}
+
+// ---- shapes (ovg shape.odin) ------------------------------------------------
+//
+// A shape instance is a quad over the shape's bounds, grown by a pixel,
+// whose fragments compute coverage from the shape's curves (Slug's
+// algorithm; `shape_coverage` in shape.odin is the same steps). The
+// instances and the shapes come from storage buffers: no vertex input.
+
+// Shape units to drawing coordinates (m: a b c d; t.xy: translation),
+// the shape units one pixel spans (t.zw), the shape's bounds, and its word
+// offset in `shapes`, paint row and flags (bit 0: even-odd).
+struct Shape_Instance {
+    float4 m;
+    float4 t;
+    float4 bounds;
+    uint4 data;
+};
+
+// Vertex uniform slot 1: the draw's first instance.
+struct Shape_Draw {
+    uint4 base;
+};
+
+// Metal: after the two vertex uniform buffers, [[buffer(2)]].
+[[vk::binding(0, 0)]] StructuredBuffer<Shape_Instance> shape_instances : register(t2, space0);
+[[vk::binding(1, 1)]] ConstantBuffer<Shape_Draw> shape_draw : register(b1, space1);
+[[vk::binding(3, 2)]] StructuredBuffer<uint> shapes : register(t1, space2);
+
+struct VS_Shape_Out {
+    float4 position : SV_Position;
+    // Shape units.
+    float2 rc : TEXCOORD0;
+    // Drawing coordinates.
+    float2 fpos : TEXCOORD1;
+    nointerpolation float2 epp : TEXCOORD2;
+    nointerpolation uint4 data : TEXCOORD3;
+};
+
+[shader("vertex")]
+VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
+    Shape_Instance s = shape_instances[shape_draw.base.x + iid];
+    // Two triangles: (0,0) (1,0) (1,1), (0,0) (1,1) (0,1).
+    uint k = vid % 6;
+    float cx = (k == 1 || k == 2 || k == 4) ? 1.0 : 0.0;
+    float cy = (k == 2 || k == 4 || k == 5) ? 1.0 : 0.0;
+    float2 epp = s.t.zw;
+    float2 rc = float2(lerp(s.bounds.x - epp.x, s.bounds.z + epp.x, cx), lerp(s.bounds.y - epp.y, s.bounds.w + epp.y, cy));
+    float2 d = float2(s.m.x * rc.x + s.m.z * rc.y + s.t.x, s.m.y * rc.x + s.m.w * rc.y + s.t.y);
+    VS_Shape_Out o;
+    o.rc = rc;
+    o.fpos = d;
+    o.epp = epp;
+    o.data = s.data;
+    float2 p = d - view.size.zw;
+    o.position = float4(2.0 * p.x / view.size.x - 1.0, 1.0 - 2.0 * p.y / view.size.y, 0, 1);
+    return o;
+}
+
+float shape_word_f(uint i) { return asfloat(shapes[i]); }
+
+uint shape_root_code(float y1, float y2, float y3) {
+    uint i1 = asuint(y1) >> 31u;
+    uint i2 = asuint(y2) >> 30u;
+    uint i3 = asuint(y3) >> 29u;
+    uint shift = (i2 & 2u) | (i1 & ~2u);
+    shift = (i3 & 4u) | (shift & ~4u);
+    return (0x2E74u >> shift) & 0x0101u;
+}
+
+// Roots of the curve (relative to the sample) on y = 0 (axis 1) or x = 0
+// (axis 0): the other coordinate at each.
+float2 shape_solve(float2 p1, float2 p2, float2 p3, int axis) {
+    int other = 1 - axis;
+    float2 a = p1 - p2 * 2.0 + p3;
+    float2 b = p1 - p2;
+    float ra = 1.0 / a[axis];
+    float rb = 0.5 / b[axis];
+    float d = sqrt(max(b[axis] * b[axis] - a[axis] * p1[axis], 0.0));
+    float t1 = (b[axis] - d) * ra;
+    float t2 = (b[axis] + d) * ra;
+    if (abs(a[axis]) < 1.0 / 65536.0) {
+        t1 = p1[axis] * rb;
+        t2 = t1;
+    }
+    return float2((a[other] * t1 - b[other] * 2.0) * t1 + p1[other], (a[other] * t2 - b[other] * 2.0) * t2 + p1[other]);
+}
+
+float shape_coverage(uint s, float2 rc, float2 epp, bool even_odd) {
+    float2 ppe = 1.0 / epp;
+    int h_count = int(shapes[s]);
+    int v_count = int(shapes[s + 1]);
+    float2 scale = float2(shape_word_f(s + 2), shape_word_f(s + 3));
+    float2 offset = float2(shape_word_f(s + 4), shape_word_f(s + 5));
+    int bx = clamp(int(rc.x * scale.x + offset.x), 0, v_count - 1);
+    int by = clamp(int(rc.y * scale.y + offset.y), 0, h_count - 1);
+    uint curves = s + shapes[s + 6];
+
+    float xcov = 0.0;
+    float xwgt = 0.0;
+    uint hb = s + 12 + 2 * uint(by);
+    uint list = s + shapes[hb + 1];
+    uint count = shapes[hb];
+    for (uint k = 0; k < count; k++) {
+        uint c = curves + 6 * shapes[list + k];
+        float2 p1 = float2(shape_word_f(c), shape_word_f(c + 1)) - rc;
+        float2 p2 = float2(shape_word_f(c + 2), shape_word_f(c + 3)) - rc;
+        float2 p3 = float2(shape_word_f(c + 4), shape_word_f(c + 5)) - rc;
+        if (max(max(p1.x, p2.x), p3.x) * ppe.x < -0.5) break;
+        uint code = shape_root_code(p1.y, p2.y, p3.y);
+        if (code != 0u) {
+            float2 r = shape_solve(p1, p2, p3, 1) * ppe.x;
+            if ((code & 1u) != 0u) {
+                xcov += clamp(r.x + 0.5, 0.0, 1.0);
+                xwgt = max(xwgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
+            }
+            if (code > 1u) {
+                xcov -= clamp(r.y + 0.5, 0.0, 1.0);
+                xwgt = max(xwgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
+            }
+        }
+    }
+
+    float ycov = 0.0;
+    float ywgt = 0.0;
+    uint vb = s + 12 + 2 * uint(h_count + bx);
+    list = s + shapes[vb + 1];
+    count = shapes[vb];
+    for (uint k = 0; k < count; k++) {
+        uint c = curves + 6 * shapes[list + k];
+        float2 p1 = float2(shape_word_f(c), shape_word_f(c + 1)) - rc;
+        float2 p2 = float2(shape_word_f(c + 2), shape_word_f(c + 3)) - rc;
+        float2 p3 = float2(shape_word_f(c + 4), shape_word_f(c + 5)) - rc;
+        if (max(max(p1.y, p2.y), p3.y) * ppe.y < -0.5) break;
+        uint code = shape_root_code(p1.x, p2.x, p3.x);
+        if (code != 0u) {
+            float2 r = shape_solve(p1, p2, p3, 0) * ppe.y;
+            if ((code & 1u) != 0u) {
+                ycov -= clamp(r.x + 0.5, 0.0, 1.0);
+                ywgt = max(ywgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
+            }
+            if (code > 1u) {
+                ycov += clamp(r.y + 0.5, 0.0, 1.0);
+                ywgt = max(ywgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
+            }
+        }
+    }
+
+    float coverage = max(abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0), min(abs(xcov), abs(ycov)));
+    if (even_odd) {
+        return 1.0 - abs(1.0 - (coverage * 0.5 - floor(coverage * 0.5)) * 2.0);
+    }
+    return clamp(coverage, 0.0, 1.0);
+}
+
+[shader("fragment")]
+float4 fs_shape(VS_Shape_Out i) : SV_Target {
+    paint_index = i.data.y;
+    float coverage = shape_coverage(i.data.x, i.rc, i.epp, (i.data.z & 1u) != 0u);
+    if (coverage <= 0.0) {
+        discard;
+    }
+    float4 result = fill_color(shader_type(), i.fpos);
+    return result * (stroke_mask(float2(0.5, 1.0)) * scissor_mask(i.fpos) * coverage);
 }

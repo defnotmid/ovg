@@ -430,7 +430,9 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 // per-pixel coverage: no tessellation, so a shape built once draws at any
 // transform for the cost of its bounds. `local` maps the shape's source
 // units (its path's, or a glyph's font units, y down) to current units.
-// The paint's fill rule applies; feathering is not supported.
+// The paint's fill rule applies; feathering is not supported. The frame
+// keeps `s`'s address: the shape must stay there, undestroyed, until the
+// frame has been rendered.
 fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY) {
 	st := state(c)
 	t := transform_multiply(shape_local(s), transform_multiply(local, st.transform))
