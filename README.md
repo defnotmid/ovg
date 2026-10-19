@@ -39,13 +39,13 @@ Added in ovg:
 - **Recording and playback**: record a frame's commands on one thread and play
   them on the GPU thread, for parallel frame building.
 
-Two backends: a software rasterizer (no dependencies beyond prebuilt stb) and
+Two backends: a software rasterizer (no dependencies beyond prebuilt stb and zlib) and
 an SDL_GPU backend (SDL3's GPU API: Vulkan on Linux, Metal on macOS, Vulkan or
 D3D12 on Windows). The only dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `vendor:stb/truetype`, `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg` (core + software backend) | `vendor:stb/truetype`, `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing), `vendor:zlib` for `write_png` / `encode_png` (the system libz on Linux and macOS, `zlib1g-dev` on Debian/Ubuntu; `libz.lib` from the Odin install on Windows) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
