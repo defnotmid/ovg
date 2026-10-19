@@ -1,5 +1,6 @@
 package ovg
 
+import "core:mem"
 import "core:sync"
 import "core:unicode/utf8"
 import kb "vendor:kb_text_shape"
@@ -200,51 +201,76 @@ Cached_Glyph :: struct {
 	visible:          bool,
 }
 
+// A glyph at one scale in one face. Faces are told apart by their data
+// address and face index, so fonts from a Font_Store or a Font_Collection
+// (text_layout's runs) share an atlas; reset it when font data is freed, as
+// new data may reuse the address.
 Glyph_Key :: struct {
-	font:       Key,
+	data:       rawptr,
+	index:      i32,
 	glyph:      Glyph_Index,
 	scale_bits: u32,
 }
 
-// Rasterized glyph coverage packed into one Gray8 image, so a run draws in a
-// single call.
-Glyph_Atlas :: struct {
-	packer:   Atlas,
-	image_id: Image_Id,
-	width:    u32,
-	height:   u32,
-	cache:    map[Glyph_Key]Cached_Glyph,
-	scratch:  [dynamic]u8,
+glyph_key :: proc "contextless" (f: ^Font, g: Glyph_Index, scale: f32) -> Glyph_Key {
+	return {raw_data(f.data), f.index, g, transmute(u32)scale}
 }
 
-glyph_atlas_init :: proc(a: ^Glyph_Atlas, c: ^Canvas, width, height: u32, allocator := context.allocator) -> Error {
-	a.image_id = create_image_empty(c, width, height, .Gray8) or_return
+// Rasterized glyph coverage packed into one Gray8 bitmap, `pixels` (row-major,
+// `width` bytes a row), so a run draws in a single call. The atlas is CPU
+// only; whoever draws from it uploads the rows `glyph_atlas_take_dirty`
+// reports into its own texture once per frame. Made with a canvas, it keeps
+// that canvas's copy in `image_id`, which `fill_glyph_run` updates.
+Glyph_Atlas :: struct {
+	packer:             Atlas,
+	width:              u32,
+	height:             u32,
+	pixels:             []u8,
+	cache:              map[Glyph_Key]Cached_Glyph,
+	// Rows [dirty_y0, dirty_y1) changed since the last take; empty when equal.
+	dirty_y0, dirty_y1: u32,
+	// The canvas image mirroring `pixels`; zero for a canvas-free atlas.
+	image_id:           Image_Id,
+}
+
+// `c` is the canvas `fill_glyph_run` draws the atlas on, or nil for an atlas
+// whose owner uploads `pixels` itself.
+glyph_atlas_init :: proc(a: ^Glyph_Atlas, width, height: u32, c: ^Canvas = nil, allocator := context.allocator) -> Error {
+	a^ = {}
+	if c != nil {
+		a.image_id = create_image_empty(c, width, height, .Gray8) or_return
+	}
+	a.pixels = make([]u8, int(width) * int(height), allocator)
 	atlas_init(&a.packer, width, height, allocator)
 	a.width = width
 	a.height = height
 	a.cache = make(map[Glyph_Key]Cached_Glyph, allocator)
-	a.scratch = make([dynamic]u8, allocator)
 	return nil
 }
 
-glyph_atlas_destroy :: proc(a: ^Glyph_Atlas, c: ^Canvas) {
+// `c` is the canvas the atlas was made with, if any.
+glyph_atlas_destroy :: proc(a: ^Glyph_Atlas, c: ^Canvas = nil) {
 	delete(a.cache)
-	delete(a.scratch)
+	delete(a.pixels)
 	atlas_destroy(&a.packer)
-	delete_image(c, a.image_id)
+	if c != nil && image_id_valid(a.image_id) {
+		delete_image(c, a.image_id)
+	}
 	a^ = {}
 }
 
-// Drops every cached glyph; the image is reused as glyphs rebake.
+// Drops every cached glyph and clears the bitmap (all rows dirty).
 glyph_atlas_reset :: proc(a: ^Glyph_Atlas) {
 	clear(&a.cache)
 	atlas_reset(&a.packer, a.width, a.height)
+	mem.zero_slice(a.pixels)
+	a.dirty_y0, a.dirty_y1 = 0, a.height
 }
 
-// Cached glyph for `(font, glyph, scale)`, rasterizing it on first use.
-glyph_atlas_get :: proc(a: ^Glyph_Atlas, c: ^Canvas, font_id: Font_Id, f: ^Font, g: Glyph_Index, scale: f32) -> (cached: Cached_Glyph, err: Error) {
-	scale := scale
-	key := Glyph_Key{font_id.key, g, transmute(u32)scale}
+// Cached glyph for `(font, glyph, scale)`, rasterizing it into `pixels` on
+// first use.
+glyph_atlas_get :: proc(a: ^Glyph_Atlas, f: ^Font, g: Glyph_Index, scale: f32) -> (cached: Cached_Glyph, err: Error) {
+	key := glyph_key(f, g, scale)
 	if hit, ok := a.cache[key]; ok {
 		return hit, nil
 	}
@@ -255,27 +281,50 @@ glyph_atlas_get :: proc(a: ^Glyph_Atlas, c: ^Canvas, font_id: Font_Id, f: ^Font,
 		a.cache[key] = {}
 		return {}, nil
 	}
-	// One pixel of padding keeps bilinear sampling from bleeding neighbours.
+	// One pixel of padding, never written, keeps bilinear sampling from
+	// bleeding neighbours.
 	ax, ay, ok := atlas_add_rect(&a.packer, w + 1, h + 1)
 	if !ok {
 		return {}, .Atlas_Full
 	}
-	resize(&a.scratch, int(w * h))
-	stbtt.MakeGlyphBitmap(&f.info, raw_data(a.scratch), i32(w), i32(h), i32(w), scale, scale, i32(g))
-	update_image(c, a.image_id, image_source_gray(a.scratch[:], w, h), ax, ay) or_return
+	dst := a.pixels[ay * a.width + ax:]
+	stbtt.MakeGlyphBitmap(&f.info, raw_data(dst), i32(w), i32(h), i32(a.width), scale, scale, i32(g))
+	if a.dirty_y0 == a.dirty_y1 {
+		a.dirty_y0, a.dirty_y1 = ay, ay + h
+	} else {
+		a.dirty_y0, a.dirty_y1 = min(a.dirty_y0, ay), max(a.dirty_y1, ay + h)
+	}
 	cached = Cached_Glyph{ax, ay, w, h, x0, y0, true}
 	a.cache[key] = cached
 	return cached, nil
 }
 
+// The rows of `pixels` changed since the last take, [y0, y1), and marks them
+// clean: upload `pixels[y0 * width:y1 * width]` at (0, y0). `ok` is false
+// when nothing changed.
+glyph_atlas_take_dirty :: proc "contextless" (a: ^Glyph_Atlas) -> (y0, y1: u32, ok: bool) {
+	y0, y1 = a.dirty_y0, a.dirty_y1
+	a.dirty_y0, a.dirty_y1 = 0, 0
+	return y0, y1, y0 < y1
+}
+
+// Copies the changed rows into the atlas's canvas image.
+glyph_atlas_upload :: proc(a: ^Glyph_Atlas, c: ^Canvas) -> Error {
+	y0, y1, dirty := glyph_atlas_take_dirty(a)
+	if !dirty {
+		return nil
+	}
+	return update_image(c, a.image_id, image_source_gray(a.pixels[y0 * a.width:y1 * a.width], a.width, y1 - y0), 0, y0)
+}
+
 // ---- drawing ------------------------------------------------------------------------
 
 // Draws glyph bitmaps from `atlas` as textured quads tinted by the paint's
-// color. The current transform moves the quads but the bitmaps are baked at
-// `pixel_scale`, so prefer `fill_glyph_outlines` for scaled or animated text.
-fill_glyph_run :: proc(c: ^Canvas, fonts: ^Font_Store, font_id: Font_Id, atlas: ^Glyph_Atlas, glyphs: []Positioned_Glyph, pixel_scale: f32, paint: Paint) -> Error {
-	f := font_store_get(fonts, font_id)
-	if f == nil {
+// color; the atlas must have been made with `c`. The current transform moves
+// the quads but the bitmaps are baked at `pixel_scale`, so prefer
+// `fill_glyph_outlines` for scaled or animated text.
+fill_glyph_run :: proc(c: ^Canvas, f: ^Font, atlas: ^Glyph_Atlas, glyphs: []Positioned_Glyph, pixel_scale: f32, paint: Paint) -> Error {
+	if !image_id_valid(atlas.image_id) {
 		return .Unsupported_Operation
 	}
 	st := state(c)
@@ -290,7 +339,12 @@ fill_glyph_run :: proc(c: ^Canvas, fonts: ^Font_Store, font_id: Font_Id, atlas: 
 	paint_row := u32(len(c.paints))
 	start := len(c.verts)
 	for g in glyphs {
-		cg := glyph_atlas_get(atlas, c, font_id, f, g.glyph, pixel_scale) or_return
+		cg, err := glyph_atlas_get(atlas, f, g.glyph, pixel_scale)
+		if err != nil {
+			resize(&c.verts, start)
+			glyph_atlas_upload(atlas, c)
+			return err
+		}
 		if !cg.visible {
 			continue
 		}
@@ -316,6 +370,7 @@ fill_glyph_run :: proc(c: ^Canvas, fonts: ^Font_Store, font_id: Font_Id, atlas: 
 			vertex(p01.x, p01.y, u0, v1, paint_row),
 		)
 	}
+	glyph_atlas_upload(atlas, c) or_return
 	if len(c.verts) == start {
 		return nil
 	}

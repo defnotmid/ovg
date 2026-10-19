@@ -613,6 +613,12 @@ every part follows:
   vector paths (exact under any transform and any paint);
   `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas` (fast,
   but baked at one scale). Both take glyph ids, so shaped runs draw as is.
+  The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its
+  Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
+  the last take, so a renderer of its own can upload them into its own
+  texture once a frame (an atlas made with a canvas keeps that canvas's
+  image, which `fill_glyph_run` updates). Glyphs are keyed by face data and
+  index, so `text_layout`'s runs and a `Font_Store`'s fonts share one atlas.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set) and

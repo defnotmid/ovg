@@ -62,7 +62,7 @@ scene_layers :: proc(c: ^vg.Canvas, r: ^Resources) {
 	clear(&r.glyphs)
 	small := vg.font_scale_for_em(&r.font, 12)
 	vg.layout_simple(&r.font, "glow", -14, 30, small, &r.glyphs)
-	vg.fill_glyph_run(c, &r.fonts, r.font_id, &r.atlas, r.glyphs[:], small, vg.paint_color(vg.rgb(255, 255, 255)))
+	vg.fill_glyph_run(c, &r.font, &r.atlas, r.glyphs[:], small, vg.paint_color(vg.rgb(255, 255, 255)))
 	vg.layer_pop(ls, c)
 	vg.restore(c)
 	// Nested: a sharp group holding blurred children and a stroke.
