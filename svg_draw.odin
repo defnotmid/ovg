@@ -154,6 +154,119 @@ svg_layout_destroy :: proc(l: ^Svg_Layout) {
 	l^ = {}
 }
 
+// Appends the filled geometry of `doc` to `out`, in its `width x height`
+// coordinate system (what `svg_draw` draws before its `transform`): every
+// shape with a fill (paths, rects, circles, ellipses, lines, polygons,
+// instances of `use`) under its transforms, and the text glyphs when `text`
+// is the document's layout. With `id`, only that element's subtree (its
+// first instance), under its ancestors' transforms; `found` is false when
+// no element has the id. Skipped as `svg_draw` skips them: display="none",
+// visibility="hidden", opacity 0. Ignored: strokes, images, clip paths,
+// masks, filters and nested viewport clips. `rule` is the fill rule of the
+// shapes (text fills non-zero); `mixed` when they differ, so no one rule
+// fills the result exactly as drawn.
+svg_element_path :: proc(doc: ^Svg_Document, out: ^Path, id := "", text: ^Svg_Layout = nil) -> (rule: Fill_Rule, mixed, found: bool) {
+	if len(doc.nodes) == 0 {
+		return .Non_Zero, false, id == ""
+	}
+	start: i32 = 0
+	t := TRANSFORM_IDENTITY
+	if id != "" {
+		start = svg_find(doc, id)
+		if start < 0 {
+			return .Non_Zero, false, false
+		}
+		for j := doc.nodes[start].parent; j >= 0; j = doc.nodes[j].parent {
+			t = transform_multiply(t, doc.nodes[j].transform)
+		}
+	}
+	w := Svg_Path_Walk{doc = doc, text = text, out = out}
+	svg_path_node(&w, start, t)
+	return w.rule, w.mixed, true
+}
+
+@(private)
+Svg_Path_Walk :: struct {
+	doc:         ^Svg_Document,
+	text:        ^Svg_Layout,
+	out:         ^Path,
+	rule:        Fill_Rule,
+	seen, mixed: bool,
+}
+
+@(private)
+svg_path_node :: proc(w: ^Svg_Path_Walk, i: i32, parent: Transform2D) {
+	doc := w.doc
+	n := &doc.nodes[i]
+	if .Off in n.flags || n.opacity <= 0 {
+		return
+	}
+	t := transform_multiply(n.transform, parent)
+	switch n.kind {
+	case .Group:
+		for ch := n.first_child; ch >= 0; ch = doc.nodes[ch].next {
+			svg_path_node(w, ch, t)
+		}
+	case .Shape:
+		sh := &doc.shapes[n.data]
+		if .Hidden in n.flags || sh.style.fill.kind == .None {
+			return
+		}
+		c0 := len(w.out.coords)
+		path_append(w.out, doc.verbs[sh.verbs.start:][:sh.verbs.count], doc.coords[sh.coords.start:][:sh.coords.count])
+		svg_path_transform(w.out, c0, t)
+		svg_path_rule(w, sh.style.fill_rule)
+	case .Text:
+		if w.text == nil || int(n.data) >= len(w.text.texts) {
+			return
+		}
+		runs := w.text.texts[n.data]
+		for run in w.text.runs[runs.start:][:runs.count] {
+			pc := &doc.pieces[run.piece]
+			if pc.hidden || pc.style.fill.kind == .None {
+				continue
+			}
+			for g in w.text.glyphs[run.glyphs.start:][:run.glyphs.count] {
+				c0 := len(w.out.coords)
+				if pc.rotate == 0 {
+					font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, w.out)
+					svg_path_transform(w.out, c0, t)
+				} else {
+					// SVG rotate: each glyph turns about its own origin.
+					font_glyph_path(run.font, g.glyph, 0, 0, run.em, w.out)
+					gt := transform_multiply(transform_rotation(pc.rotate * math.RAD_PER_DEG), transform_translation(g.x, g.y))
+					svg_path_transform(w.out, c0, transform_multiply(gt, t))
+				}
+			}
+			svg_path_rule(w, .Non_Zero)
+		}
+	case .Image:
+	}
+}
+
+// Maps the coordinates of `p` from index `first` on by `t`.
+@(private)
+svg_path_transform :: proc(p: ^Path, first: int, t: Transform2D) {
+	if t == TRANSFORM_IDENTITY {
+		return
+	}
+	for &q in p.coords[first:] {
+		q = transform_point(t, q.x, q.y)
+	}
+	if len(p.coords) > 0 {
+		p.last_pos = p.coords[len(p.coords) - 1]
+	}
+}
+
+@(private)
+svg_path_rule :: proc(w: ^Svg_Path_Walk, rule: Fill_Rule) {
+	if !w.seen {
+		w.rule, w.seen = rule, true
+	} else if rule != w.rule {
+		w.mixed = true
+	}
+}
+
 // Draws `doc` into its `width x height` coordinate system, mapped by
 // `transform` before the canvas's current transform. Effects need the
 // layer stack begun for the frame (`layer_stack_begin`, with a root layer

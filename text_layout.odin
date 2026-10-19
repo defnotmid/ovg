@@ -239,6 +239,19 @@ text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 	return w
 }
 
+// Appends the outlines of the laid-out glyphs to `out`, where drawing the
+// layout puts them (positions, alignment, baseline, letter spacing and
+// fallback faces as laid out). Fill them with the non-zero rule. A colour
+// glyph (COLR emoji) adds its base glyph's plain outline, which is often
+// empty: emoji mostly add nothing.
+text_layout_path :: proc(l: ^Text_Layout, out: ^Path) {
+	for run in l.runs {
+		for g in l.glyphs[run.first:][:run.count] {
+			font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, out)
+		}
+	}
+}
+
 @(private = "file")
 resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (font: ^Font, size: f32) {
 	found: bool

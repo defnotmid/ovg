@@ -13,6 +13,10 @@ commands for a backend.
 Added in ovg:
 
 - **Dashes**: dash arrays, offsets and `pathLength`.
+- **Path morphs**: `path_morph_prepare` / `path_morph_eval` blend any two
+  paths (contours paired, resampled by arc length, holes kept; unpaired
+  contours grow from or shrink to a point), with text (`text_layout_path`)
+  and SVG geometry (`svg_element_path`) as paths to morph.
 - **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
   modes and patterns, each sized to its content.
 - **SVG filters**: every SVG 1.1 primitive (blur, drop shadow, offset, flood,
@@ -336,6 +340,10 @@ vg.layer_stack_end(&ls, &c)
   no allocation once the renderer is warm. An element with an id and
   `display="none"` is kept (not drawn) so `visible = true` can show it: one
   file holds a sprite's alternate parts.
+- `svg_element_path(doc, out, id, text)` appends the filled geometry (the
+  whole document or one element's subtree, under its transforms, text with
+  a layout) to a `Path`, returning the fill rule (and whether shapes mix
+  rules); strokes, images, clips, masks and filters are ignored.
 - Unsupported (warned in `doc.warnings`): textPath, tref, textLength, markers, feImage
   referencing an element (images work), CSS filter functions, BackgroundImage inputs, DTD entities,
   WebP and svgz images, `context-fill`. Strokes under non-uniform scale or
