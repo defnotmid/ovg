@@ -609,10 +609,27 @@ every part follows:
   used as an image paint without `Flip_Y`.
 - **Paints are plain values.** Multi-stop gradients borrow their stop slice;
   it only has to live for the draw call.
-- **Text** uses stb_truetype. `fill_glyph_outlines` fills glyph outlines as
-  vector paths (exact under any transform and any paint);
-  `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas` (fast,
-  but baked at one scale). Both take glyph ids, so shaped runs draw as is.
+- **Shapes** (`shape.odin`) are filled by per-pixel coverage instead of
+  tessellation, with Eric Lengyel's Slug algorithm (reference shaders MIT,
+  patent dedicated to the public domain): a `Shape` is quadratic curves in
+  horizontal and vertical bands, built once from a path or a glyph
+  (`shape_from_path`, `shape_from_glyph`), and `fill_shape` draws it under
+  any transform for the cost of its bounds. Each pixel casts a ray along
+  each axis through its band's curves. On the GPU a run of shapes is one
+  instanced draw, its instances pulled from a storage buffer; each shape is
+  uploaded the first frame it is drawn and freed with it. The software
+  backend evaluates the same coverage function, so parity holds (max diff
+  6 in the `curves` scene). Against the exact area of the same curves an
+  edge pixel is off by 0.02–0.05 on average; corners stray most (up to
+  ~0.3), as Slug's two rays overestimate them.
+- **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
+  font's shape (`font_glyph_shape`: built on first use, owned by the font,
+  freed by `font_destroy`), all sharing one paint row: a run costs no
+  outline or tessellation work, and draws in one call. Glyphs are
+  separate fills, so translucent glyphs that overlap darken where they meet
+  (one path would not). Feathered and aliased paints fill the outlines as one
+  path. `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
+  (baked at one scale). Both take glyph ids, so shaped runs draw as is.
   The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its
   Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
   the last take, so a renderer of its own can upload them into its own

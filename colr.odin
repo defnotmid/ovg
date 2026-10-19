@@ -3,15 +3,15 @@ package ovg
 import "base:runtime"
 import "core:math"
 import "core:sync"
-import stbtt "vendor:stb/truetype"
 
 // Colour glyphs from the COLR (v0 layers, v1 paint graphs) and CPAL tables,
 // drawn as vector fills at the output resolution like plain outlines.
 // Palette 0; palette index 0xFFFF is the text's own paint.
 //
 // Each colour glyph's paint graph is flattened once into fill rows (an
-// outline, its transform, a solid or gradient paint) and cached with the
-// outlines it uses, so a warm glyph draws without parsing or allocating.
+// outline, its transform, a solid or gradient paint) kept by the font; the
+// outlines are the font's glyph shapes (font_glyph_shape), so a warm glyph
+// draws without parsing or allocating.
 // PaintComposite has no offscreen group here: source-over / destination-over
 // draw in order, the `in` / `atop` modes fill one side's outlines with the
 // other side's paint, and the remaining modes (blend modes, xor, out, plus)
@@ -63,11 +63,6 @@ Colr_Glyph :: struct {
 	colour:       bool,
 }
 
-@(private)
-Colr_Outline :: struct {
-	verbs, coords: [2]i32, // first, count
-}
-
 // The colour tables of a face and its cache of flattened glyphs. Shared by
 // copies of the Font; the lock guards the cache and the draw scratch.
 Colr :: struct {
@@ -82,9 +77,6 @@ Colr :: struct {
 	glyphs:                   map[Glyph_Index]Colr_Glyph,
 	fills:                    [dynamic]Colr_Fill,
 	stops:                    [dynamic]Colr_Stop,
-	outlines:                 map[Glyph_Index]Colr_Outline,
-	verbs:                    [dynamic]Verb,
-	coords:                   [dynamic]Vec2,
 	// Draw scratch.
 	path:                     Path,
 	ramp:                     [dynamic]Gradient_Stop,
@@ -140,9 +132,6 @@ colr_open :: proc(f: ^Font) -> ^Colr {
 	cl.glyphs.allocator = heap
 	cl.fills.allocator = heap
 	cl.stops.allocator = heap
-	cl.outlines.allocator = heap
-	cl.verbs.allocator = heap
-	cl.coords.allocator = heap
 	cl.ramp.allocator = heap
 	cl.path.verbs.allocator = heap
 	cl.path.coords.allocator = heap
@@ -158,9 +147,6 @@ colr_destroy :: proc(cl: ^Colr) {
 	delete(cl.glyphs)
 	delete(cl.fills)
 	delete(cl.stops)
-	delete(cl.outlines)
-	delete(cl.verbs)
-	delete(cl.coords)
 	delete(cl.ramp)
 	path_destroy(&cl.path)
 	free(cl)
@@ -205,20 +191,8 @@ colr_draw_glyph :: proc(c: ^Canvas, f: ^Font, g: Positioned_Glyph, em: f32, fg: 
 		fg_color = BLACK
 	}
 	for &fill in cl.fills[info.first:][:info.count] {
-		p := &cl.path
-		path_reset(p)
-		if fill.glyph < 0 {
-			if !info.has_clip {
-				continue
-			}
-			b := info.clip
-			path_rect(p, b[0], b[1], b[2] - b[0], b[3] - b[1])
-		} else {
-			o := colr_outline(cl, f, Glyph_Index(fill.glyph))
-			if o.verbs[1] == 0 {
-				continue
-			}
-			path_append(p, cl.verbs[o.verbs[0]:][:o.verbs[1]], cl.coords[o.coords[0]:][:o.coords[1]])
+		if fill.glyph < 0 && !info.has_clip {
+			continue
 		}
 		set_transform(c, transform_multiply(fill.shape, base))
 		paint: Paint
@@ -232,6 +206,19 @@ colr_draw_glyph :: proc(c: ^Canvas, f: ^Font, g: Positioned_Glyph, em: f32, fg: 
 			paint = colr_paint_for(cl, &fill, fg_color, fg_solid)
 		}
 		paint.fill_rule = .Non_Zero
+		if fill.glyph >= 0 {
+			if s := font_glyph_shape(f, Glyph_Index(fill.glyph)); s != nil {
+				// Shape units are font units with y down; the layer's
+				// transform is in font units with y up.
+				fill_shape(c, s, paint, {1, 0, 0, -1, 0, 0})
+			}
+			continue
+		}
+		// The clip box, filled whole.
+		p := &cl.path
+		path_reset(p)
+		b := info.clip
+		path_rect(p, b[0], b[1], b[2] - b[0], b[3] - b[1])
 		fill_path(c, p, paint)
 	}
 	if info.has_clip {
@@ -373,56 +360,6 @@ colr_glyph :: proc(cl: ^Colr, g: Glyph_Index) -> Colr_Glyph {
 	out.count = i32(len(cl.fills)) - out.first
 	cl.glyphs[g] = out
 	return out
-}
-
-// The outline of `g` in font units (y up), cached. Caller holds the lock.
-@(private = "file")
-colr_outline :: proc(cl: ^Colr, f: ^Font, g: Glyph_Index) -> Colr_Outline {
-	if hit, ok := cl.outlines[g]; ok {
-		return hit
-	}
-	context.allocator = runtime.heap_allocator()
-	o := Colr_Outline {
-		verbs  = {i32(len(cl.verbs)), 0},
-		coords = {i32(len(cl.coords)), 0},
-	}
-	verts: [^]stbtt.vertex
-	n := stbtt.GetGlyphShape(&f.info, i32(g), &verts)
-	if n > 0 {
-		open := false
-		cur: Vec2
-		for v in verts[:n] {
-			pt := Vec2{f32(v.x), f32(v.y)}
-			#partial switch stbtt.vmove(v.type) {
-			case .vmove:
-				if open {
-					append(&cl.verbs, Verb.Close)
-				}
-				append(&cl.verbs, Verb.Move_To)
-				append(&cl.coords, pt)
-				open = true
-			case .vline:
-				append(&cl.verbs, Verb.Line_To)
-				append(&cl.coords, pt)
-			case .vcurve:
-				q := Vec2{f32(v.cx), f32(v.cy)}
-				append(&cl.verbs, Verb.Bezier_To)
-				append(&cl.coords, cur + (q - cur) * (2.0 / 3.0), pt + (q - pt) * (2.0 / 3.0), pt)
-			case .vcubic:
-				append(&cl.verbs, Verb.Bezier_To)
-				append(&cl.coords, Vec2{f32(v.cx), f32(v.cy)}, Vec2{f32(v.cx1), f32(v.cy1)}, pt)
-			}
-			cur = pt
-		}
-		if open {
-			append(&cl.verbs, Verb.Close)
-		}
-		stbtt.FreeShape(&f.info, verts)
-	}
-	o.verbs[1] = i32(len(cl.verbs)) - o.verbs[0]
-	o.coords[1] = i32(len(cl.coords)) - o.coords[0]
-	cl.outlines[g] = o
-	return o
 }
 
 // ---- table reading ------------------------------------------------------------------

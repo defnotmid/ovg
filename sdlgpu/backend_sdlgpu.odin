@@ -109,6 +109,18 @@ SDL_Backend :: struct {
 	piece_index:      [dynamic]u32,
 	// Each frame shape instance's shape, as a word offset in `shapes`.
 	shape_offsets:    [dynamic]u32,
+	// What the last `render` recorded.
+	stats:            Frame_Stats,
+}
+
+// Counts of the GPU work one frame recorded.
+Frame_Stats :: struct {
+	draws:          int,
+	pipeline_binds: int,
+	render_passes:  int,
+	// Shape instances drawn, and words of shapes uploaded to the store.
+	shape_instances: int,
+	shape_upload_words: int,
 }
 
 // Prepares the backend on `device`, or on a new headless device when nil

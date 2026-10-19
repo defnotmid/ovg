@@ -477,8 +477,9 @@ shape_solve :: #force_inline proc "contextless" (p1, p2, p3: Vec2, axis: int) ->
 }
 
 // Coverage of the pixel whose center is at `rc` (shape units), the pixel
-// spanning `ems_per_pixel` shape units along each axis.
-@(private)
+// spanning `ems_per_pixel` shape units along each axis (`shape_ems_per_pixel`).
+// `s` is a shape's words (`Shape.data`), so any renderer holding them can
+// call it.
 shape_coverage :: proc "contextless" (s: []u32, rc: Vec2, ems_per_pixel: Vec2, even_odd: bool) -> f32 {
 	ppe := 1 / ems_per_pixel
 	h_count, v_count := i32(s[0]), i32(s[1])

@@ -73,6 +73,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	b := (^SDL_Backend)(data)
 	o := (^Output)(uintptr(out))
 	b.frame += 1
+	b.stats = {shape_instances = len(frame.shapes)}
 	store_begin_frame(b)
 	evict_textures(b, &b.stencils)
 	evict_textures(b, &b.scratch)
@@ -738,7 +739,9 @@ flush :: proc(r: ^Recorder) {
 	if pipeline != r.pipeline {
 		sdl.BindGPUGraphicsPipeline(r.pass, pipeline)
 		r.pipeline = pipeline
+		r.b.stats.pipeline_binds += 1
 	}
+	r.b.stats.draws += 1
 	if r.textures != row.textures {
 		textures := row.textures
 		sdl.BindGPUFragmentSamplers(r.pass, 0, &textures[0], 2)
@@ -789,6 +792,7 @@ begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 	if r.pass == nil {
 		return false
 	}
+	r.b.stats.render_passes += 1
 	r.target, r.origin = target.texture, origin
 	vertices := sdl.GPUBufferBinding {
 		buffer = r.b.vertex_stream.buffer,

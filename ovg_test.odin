@@ -617,6 +617,7 @@ test_sw_text :: proc(t: ^testing.T) {
 
 	font, err := font_load(#load("assets/Vera.ttf"))
 	testing.expect_value(t, err, Error.None)
+	defer font_destroy(&font)
 	sc := font_scale_for_em(&font, 32)
 	glyphs: [dynamic]Positioned_Glyph
 	defer delete(glyphs)

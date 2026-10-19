@@ -289,11 +289,20 @@ test_text_layout_path :: proc(t: ^testing.T) {
 	}
 	drawn := draw(&c, &sw)
 	defer delete(drawn)
+	// The glyphs draw as shapes: the path as one shape covers the same
+	// pixels (up to rounding: its shape units differ).
 	clear_rect(&c, 0, 0, 120, 100, WHITE)
-	fill_path(&c, &p, paint_color(BLACK))
+	whole, built := shape_from_path(&p)
+	testing.expect(t, built)
+	defer shape_destroy(&whole)
+	fill_shape(&c, &whole, paint_color(BLACK))
 	as_path := draw(&c, &sw)
 	defer delete(as_path)
-	testing.expect(t, string(drawn) == string(as_path))
+	worst := 0
+	for v, k in drawn {
+		worst = max(worst, abs(int(v) - int(as_path[k])))
+	}
+	testing.expectf(t, worst <= 2, "glyphs and their path differ by %v", worst)
 	dark := 0
 	for k := 0; k < len(drawn); k += 4 {
 		dark += int(drawn[k] < 128)

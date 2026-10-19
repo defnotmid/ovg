@@ -434,21 +434,39 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 // keeps `s`'s address: the shape must stay there, undestroyed, until the
 // frame has been rendered.
 fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY) {
-	st := state(c)
-	t := transform_multiply(shape_local(s), transform_multiply(local, st.transform))
+	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
 	if outside_target(c, shape_device_bounds(s, t)) {
 		return
 	}
+	cmd, row := shape_paint(c, paint)
+	push_shape(c, cmd, {s, t, row, paint.fill_rule == .Even_Odd})
+}
+
+// The command state and paint row for shapes filled with `paint` under the
+// current state; several shapes may share them.
+@(private)
+shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
+	st := state(c)
 	flavor := paint.flavor
 	flavor_mul_alpha(&flavor, st.alpha)
-	cmd := Command {
+	cmd = {
 		composite_operation = st.composite_operation,
 		scissor_rect        = current_scissor_rect(c),
 	}
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, {}, st.scissor, c.fringe_width, c.fringe_width, -1)
 	params.spread = f32(paint.spread)
-	push_shape(c, cmd, {s, t, add_paint(c, params), paint.fill_rule == .Even_Odd})
+	return cmd, add_paint(c, params)
+}
+
+// `fill_shape` with a paint row from `shape_paint`.
+@(private)
+push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd: bool) {
+	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
+	if outside_target(c, shape_device_bounds(s, t)) {
+		return
+	}
+	push_shape(c, cmd, {s, t, row, even_odd})
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),

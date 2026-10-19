@@ -190,6 +190,7 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	for p in st.pending {
 		total += u32(len(p.data))
 	}
+	b.stats.shape_upload_words += int(total)
 	if total == 0 {
 		return true
 	}

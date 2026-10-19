@@ -440,11 +440,33 @@ fill_glyph_run :: proc(c: ^Canvas, f: ^Font, atlas: ^Glyph_Atlas, glyphs: []Posi
 	return nil
 }
 
-// Fills the glyph outlines as vector paths: exact under any transform and
-// any paint. `scale` converts font units to pixels. `scratch` is reused
-// between calls to avoid allocations (it is reset here). Colour glyphs
+// Fills the glyph outlines: exact under any transform and any paint.
+// `scale` converts font units to pixels. Each glyph is the font's shape
+// (font_glyph_shape) drawn by coverage, all sharing one paint row, so a
+// run costs no outline work; a feathered or aliased paint fills the
+// outlines as one path instead (`scratch`, reset here). Colour glyphs
 // (COLR) draw their own colours, `paint` standing for the text colour.
 fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, scale: f32, paint: Paint, scratch: ^Path) {
+	if paint.feather == 0 && paint.anti_alias {
+		nz := paint
+		nz.fill_rule = .Non_Zero
+		cmd, row := shape_paint(c, nz)
+		if f.colr != nil {
+			sync.mutex_lock(&f.colr.lock)
+		}
+		for g in glyphs {
+			if f.colr != nil && colr_draw_glyph(c, f, g, scale, paint) {
+				continue
+			}
+			if s := font_glyph_shape(f, g.glyph); s != nil {
+				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, false)
+			}
+		}
+		if f.colr != nil {
+			sync.mutex_unlock(&f.colr.lock)
+		}
+		return
+	}
 	path_reset(scratch)
 	if f.colr != nil {
 		sync.mutex_lock(&f.colr.lock)
