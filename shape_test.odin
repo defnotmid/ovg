@@ -4,6 +4,8 @@ import "core:mem"
 import "core:slice"
 import "core:testing"
 
+import cv "curves"
+
 @(private = "file")
 coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {
 	full := transform_multiply(shape_local(s), t)
@@ -320,4 +322,27 @@ test_translucent_text_fills_as_one :: proc(t: ^testing.T) {
 		brighter += int(int(b.pixels[i * 4]) > int(want * 255 + 0.5) + 8)
 	}
 	testing.expect(t, brighter > 20)
+}
+
+@(test)
+test_winding_matches_coverage :: proc(t: ^testing.T) {
+	// At points well away from edges, the winding number (sample masks) and
+	// coverage at a tiny footprint agree.
+	font, _ := font_load(DEFAULT_FONT_DATA)
+	defer font_destroy(&font)
+	for r in "aeg@&%B8" {
+		s := font_glyph_shape(&font, font_glyph_index(&font, r))
+		testing.expect(t, s != nil)
+		_, _, x1, y1 := shape_bounds(s)
+		disagree := 0
+		for gy in 0 ..< 97 {
+			for gx in 0 ..< 97 {
+				p := Vec2{(f32(gx) + 0.5) / 97 * x1, (f32(gy) + 0.5) / 97 * y1}
+				inside := cv.winding(s.data, p) != 0
+				crisp := shape_coverage(s.data, p, {1e-6, 1e-6}, false) > 0.5
+				disagree += int(inside != crisp)
+			}
+		}
+		testing.expectf(t, disagree == 0, "'%c': %v of 97x97 points disagree", r, disagree)
+	}
 }

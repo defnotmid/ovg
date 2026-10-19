@@ -13,6 +13,8 @@
 // SDL_GPU binding convention: vertex uniforms set 1; fragment samplers,
 // then storage buffers, set 2.
 
+#include "curves.slang"
+
 static const int FILL_GRADIENT = 0;
 static const int FILL_IMAGE = 1;
 static const int STENCIL = 2;
@@ -792,106 +794,10 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     return o;
 }
 
-float shape_word_f(uint i) { return asfloat(shapes[i]); }
-
-uint shape_root_code(float y1, float y2, float y3) {
-    uint i1 = asuint(y1) >> 31u;
-    uint i2 = asuint(y2) >> 30u;
-    uint i3 = asuint(y3) >> 29u;
-    uint shift = (i2 & 2u) | (i1 & ~2u);
-    shift = (i3 & 4u) | (shift & ~4u);
-    return (0x2E74u >> shift) & 0x0101u;
-}
-
-// Roots of the curve (relative to the sample) on y = 0 (axis 1) or x = 0
-// (axis 0): the other coordinate at each.
-float2 shape_solve(float2 p1, float2 p2, float2 p3, int axis) {
-    int other = 1 - axis;
-    float2 a = p1 - p2 * 2.0 + p3;
-    float2 b = p1 - p2;
-    float ra = 1.0 / a[axis];
-    float rb = 0.5 / b[axis];
-    float d = sqrt(max(b[axis] * b[axis] - a[axis] * p1[axis], 0.0));
-    float t1 = (b[axis] - d) * ra;
-    float t2 = (b[axis] + d) * ra;
-    if (abs(a[axis]) < 1.0 / 65536.0) {
-        t1 = p1[axis] * rb;
-        t2 = t1;
-    }
-    return float2((a[other] * t1 - b[other] * 2.0) * t1 + p1[other], (a[other] * t2 - b[other] * 2.0) * t2 + p1[other]);
-}
-
-float shape_coverage(uint s, float2 rc, float2 epp, bool even_odd) {
-    float2 ppe = 1.0 / epp;
-    int h_count = int(shapes[s]);
-    int v_count = int(shapes[s + 1]);
-    float2 scale = float2(shape_word_f(s + 2), shape_word_f(s + 3));
-    float2 offset = float2(shape_word_f(s + 4), shape_word_f(s + 5));
-    int bx = clamp(int(rc.x * scale.x + offset.x), 0, v_count - 1);
-    int by = clamp(int(rc.y * scale.y + offset.y), 0, h_count - 1);
-    uint curves = s + shapes[s + 6];
-
-    float xcov = 0.0;
-    float xwgt = 0.0;
-    uint hb = s + 12 + 2 * uint(by);
-    uint list = s + shapes[hb + 1];
-    uint count = shapes[hb];
-    for (uint k = 0; k < count; k++) {
-        uint c = curves + 6 * shapes[list + k];
-        float2 p1 = float2(shape_word_f(c), shape_word_f(c + 1)) - rc;
-        float2 p2 = float2(shape_word_f(c + 2), shape_word_f(c + 3)) - rc;
-        float2 p3 = float2(shape_word_f(c + 4), shape_word_f(c + 5)) - rc;
-        if (max(max(p1.x, p2.x), p3.x) * ppe.x < -0.5) break;
-        uint code = shape_root_code(p1.y, p2.y, p3.y);
-        if (code != 0u) {
-            float2 r = shape_solve(p1, p2, p3, 1) * ppe.x;
-            if ((code & 1u) != 0u) {
-                xcov += clamp(r.x + 0.5, 0.0, 1.0);
-                xwgt = max(xwgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
-            }
-            if (code > 1u) {
-                xcov -= clamp(r.y + 0.5, 0.0, 1.0);
-                xwgt = max(xwgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
-            }
-        }
-    }
-
-    float ycov = 0.0;
-    float ywgt = 0.0;
-    uint vb = s + 12 + 2 * uint(h_count + bx);
-    list = s + shapes[vb + 1];
-    count = shapes[vb];
-    for (uint k = 0; k < count; k++) {
-        uint c = curves + 6 * shapes[list + k];
-        float2 p1 = float2(shape_word_f(c), shape_word_f(c + 1)) - rc;
-        float2 p2 = float2(shape_word_f(c + 2), shape_word_f(c + 3)) - rc;
-        float2 p3 = float2(shape_word_f(c + 4), shape_word_f(c + 5)) - rc;
-        if (max(max(p1.y, p2.y), p3.y) * ppe.y < -0.5) break;
-        uint code = shape_root_code(p1.x, p2.x, p3.x);
-        if (code != 0u) {
-            float2 r = shape_solve(p1, p2, p3, 0) * ppe.y;
-            if ((code & 1u) != 0u) {
-                ycov -= clamp(r.x + 0.5, 0.0, 1.0);
-                ywgt = max(ywgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
-            }
-            if (code > 1u) {
-                ycov += clamp(r.y + 0.5, 0.0, 1.0);
-                ywgt = max(ywgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
-            }
-        }
-    }
-
-    float coverage = max(abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0), min(abs(xcov), abs(ycov)));
-    if (even_odd) {
-        return 1.0 - abs(1.0 - (coverage * 0.5 - floor(coverage * 0.5)) * 2.0);
-    }
-    return clamp(coverage, 0.0, 1.0);
-}
-
 [shader("fragment")]
 float4 fs_shape(VS_Shape_Out i) : SV_Target {
     paint_index = i.data.y;
-    float coverage = shape_coverage(i.data.x, i.rc, i.epp, (i.data.z & 1u) != 0u);
+    float coverage = curves_coverage(shapes, i.data.x, i.rc, i.epp, (i.data.z & 1u) != 0u);
     if (coverage <= 0.0) {
         discard;
     }

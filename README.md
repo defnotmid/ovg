@@ -609,8 +609,11 @@ every part follows:
   used as an image paint without `Flip_Y`.
 - **Paints are plain values.** Multi-stop gradients borrow their stop slice;
   it only has to live for the draw call.
-- **Shapes** (`shape.odin`) are filled by per-pixel coverage instead of
-  tessellation, with Eric Lengyel's Slug algorithm (reference shaders MIT,
+- **Shapes** (`shape.odin`, over the core-only `ovg/curves` package and its
+  GPU twin `shaders/curves.slang`, which other renderers can use alone: the
+  word layout, `coverage` from a per-axis footprint or a Jacobian,
+  `winding` at a point for sample masks, a mean coverage to `fade` to when
+  minified) are filled by per-pixel coverage instead of tessellation, with Eric Lengyel's Slug algorithm (reference shaders MIT,
   patent dedicated to the public domain): a `Shape` is quadratic curves in
   horizontal and vertical bands, built once from a path or a glyph
   (`shape_from_path`, `shape_from_glyph`), and `fill_shape` draws it under
@@ -693,6 +696,7 @@ every part follows:
 
 ```sh
 odin test . -vet -strict-style                        # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
+odin test curves -vet -strict-style                   # the curves package alone (core only)
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
 odin run tools/bench -o:speed                         # CPU time and allocations per warm frame, generated workloads
