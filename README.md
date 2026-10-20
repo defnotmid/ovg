@@ -49,14 +49,14 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.7), `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8), `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.7 https://github.com/defnotmid/odecs
+git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
 ```odin

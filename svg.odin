@@ -2299,14 +2299,13 @@ svg_decode_image :: proc(data: []u8, allocator: mem.Allocator, budget: ^Budget =
 	} else if budget == nil && info.width * info.height > DEFAULT_LIMITS[.Image_Pixels] {
 		return
 	}
-	// The decoder's scratch is freed as it goes, so it stays out of an arena
-	// `allocator`: decode on the heap, then copy.
-	img, err := image.decode(data)
-	if err != nil {
-		return
+	// Only the pixels go in `allocator`; the decoder's scratch is its own.
+	pixels = make([]u8, info.width * info.height * 4, allocator)
+	if image.decode_into(data, pixels) != nil {
+		delete(pixels, allocator)
+		return nil, 0, 0, false
 	}
-	defer image.destroy_image(&img)
-	return slice.clone(img.pixels, allocator), u32(img.width), u32(img.height), true
+	return pixels, u32(info.width), u32(info.height), true
 }
 
 // ---- text ---------------------------------------------------------------------------
