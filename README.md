@@ -613,18 +613,22 @@ every part follows:
   GPU twin `shaders/curves.slang`, which other renderers can use alone: the
   word layout, `coverage` from a per-axis footprint or a Jacobian,
   `winding` at a point for sample masks, a mean coverage to `fade` to when
-  minified) are filled by per-pixel coverage instead of tessellation, with Eric Lengyel's Slug algorithm (reference shaders MIT,
-  patent dedicated to the public domain): a `Shape` is quadratic curves in
-  horizontal and vertical bands, built once from a path or a glyph
-  (`shape_from_path`, `shape_from_glyph`), and `fill_shape` draws it under
-  any transform for the cost of its bounds. Each pixel casts a ray along
-  each axis through its band's curves. On the GPU a run of shapes is one
-  instanced draw, its instances pulled from a storage buffer; each shape is
-  uploaded the first frame it is drawn and freed with it. The software
-  backend evaluates the same coverage function, so parity holds (max diff
-  6 in the `curves` scene). Against the exact area of the same curves an
-  edge pixel is off by 0.02–0.05 on average; corners stray most (up to
-  ~0.3), as Slug's two rays overestimate them.
+  minified) are filled by exact per-pixel coverage instead of
+  tessellation: a `Shape` is quadratic curves, each monotone in x and y,
+  in horizontal bands (the banding is Eric Lengyel's Slug: reference
+  shaders MIT, patent dedicated to the public domain), built once from a
+  path or a glyph (`shape_from_path`, `shape_from_glyph`); `fill_shape`
+  draws it under any transform for the cost of its bounds. A pixel's
+  coverage is the area of its box inside the shape, integrated in closed
+  form over the curves crossing its rows (Green's theorem): exact for
+  pixels under scales and translations, the enclosing box's under rotation.
+  Against 8x8-supersampled small italic text the mean error is 0.0005
+  (Slug's two-ray estimate, which ovg used before: 0.008); on the GPU it
+  costs about a quarter more than Slug did on dense upright text, the same
+  on rotated text. On the GPU a run of shapes is one instanced draw, its
+  instances pulled from a storage buffer; each shape is uploaded the first
+  frame it is drawn and freed with it. The software backend evaluates the
+  same coverage function (parity: max diff 1 in the `curves` scene).
 - **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
   font's shape (`font_glyph_shape`: built on first use with the font's
   allocator, the context's at `font_load`, whatever the drawing code runs

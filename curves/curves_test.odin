@@ -54,7 +54,7 @@ test_mean_coverage :: proc(t: ^testing.T) {
 	testing.expect_value(t, mean_coverage(words), 1)
 	delete(words)
 
-	// A disc: pi / 4 of its bounds, to the grid's resolution.
+	// A disc: pi / 4 of its bounds.
 	builder_reset(&b)
 	k :: 0.5522848
 	r: f32 = 10
@@ -65,7 +65,8 @@ test_mean_coverage :: proc(t: ^testing.T) {
 	cubic_to(&b, {r * k, -r}, {r, -r * k}, {r, 0})
 	words, _, _ = built(t, &b)
 	defer delete(words)
-	testing.expectf(t, abs(mean_coverage(words) - math.PI / 4) < 0.02, "disc mean %v", mean_coverage(words))
+	// Four cubics slightly overshoot a circle (by about 0.03% of its area).
+	testing.expectf(t, abs(mean_coverage(words) - math.PI / 4) < 1e-3, "disc mean %v", mean_coverage(words))
 }
 
 @(test)
@@ -112,4 +113,25 @@ test_cubics_within_tolerance :: proc(t: ^testing.T) {
 	q := Vec2{10, 20}
 	cubic_to(&b, q * 2 / 3, Vec2{20, 0} + (q - Vec2{20, 0}) * 2 / 3, {20, 0})
 	testing.expect_value(t, len(b.curves), 1)
+}
+
+@(test)
+test_exact_area :: proc(t: ^testing.T) {
+	// A square: an edge pixel covers its inside part, a corner pixel the
+	// product, exactly.
+	b: Builder
+	defer builder_destroy(&b)
+	square(&b, 10.3, 10.3, 10.4, 10.4)
+	orient(&b, .Solid)
+	words, origin, extent := built(t, &b)
+	defer delete(words)
+	at :: proc(words: []u32, origin: Vec2, extent: f32, x, y: f32) -> f32 {
+		return coverage(words, (Vec2{x, y} - origin) / extent, {1, 1} / extent, false)
+	}
+	near :: proc(a, b: f32) -> bool {return abs(a - b) < 1e-4}
+	testing.expect(t, near(at(words, origin, extent, 10.5, 15.5), 0.7))
+	testing.expect(t, near(at(words, origin, extent, 10.5, 10.5), 0.49))
+	testing.expect(t, near(at(words, origin, extent, 20.5, 20.5), 0.49))
+	testing.expect(t, near(at(words, origin, extent, 15.5, 15.5), 1))
+	testing.expect(t, near(at(words, origin, extent, 9.5, 15.5), 0))
 }

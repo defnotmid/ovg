@@ -1,38 +1,44 @@
-// Shapes as curves for per-pixel coverage, with Eric Lengyel's Slug
-// algorithm (JCGT 2017; reference shaders MIT, patent dedicated to the
-// public domain). Core only: ovg's shapes (shape.odin) and other renderers
-// share it, and shaders/curves.slang is its GPU twin, step for step.
+// Shapes as curves for exact per-pixel coverage. Core only: ovg's shapes
+// (shape.odin) and other renderers share it, and shaders/curves.slang is its
+// GPU twin, step for step.
 //
-// A shape is quadratic Bézier curves split into horizontal and vertical
-// bands. A pixel casts a ray along each axis (+x, +y) through the curves of
-// its two bands; each crossing counts by how much of the pixel lies before
-// it, and the two rays' winding numbers blend by how near their nearest
-// crossings are. A shape is built once and drawn under any transform.
+// A shape is quadratic Bézier curves, each split so it is monotone in x and
+// in y, listed in horizontal bands (Eric Lengyel's Slug: JCGT 2017,
+// reference shaders MIT, patent dedicated to the public domain). A pixel's
+// coverage is the area of its footprint inside the shape, integrated in
+// closed form: the footprint is the axis-aligned box the pixel spans in
+// shape units (the pixel itself under scales and translations; the box
+// enclosing it under rotation or skew, see `footprint_of`), and by Green's
+// theorem that area is the sum, over the curves crossing the box's rows, of
+// the length of each row left of the crossing. A curve wholly right of the
+// box adds its rows' full width (no root finding); only the few curves
+// through the box need solving, and the integral over each piece is a
+// polynomial. Exact up to the non-zero rule where contours overlap within
+// the pixel: the signed area counts an overlap twice.
 //
 // A built shape is one block of 32-bit words, read as is from a storage
 // buffer (std430: an array of uint; coordinates are float32 bit patterns);
 // every offset is relative to the shape's first word, so one buffer holds
 // many shapes:
 //
-//	[0] horizontal band count     [1] vertical band count
-//	[2] band scale x (f32)        [3] band scale y (f32)
-//	[4] band offset x (f32)       [5] band offset y (f32)
+//	[0] band count                [1] 0 (reserved)
+//	[2] 0 (reserved)              [3] band scale (f32)
+//	[4] 0 (reserved)              [5] band offset (f32)
 //	[6] word offset of the curves [7] mean coverage (f32)
 //	[8..11] bounds min x, min y, max x, max y (f32)
-//	[12..] each band, horizontal then vertical: curve count, word offset of
-//	       its curve list; then the lists (curve indices, horizontal bands'
-//	       by descending max x, vertical bands' by descending max y); then
-//	       the curves, six f32 each (p1, p2, p3).
+//	[12..] each band: curve count, word offset of its curve list; then the
+//	       lists (curve indices by descending max x); then the curves, six
+//	       f32 each (p1, p2, p3), each monotone in x and y (p2 within the box
+//	       of p1 and p3).
 //
-// A sample's horizontal band is `clamp(int(y * scale.y + offset.y), 0,
-// h_count - 1)`, its vertical band likewise from x. Curves are in shape
-// units: the source scaled so the shape's larger side is 1 (bounds start at
-// 0), which keeps Slug's thresholds (1/65536) meaningful; `build` returns
-// the scale and origin back to source units.
+// Band `i` holds the curves crossing y in [i / scale, (i + 1) / scale]
+// (plus 1/1024 of the shape's height either side); the first and last bands
+// reach out to infinity. Curves are in shape units: the source scaled so the
+// shape's larger side is 1 (bounds start at 0); `build` returns the scale
+// and origin back to source units.
 //
-// The mean coverage is the fraction of the bounds the shape fills (non-zero
-// rule, from a 32 x 32 grid of `winding` samples): what a pixel covering the
-// whole shape sees, where the rays through its center alias (`fade`).
+// The mean coverage is the fraction of the bounds the shape fills (exact,
+// non-zero): what a pixel covering the whole shape sees (`fade`).
 package curves
 
 import "core:math"
@@ -49,8 +55,9 @@ MAX_BANDS :: 32
 
 // ---- building -------------------------------------------------------------------
 
-// Collects contours as quadratic curves: lines become `{p1, p2, p2}` (as
-// Slug's notes advise), cubics split into quadratics within `tol`.
+// Collects contours as quadratic curves: a line's control point is its
+// midpoint (linear in t, so solving it needs no root), cubics split into
+// quadratics within `tol`.
 Builder :: struct {
 	curves:      [dynamic]Curve,
 	start, last: Vec2,
@@ -89,7 +96,7 @@ move_to :: proc(b: ^Builder, p: Vec2) {
 
 line_to :: proc(b: ^Builder, p: Vec2) {
 	if p != b.last {
-		append(&b.curves, Curve{b.last, p, p})
+		append(&b.curves, Curve{b.last, (b.last + p) * 0.5, p})
 	}
 	b.last = p
 }
@@ -179,8 +186,12 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 	if len(b.curves) == 0 {
 		return
 	}
-	lo, hi := b.curves[0].p1, b.curves[0].p1
+	mono := make([dynamic]Curve, 0, len(b.curves) * 2, context.temp_allocator)
 	for c in b.curves {
+		split_monotone(c, &mono)
+	}
+	lo, hi := mono[0].p1, mono[0].p1
+	for c in mono {
 		for p in ([3]Vec2{c.p1, c.p2, c.p3}) {
 			lo = {min(lo.x, p.x), min(lo.y, p.y)}
 			hi = {max(hi.x, p.x), max(hi.y, p.y)}
@@ -192,74 +203,53 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 	}
 	origin = lo
 	inv := 1 / extent
-	curves := make([]Curve, len(b.curves), context.temp_allocator)
-	for c, i in b.curves {
+	curves := make([]Curve, len(mono), context.temp_allocator)
+	for c, i in mono {
 		curves[i] = {(c.p1 - lo) * inv, (c.p2 - lo) * inv, (c.p3 - lo) * inv}
 	}
 	size := (hi - lo) * inv
 
-	// Band lists for each axis (0: horizontal bands, split along y, ordered
-	// by max x; 1: vertical bands, split along x, ordered by max y).
-	Axis :: struct {
-		count: int,
-		scale: f32,
-		lists: [][dynamic]u32,
+	count := band_count(curves, size.y)
+	scale := f32(count) / max(size.y, 1e-6)
+	lists := make([][dynamic]u32, count, context.temp_allocator)
+	eps := size.y / 1024
+	for &l in lists {
+		l = make([dynamic]u32, context.temp_allocator)
 	}
-	axes: [2]Axis
-	for &ax, a in axes {
-		across := 1 - a // the coordinate the bands split
-		ax.count = band_count(curves, size[across], across)
-		ax.scale = f32(ax.count) / max(size[across], 1e-6)
-		ax.lists = make([][dynamic]u32, ax.count, context.temp_allocator)
-		eps := size[across] / 1024
-		for &l in ax.lists {
-			l = make([dynamic]u32, context.temp_allocator)
+	for c, i in curves {
+		c0, c1 := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
+		if c0 == c1 {
+			continue // horizontal: crosses no row
 		}
-		for c, i in curves {
-			c0, c1 := curve_range(c, across)
-			if c0 == c1 {
-				continue // parallel to the ray: never crosses it
-			}
-			for band in 0 ..< ax.count {
-				b0 := f32(band) / ax.scale - eps
-				b1 := f32(band + 1) / ax.scale + eps
-				if c1 >= b0 && c0 <= b1 {
-					append(&ax.lists[band], u32(i))
-				}
+		for band in 0 ..< count {
+			if c1 >= f32(band) / scale - eps && c0 <= f32(band + 1) / scale + eps {
+				append(&lists[band], u32(i))
 			}
 		}
-		for l in ax.lists {
-			ctx := Sort_Ctx{curves, a}
-			context.user_ptr = &ctx
-			slice.sort_by(l[:], proc(x, y: u32) -> bool {
-				ctx := (^Sort_Ctx)(context.user_ptr)
-				_, mx := curve_range(ctx.curves[x], ctx.along)
-				_, my := curve_range(ctx.curves[y], ctx.along)
-				return mx > my || (mx == my && x < y)
-			})
-		}
+	}
+	for l in lists {
+		context.user_ptr = raw_data(curves)
+		slice.sort_by(l[:], proc(x, y: u32) -> bool {
+			curves := ([^]Curve)(context.user_ptr)
+			mx := max(curves[x].p1.x, curves[x].p3.x)
+			my := max(curves[y].p1.x, curves[y].p3.x)
+			return mx > my || (mx == my && x < y)
+		})
 	}
 
-	n := HEADER + 2 * (axes[0].count + axes[1].count) + 6 * len(curves)
-	for ax in axes {
-		for l in ax.lists {
-			n += len(l)
-		}
+	n := HEADER + 2 * count + 6 * len(curves)
+	for l in lists {
+		n += len(l)
 	}
 	d := make([]u32, n, allocator)
-	d[0], d[1] = u32(axes[0].count), u32(axes[1].count)
-	d[2], d[3] = transmute(u32)axes[1].scale, transmute(u32)axes[0].scale
-	d[4], d[5] = 0, 0
+	d[0] = u32(count)
+	d[3] = transmute(u32)scale
 	d[8], d[9], d[10], d[11] = 0, 0, transmute(u32)size.x, transmute(u32)size.y
-	at := HEADER + 2 * (axes[0].count + axes[1].count)
-	band := HEADER
-	for ax in axes {
-		for l in ax.lists {
-			d[band], d[band + 1] = u32(len(l)), u32(at)
-			band += 2
-			copy(d[at:], l[:])
-			at += len(l)
-		}
+	at := HEADER + 2 * count
+	for l, band in lists {
+		d[HEADER + 2 * band], d[HEADER + 2 * band + 1] = u32(len(l)), u32(at)
+		copy(d[at:], l[:])
+		at += len(l)
 	}
 	d[6] = u32(at)
 	for c in curves {
@@ -267,35 +257,56 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 		copy(d[at:][:6], w[:])
 		at += 6
 	}
-
-	// The mean coverage, from the grid's cell centers.
-	GRID :: 32
-	inside := 0
-	for gy in 0 ..< GRID {
-		for gx in 0 ..< GRID {
-			p := Vec2{(f32(gx) + 0.5) / GRID * size.x, (f32(gy) + 0.5) / GRID * size.y}
-			inside += int(winding(d, p) != 0)
-		}
-	}
-	d[7] = transmute(u32)(f32(inside) / (GRID * GRID))
+	// The whole bounds as one footprint: the fraction the shape fills.
+	d[7] = transmute(u32)coverage(d, size * 0.5, size, false)
 	return d, origin, extent, true
 }
 
+// Appends `c` split at its x and y extrema into pieces monotone in both,
+// each control point pinned inside its endpoints' box (rounding aside, the
+// split puts it there).
 @(private = "file")
-Sort_Ctx :: struct {
-	curves: []Curve,
-	along:  int,
-}
-
-@(private = "file")
-curve_range :: #force_inline proc "contextless" (c: Curve, axis: int) -> (lo, hi: f32) {
-	return min(c.p1[axis], c.p2[axis], c.p3[axis]), max(c.p1[axis], c.p2[axis], c.p3[axis])
+split_monotone :: proc(c: Curve, out: ^[dynamic]Curve) {
+	ts: [2]f32
+	n := 0
+	for axis in 0 ..< 2 {
+		den := c.p1[axis] - 2 * c.p2[axis] + c.p3[axis]
+		if den != 0 {
+			t := (c.p1[axis] - c.p2[axis]) / den
+			if t > 1e-6 && t < 1 - 1e-6 {
+				ts[n] = t
+				n += 1
+			}
+		}
+	}
+	if n == 2 && ts[0] > ts[1] {
+		ts[0], ts[1] = ts[1], ts[0]
+	}
+	rest := c
+	done: f32 = 0
+	for i in 0 ..= n {
+		piece := rest
+		if i < n {
+			t := (ts[i] - done) / (1 - done)
+			m1 := rest.p1 + (rest.p2 - rest.p1) * t
+			m2 := rest.p2 + (rest.p3 - rest.p2) * t
+			m := m1 + (m2 - m1) * t
+			piece = {rest.p1, m1, m}
+			rest = {m, m2, rest.p3}
+			done = ts[i]
+		}
+		for axis in 0 ..< 2 {
+			lo, hi := min(piece.p1[axis], piece.p3[axis]), max(piece.p1[axis], piece.p3[axis])
+			piece.p2[axis] = clamp(piece.p2[axis], lo, hi)
+		}
+		append(out, piece)
+	}
 }
 
 // The band count (1 to MAX_BANDS) that keeps the fullest band smallest;
 // fewer bands on a tie.
 @(private = "file")
-band_count :: proc(curves: []Curve, size: f32, axis: int) -> int {
+band_count :: proc(curves: []Curve, size: f32) -> int {
 	best, best_max := 1, len(curves) + 1
 	counts: [MAX_BANDS]int
 	for n in 1 ..= min(MAX_BANDS, max(1, len(curves) / 2)) {
@@ -303,7 +314,7 @@ band_count :: proc(curves: []Curve, size: f32, axis: int) -> int {
 		eps := size / 1024
 		counts = {}
 		for c in curves {
-			lo, hi := curve_range(c, axis)
+			lo, hi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
 			b0 := clamp(int(math.floor((lo - eps) * scale)), 0, n - 1)
 			b1 := clamp(int(math.floor((hi + eps) * scale)), 0, n - 1)
 			for b in b0 ..= b1 {
@@ -330,129 +341,174 @@ mean_coverage :: proc "contextless" (s: []u32) -> f32 {
 	return transmute(f32)s[7]
 }
 
-// Which of a curve's two roots cross the ray, from the signs of the control
-// points' coordinates across it: bit 0 the first root, bit 8 the second.
-root_code :: #force_inline proc "contextless" (y1, y2, y3: f32) -> u32 {
-	i1 := transmute(u32)y1 >> 31
-	i2 := transmute(u32)y2 >> 30
-	i3 := transmute(u32)y3 >> 29
-	shift := (i2 & 2) | (i1 &~ 2)
-	shift = (i3 & 4) | (shift &~ 4)
-	return (0x2E74 >> shift) & 0x0101
+// The band holding row y, clamped to the shape's bands.
+band_of :: #force_inline proc "contextless" (s: []u32, y: f32) -> i32 {
+	return clamp(i32(y * transmute(f32)s[3] + transmute(f32)s[5]), 0, i32(s[0]) - 1)
 }
 
-// Where the curve (relative to the sample) crosses y = 0 (`axis` 1) or
-// x = 0 (`axis` 0): the other coordinate at each root.
-solve :: #force_inline proc "contextless" (p1, p2, p3: Vec2, axis: int) -> (r1, r2: f32) {
-	other := 1 - axis
-	a := p1 - p2 * 2 + p3
-	b := p1 - p2
-	ra := 1 / a[axis]
-	rb := 0.5 / b[axis]
-	d := math.sqrt(max(b[axis] * b[axis] - a[axis] * p1[axis], 0))
-	t1 := (b[axis] - d) * ra
-	t2 := (b[axis] + d) * ra
-	if abs(a[axis]) < 1.0 / 65536 {
-		t1 = p1[axis] * rb
-		t2 = t1
-	}
-	return (a[other] * t1 - b[other] * 2) * t1 + p1[other], (a[other] * t2 - b[other] * 2) * t2 + p1[other]
+// The rows [lo, hi] of `band` that it answers for, clipped to [y0, y1]
+// (shape units relative to `ry`): the first and last bands reach out.
+@(private)
+band_rows :: #force_inline proc "contextless" (s: []u32, band: i32, ry, y0, y1: f32) -> (lo, hi: f32) {
+	scale, offset := transmute(f32)s[3], transmute(f32)s[5]
+	lo = y0 if band == 0 else max(y0, (f32(band) - offset) / scale - ry)
+	hi = y1 if band == i32(s[0]) - 1 else min(y1, (f32(band + 1) - offset) / scale - ry)
+	return
 }
 
-// Coverage of the pixel whose center is at `rc` (shape units), the pixel
-// spanning `footprint` shape units along each axis (what `fwidth` of the
-// shape coordinate gives a shader; `footprint_of`). `s` is a shape's words.
-coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: bool) -> f32 {
-	ppe := 1 / footprint
-	h_count, v_count := i32(s[0]), i32(s[1])
-	scale := Vec2{transmute(f32)s[2], transmute(f32)s[3]}
-	offset := Vec2{transmute(f32)s[4], transmute(f32)s[5]}
-	bx := clamp(i32(rc.x * scale.x + offset.x), 0, v_count - 1)
-	by := clamp(i32(rc.y * scale.y + offset.y), 0, h_count - 1)
-	curves := s[6]
-
-	xcov, xwgt: f32
-	hb := HEADER + 2 * u32(by)
-	list := s[hb + 1]
-	for k in 0 ..< s[hb] {
-		c := curves + 6 * s[list + k]
-		p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
-		p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
-		p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
-		if max(p1.x, p2.x, p3.x) * ppe.x < -0.5 {
-			break
-		}
-		code := root_code(p1.y, p2.y, p3.y)
-		if code != 0 {
-			r1, r2 := solve(p1, p2, p3, 1)
-			r1 *= ppe.x
-			r2 *= ppe.x
-			if code & 1 != 0 {
-				xcov += clamp(r1 + 0.5, 0, 1)
-				xwgt = max(xwgt, clamp(1 - abs(r1) * 2, 0, 1))
-			}
-			if code > 1 {
-				xcov -= clamp(r2 + 0.5, 0, 1)
-				xwgt = max(xwgt, clamp(1 - abs(r2) * 2, 0, 1))
-			}
-		}
+// t in [0, 1] where q(t) = a t^2 + b t + c equals v, for a coordinate
+// monotone on [0, 1] (v within its endpoints).
+solve_monotone :: #force_inline proc "contextless" (a, b, c, v: f32) -> f32 {
+	cc := c - v
+	if abs(a) <= 1e-7 * abs(b) {
+		return clamp(-cc / b, 0, 1)
 	}
+	d := math.sqrt(max(b * b - 4 * a * cc, 0))
+	q := -0.5 * (b + (d if b >= 0 else -d))
+	t1 := q / a
+	t2 := cc / q if q != 0 else t1
+	// The root in [0, 1], or the nearer one when rounding pushes both out.
+	e1 := max(-t1, t1 - 1, 0)
+	e2 := max(-t2, t2 - 1, 0)
+	return clamp(t1 if e1 <= e2 else t2, 0, 1)
+}
 
-	ycov, ywgt: f32
-	vb := HEADER + 2 * u32(h_count + bx)
-	list = s[vb + 1]
-	for k in 0 ..< s[vb] {
-		c := curves + 6 * s[list + k]
-		p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
-		p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
-		p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
-		if max(p1.y, p2.y, p3.y) * ppe.y < -0.5 {
-			break
-		}
-		code := root_code(p1.x, p2.x, p3.x)
-		if code != 0 {
-			r1, r2 := solve(p1, p2, p3, 0)
-			r1 *= ppe.y
-			r2 *= ppe.y
-			if code & 1 != 0 {
-				ycov -= clamp(r1 + 0.5, 0, 1)
-				ywgt = max(ywgt, clamp(1 - abs(r1) * 2, 0, 1))
-			}
-			if code > 1 {
-				ycov += clamp(r2 + 0.5, 0, 1)
-				ywgt = max(ywgt, clamp(1 - abs(r2) * 2, 0, 1))
-			}
-		}
-	}
+// The integral over [t0, t1] of g(t) y'(t), g(t) = gp t^2 + gq t + gr and
+// y(t) = yd t^2 + ye t + yf: a quartic in t.
+@(private)
+area_term :: #force_inline proc "contextless" (gp, gq, gr, yd, ye, t0, t1: f32) -> f32 {
+	k3 := gp * yd * 0.5
+	k2 := (gp * ye + 2 * gq * yd) / 3
+	k1 := (gq * ye + 2 * gr * yd) * 0.5
+	k0 := gr * ye
+	g1 := ((k3 * t1 + k2) * t1 + k1) * t1 * t1 + k0 * t1
+	g0 := ((k3 * t0 + k2) * t0 + k1) * t0 * t0 + k0 * t0
+	return g1 - g0
+}
 
-	cov := max(abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536), min(abs(xcov), abs(ycov)))
+// The fill rule applied to `area`, the footprint's signed covered fraction.
+@(private)
+fill :: #force_inline proc "contextless" (area: f32, even_odd: bool) -> f32 {
+	cov := abs(area)
 	if even_odd {
 		return 1 - abs(1 - (cov * 0.5 - math.floor(cov * 0.5)) * 2)
 	}
-	return clamp(cov, 0, 1)
+	return min(cov, 1)
 }
 
-// The per-axis footprint of a pixel from `j`, the Jacobian of shape units
-// by pixel coordinates (`j[0, 1]` = d shape.x / d pixel.y): the box that
-// encloses the pixel's parallelogram, as `fwidth` gives. The rays run along
-// the shape's axes, so this is exact for scales and translations; under a
-// rotation the box is wider than the pixel (up to sqrt 2 at 45 degrees:
-// slightly softer edges), and at grazing angles in 3D one axis grows long,
-// softening edges along it. Band size does not matter (a ray meets every
-// curve on its line however fine the bands); a footprint near the shape's
-// own size aliases: then `fade` to the mean.
+// Exact coverage of the axis-aligned box `footprint` (shape units) centered
+// at `rc`: the pixel itself under a transform without rotation or skew, the
+// box enclosing it otherwise (`footprint_of`).
+coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: bool) -> f32 {
+	fx, fy := footprint.x, footprint.y
+	if fx <= 0 || fy <= 0 {
+		return 0
+	}
+	x0, x1 := -0.5 * fx, 0.5 * fx
+	y0, y1 := -0.5 * fy, 0.5 * fy
+	curves := s[6]
+	area: f32
+	for band in band_of(s, rc.y + y0) ..= band_of(s, rc.y + y1) {
+		ylo, yhi := band_rows(s, band, rc.y, y0, y1)
+		if ylo >= yhi {
+			continue
+		}
+		hb := HEADER + 2 * u32(band)
+		list := s[hb + 1]
+		for k in 0 ..< s[hb] {
+			c := curves + 6 * s[list + k]
+			p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
+			p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
+			p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
+			cxmax := max(p1.x, p3.x)
+			if cxmax <= x0 {
+				break
+			}
+			ca, cb := max(ylo, min(p1.y, p3.y)), min(yhi, max(p1.y, p3.y))
+			if ca >= cb {
+				continue
+			}
+			cxmin := min(p1.x, p3.x)
+			if cxmin >= x1 {
+				// Wholly right of the box: its rows' full width.
+				area += (fx if p3.y > p1.y else -fx) * (cb - ca)
+				continue
+			}
+			q := quadratic(p1, p2, p3)
+			ta := solve_monotone(q.D, q.E, q.F, ca)
+			tb := solve_monotone(q.D, q.E, q.F, cb)
+			ta, tb = min(ta, tb), max(ta, tb)
+			// Within its rows the curve spans x from x(ta) to x(tb).
+			xa, xb := (q.A * ta + q.B) * ta + q.C, (q.A * tb + q.B) * tb + q.C
+			xlo, xhi := min(xa, xb), max(xa, xb)
+			if xhi <= x0 {
+				continue
+			}
+			if xlo >= x1 {
+				area += (fx if p3.y > p1.y else -fx) * (cb - ca)
+				continue
+			}
+			// Where x crosses the box's sides split the rows into pieces.
+			s1, s2 := tb, tb
+			if x0 > xlo && x0 < xhi {
+				s1 = clamp(solve_monotone(q.A, q.B, q.C, x0), ta, tb)
+			}
+			if x1 > xlo && x1 < xhi {
+				s2 = clamp(solve_monotone(q.A, q.B, q.C, x1), ta, tb)
+			}
+			lo, hi := min(s1, s2), max(s1, s2)
+			area += box_piece(q, x0, x1, ta, lo) + box_piece(q, x0, x1, lo, hi) + box_piece(q, x0, x1, hi, tb)
+		}
+	}
+	return fill(area / (fx * fy), even_odd)
+}
+
+// A curve as polynomials: x(t) = A t^2 + B t + C, y(t) = D t^2 + E t + F.
+@(private)
+Quadratic :: struct {
+	A, B, C, D, E, F: f32,
+}
+
+@(private)
+quadratic :: #force_inline proc "contextless" (p1, p2, p3: Vec2) -> Quadratic {
+	return {p1.x - 2 * p2.x + p3.x, 2 * (p2.x - p1.x), p1.x, p1.y - 2 * p2.y + p3.y, 2 * (p2.y - p1.y), p1.y}
+}
+
+// The area a piece [t0, t1] of a curve adds to the box [x0, x1]: none left
+// of it, the full width right of it, the part left of the curve inside.
+@(private)
+box_piece :: #force_inline proc "contextless" (q: Quadratic, x0, x1, t0, t1: f32) -> f32 {
+	if t1 <= t0 {
+		return 0
+	}
+	tm := (t0 + t1) * 0.5
+	xm := (q.A * tm + q.B) * tm + q.C
+	if xm <= x0 {
+		return 0
+	}
+	if xm >= x1 {
+		return (x1 - x0) * (((q.D * t1 + q.E) * t1 + q.F) - ((q.D * t0 + q.E) * t0 + q.F))
+	}
+	return area_term(q.A, q.B, q.C - x0, q.D, q.E, t0, t1)
+}
+
+// The per-axis extent of a pixel's footprint from `j`, the Jacobian of
+// shape units by pixel coordinates (`j[0, 1]` = d shape.x / d pixel.y): the
+// box enclosing its parallelogram, as `fwidth` gives. Coverage is exact for
+// that box, so exact for pixels under scales and translations; under a
+// rotation or skew the box is larger than the pixel (up to 2x its area at
+// 45 degrees), which softens edges slightly.
 footprint_of :: proc "contextless" (j: matrix[2, 2]f32) -> Vec2 {
 	return {abs(j[0, 0]) + abs(j[0, 1]), abs(j[1, 0]) + abs(j[1, 1])}
 }
 
-// `coverage` with the footprint from the Jacobian `j` (`footprint_of`).
+// `coverage` of the box enclosing the footprint whose Jacobian is `j`.
 coverage_jacobian :: proc "contextless" (s: []u32, rc: Vec2, j: matrix[2, 2]f32, even_odd: bool) -> f32 {
 	return coverage(s, rc, footprint_of(j), even_odd)
 }
 
 // `cov` blended toward the shape's mean coverage as the footprint grows
-// from half the shape's size to all of it (along either axis): there one
-// sample's rays alias the whole shape.
+// from half the shape's size to all of it (along either axis).
 fade :: proc "contextless" (s: []u32, cov: f32, footprint: Vec2) -> f32 {
 	size := Vec2{transmute(f32)s[10], transmute(f32)s[11]}
 	k := max(footprint.x / max(size.x, 1e-6), footprint.y / max(size.y, 1e-6))
@@ -460,14 +516,14 @@ fade :: proc "contextless" (s: []u32, cov: f32, footprint: Vec2) -> f32 {
 	return cov + (mean_coverage(s) - cov) * t
 }
 
-// The winding number at `p` (shape units): the signed count of crossings of
-// the ray toward +x, the same crossings `coverage` counts (its sign as
-// `coverage`'s, so non-zero is `!= 0` and even-odd is odd).
+// The winding number at `p` (shape units): the signed count of the curves
+// crossing the ray toward +x (non-zero is `!= 0`, even-odd is odd), with
+// the sign `coverage`'s area has. A curve counts at its rows [lower end,
+// upper end), so a contour's joints count once.
 winding :: proc "contextless" (s: []u32, p: Vec2) -> i32 {
-	h_count := i32(s[0])
-	by := clamp(i32(p.y * transmute(f32)s[3] + transmute(f32)s[5]), 0, h_count - 1)
+	band := band_of(s, p.y)
 	curves := s[6]
-	hb := HEADER + 2 * u32(by)
+	hb := HEADER + 2 * u32(band)
 	list := s[hb + 1]
 	w: i32
 	for k in 0 ..< s[hb] {
@@ -475,18 +531,16 @@ winding :: proc "contextless" (s: []u32, p: Vec2) -> i32 {
 		p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - p
 		p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - p
 		p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - p
-		if max(p1.x, p2.x, p3.x) < 0 {
+		if max(p1.x, p3.x) <= 0 {
 			break
 		}
-		code := root_code(p1.y, p2.y, p3.y)
-		if code != 0 {
-			r1, r2 := solve(p1, p2, p3, 1)
-			if code & 1 != 0 && r1 > 0 {
-				w += 1
-			}
-			if code > 1 && r2 > 0 {
-				w -= 1
-			}
+		lo, hi := min(p1.y, p3.y), max(p1.y, p3.y)
+		if 0 < lo || 0 >= hi {
+			continue
+		}
+		t := solve_monotone(p1.y - 2 * p2.y + p3.y, 2 * (p2.y - p1.y), p1.y, 0)
+		if ((p1.x - 2 * p2.x + p3.x) * t + 2 * (p2.x - p1.x)) * t + p1.x > 0 {
+			w += 1 if p3.y > p1.y else -1
 		}
 	}
 	return w

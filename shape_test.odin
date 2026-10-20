@@ -12,20 +12,20 @@ coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> 
 	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), shape_ems_per_pixel(full), even_odd)
 }
 
-// Area of the pixel at (x, y) the shape covers, from 16x16 crisp samples.
+// Area of the pixel at (x, y) the shape covers, from 32x32 winding samples.
 @(private = "file")
 area_at :: proc(s: ^Shape, t: Transform2D, x, y: f32) -> f32 {
 	full := transform_multiply(shape_local(s), t)
 	inv := transform_inverse(full)
-	epp := shape_ems_per_pixel(full) / 64
-	sum: f32
-	for sy in 0 ..< 16 {
-		for sx in 0 ..< 16 {
-			p := transform_point(inv, x - 0.5 + (f32(sx) + 0.5) / 16, y - 0.5 + (f32(sy) + 0.5) / 16)
-			sum += shape_coverage(s.data, p, epp, false)
+	N :: 32
+	inside := 0
+	for sy in 0 ..< N {
+		for sx in 0 ..< N {
+			p := transform_point(inv, x - 0.5 + (f32(sx) + 0.5) / N, y - 0.5 + (f32(sy) + 0.5) / N)
+			inside += int(cv.winding(s.data, p) != 0)
 		}
 	}
-	return sum / 256
+	return f32(inside) / (N * N)
 }
 
 @(test)
@@ -82,9 +82,10 @@ test_shape_quadratics_kept :: proc(t: ^testing.T) {
 
 @(test)
 test_shape_curves_match_area :: proc(t: ^testing.T) {
-	// A circle (cubics, split into quadratics) and rotated glyphs: each edge
-	// pixel's coverage against the area the curves cover. The rays' blend
-	// is an approximation of area (corners stray most).
+	// A circle (cubics, split into quadratics), upright and rotated glyphs:
+	// each edge pixel's coverage against the area the curves cover. Exact up
+	// to the samples' resolution, except that a rotated pixel's coverage is
+	// that of the box enclosing it.
 	check :: proc(t: ^testing.T, s: ^Shape, tr: Transform2D, x0, y0, x1, y1: int, mean_max, max_max: f32) {
 		sum, worst: f32
 		n := 0
@@ -110,7 +111,7 @@ test_shape_curves_match_area :: proc(t: ^testing.T) {
 	path_circle(&p, 20, 20, 15.3)
 	circle, _ := shape_from_path(&p)
 	defer shape_destroy(&circle)
-	check(t, &circle, TRANSFORM_IDENTITY, 2, 2, 38, 38, 0.05, 0.15)
+	check(t, &circle, TRANSFORM_IDENTITY, 2, 2, 38, 38, 0.01, 0.04)
 
 	font, err := font_load(DEFAULT_FONT_DATA)
 	testing.expect_value(t, err, Error.None)
@@ -120,9 +121,10 @@ test_shape_curves_match_area :: proc(t: ^testing.T) {
 		g, ok := shape_from_glyph(&font, font_glyph_index(&font, r))
 		testing.expect(t, ok)
 		defer shape_destroy(&g)
-		tr := transform_multiply(transform_scaling(sc, sc), transform_rotation(0.3))
-		tr = transform_multiply(tr, transform_translation(20, 20))
-		check(t, &g, tr, 0, 0, 40, 40, 0.07, 0.45)
+		upright := transform_multiply(transform_scaling(sc, sc), transform_translation(20, 20))
+		check(t, &g, upright, 0, 0, 40, 40, 0.01, 0.04)
+		rotated := transform_multiply(transform_multiply(transform_scaling(sc, sc), transform_rotation(0.3)), transform_translation(20, 20))
+		check(t, &g, rotated, 0, 0, 40, 40, 0.06, 0.3)
 	}
 	_, ok := shape_from_glyph(&font, font_glyph_index(&font, ' '))
 	testing.expect(t, !ok)
@@ -160,7 +162,8 @@ test_sw_fill_shape :: proc(t: ^testing.T) {
 	testing.expect_value(t, at(&b, 1, 9), [4]u8{255, 255, 255, 255})
 	testing.expect_value(t, at(&b, 27, 9), [4]u8{0, 0, 255, 255})
 	// Half the pixel at x = 22 is inside the second square.
-	testing.expect_value(t, at(&b, 22, 9), [4]u8{128, 128, 255, 255})
+	half := at(&b, 22, 9)
+	testing.expectf(t, abs(int(half[0]) - 128) <= 1 && half[0] == half[1] && half[2] == 255, "half-covered pixel %v", half)
 }
 
 @(test)
@@ -339,7 +342,7 @@ test_winding_matches_coverage :: proc(t: ^testing.T) {
 			for gx in 0 ..< 97 {
 				p := Vec2{(f32(gx) + 0.5) / 97 * x1, (f32(gy) + 0.5) / 97 * y1}
 				inside := cv.winding(s.data, p) != 0
-				crisp := shape_coverage(s.data, p, {1e-6, 1e-6}, false) > 0.5
+				crisp := cv.coverage(s.data, p, {1e-6, 1e-6}, false) > 0.5
 				disagree += int(inside != crisp)
 			}
 		}
