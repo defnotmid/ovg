@@ -150,62 +150,62 @@ float curves_solve_monotone_0(float a_0, float b_0, float c_1, float v_0)
 }
 
 
-#line 454
+#line 467
 int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 {
 
-#line 454
+#line 467
     bool _S7;
     if((p_0.x) >= (curves_f_0(words_3, s_2 + 10U)))
     {
 
-#line 455
+#line 468
         _S7 = true;
 
-#line 455
+#line 468
     }
     else
     {
 
-#line 455
+#line 468
         _S7 = (p_0.y) < 0.0f;
 
-#line 455
+#line 468
     }
 
-#line 455
+#line 468
     if(_S7)
     {
 
-#line 455
+#line 468
         _S7 = true;
 
-#line 455
+#line 468
     }
     else
     {
 
-#line 455
+#line 468
         _S7 = (p_0.y) >= (curves_f_0(words_3, s_2 + 11U));
 
-#line 455
+#line 468
     }
 
-#line 455
+#line 468
     if(_S7)
     {
 
-#line 455
+#line 468
         return int(0);
     }
 
-#line 456
+#line 469
     Curves_Span_0 g_2 = curves_span_0(words_3, s_2, p_0, 0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 456
+#line 469
     thread Curves_Span_0 _S8 = g_2;
 
-#line 456
+#line 469
     uint _S9 = curves_cell_0(s_2, &_S8, g_2.i0_0, g_2.j0_0);
 
 
@@ -213,45 +213,45 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
     uint _S11 = s_2 + words_3[_S9 + 3U];
     uint _S12 = _S9 + 1U;
 
-#line 461
+#line 474
     uint _S13 = words_3[_S12] >> 16U;
 
-#line 461
+#line 474
     uint k_0 = 0U;
 
-#line 461
+#line 474
     int w_0 = _S10;
     for(;;)
     {
 
-#line 462
+#line 475
         if(k_0 < _S13)
         {
         }
         else
         {
 
-#line 462
+#line 475
             break;
         }
 
-#line 463
+#line 476
         uint _S14 = _S11 + 2U * k_0;
 
-#line 463
+#line 476
         if((curves_f_0(words_3, _S14)) <= (p_0.y))
         {
 
-#line 463
+#line 476
             w_0 = w_0 + int(words_3[_S14 + 1U]);
 
-#line 463
+#line 476
         }
 
-#line 462
+#line 475
         k_0 = k_0 + 1U;
 
-#line 462
+#line 475
     }
 
 
@@ -259,140 +259,140 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
     uint _S16 = s_2 + words_3[_S9];
     uint _S17 = words_3[_S12] & 65535U;
 
-#line 467
+#line 480
     k_0 = 0U;
     for(;;)
     {
 
-#line 468
+#line 481
         if(k_0 < _S17)
         {
         }
         else
         {
 
-#line 468
+#line 481
             break;
         }
 
-#line 469
+#line 482
         uint c_2 = _S15 + 6U * words_3[_S16 + k_0];
         float2 p1_0 = curves_point_0(words_3, c_2, p_0);
         float2 p2_0 = curves_point_0(words_3, c_2 + 2U, p_0);
         float2 p3_0 = curves_point_0(words_3, c_2 + 4U, p_0);
         float _S18 = p1_0.y;
 
-#line 473
+#line 486
         float _S19 = p3_0.y;
         float _S20 = max(_S18, _S19);
         if(0.0f < (min(_S18, _S19)))
         {
 
-#line 475
+#line 488
             _S7 = true;
 
-#line 475
+#line 488
         }
         else
         {
 
-#line 475
+#line 488
             _S7 = 0.0f >= _S20;
 
-#line 475
+#line 488
         }
 
-#line 475
+#line 488
         bool _S21;
 
-#line 475
+#line 488
         if(_S7)
         {
 
-#line 475
+#line 488
             _S21 = true;
 
-#line 475
+#line 488
         }
         else
         {
 
-#line 475
+#line 488
             _S21 = (max(p1_0.x, p3_0.x)) <= 0.0f;
 
-#line 475
+#line 488
         }
 
-#line 475
+#line 488
         if(_S21)
         {
 
-#line 475
+#line 488
             k_0 = k_0 + 1U;
 
-#line 468
+#line 481
             continue;
         }
 
-#line 476
+#line 489
         float _S22 = p2_0.y;
 
-#line 476
+#line 489
         float t_0 = curves_solve_monotone_0(_S18 - 2.0f * _S22 + _S19, 2.0f * (_S22 - _S18), _S18, 0.0f);
         float _S23 = p1_0.x;
 
-#line 477
+#line 490
         float _S24 = p2_0.x;
 
-#line 477
+#line 490
         int w_1;
 
-#line 477
+#line 490
         if((((_S23 - 2.0f * _S24 + p3_0.x) * t_0 + 2.0f * (_S24 - _S23)) * t_0 + _S23) > 0.0f)
         {
 
-#line 478
+#line 491
             if(_S19 > _S18)
             {
 
-#line 478
+#line 491
                 w_1 = int(1);
 
-#line 478
+#line 491
             }
             else
             {
 
-#line 478
+#line 491
                 w_1 = int(-1);
 
-#line 478
+#line 491
             }
 
-#line 478
+#line 491
             w_1 = w_0 + w_1;
 
-#line 477
+#line 490
         }
         else
         {
 
-#line 477
+#line 490
             w_1 = w_0;
 
-#line 477
+#line 490
         }
 
-#line 477
+#line 490
         w_0 = w_1;
 
-#line 468
+#line 481
         k_0 = k_0 + 1U;
 
-#line 468
+#line 481
     }
 
-#line 481
+#line 494
     return w_0;
 }
 
@@ -433,54 +433,54 @@ struct KernelContext_0
 };
 
 
-#line 810
+#line 813
 float shape_aliased_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 811
-    int w_2 = curves_winding_0(kernelContext_0->shapes_0, i_2->data_0.x, i_2->rc_2);
+#line 814
+    int w_2 = curves_winding_0(kernelContext_0->shapes_0, i_2->data_0.x, i_2->rc_2 + (i_2->uv_0.xy + i_2->uv_0.zw) / float2(64.0f) );
 
-#line 811
+#line 814
     bool _S25;
     if(((i_2->data_0.z) & 1U) != 0U)
     {
 
-#line 812
+#line 815
         _S25 = (w_2 & int(1)) != int(0);
 
-#line 812
+#line 815
     }
     else
     {
 
-#line 812
+#line 815
         _S25 = w_2 != int(0);
 
-#line 812
+#line 815
     }
 
-#line 812
+#line 815
     float _S26;
 
-#line 812
+#line 815
     if(_S25)
     {
 
-#line 812
+#line 815
         _S26 = 1.0f;
 
-#line 812
+#line 815
     }
     else
     {
 
-#line 812
+#line 815
         _S26 = 0.0f;
 
-#line 812
+#line 815
     }
 
-#line 812
+#line 815
     return _S26;
 }
 
@@ -1948,104 +1948,104 @@ struct pixelInput_0
 };
 
 
-#line 818 "ovg.slang"
+#line 821 "ovg.slang"
 [[fragment]] pixelOutput_0 fs_shape_box(pixelInput_0 _S147 [[stage_in]], float4 position_1 [[position]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 818
+#line 821
     thread KernelContext_0 kernelContext_25;
 
-#line 818
+#line 821
     (&kernelContext_25)->shapes_0 = shapes_1;
 
-#line 818
+#line 821
     (&kernelContext_25)->paints_0 = paints_1;
 
-#line 818
+#line 821
     (&kernelContext_25)->tex_texture_0 = tex_texture_1;
 
-#line 818
+#line 821
     (&kernelContext_25)->tex_sampler_0 = tex_sampler_1;
     (&kernelContext_25)->paint_index_0 = _S147.data_2.y;
     uint _S148 = _S147.data_2.z;
 
-#line 820
+#line 823
     if((_S148 & 2U) != 0U)
     {
 
-#line 820
+#line 823
         thread VS_Shape_Out_0 _S149;
 
-#line 820
+#line 823
         (&_S149)->position_0 = position_1;
 
-#line 820
+#line 823
         (&_S149)->rc_2 = _S147.rc_5;
 
-#line 820
+#line 823
         (&_S149)->fpos_0 = _S147.fpos_4;
 
-#line 820
+#line 823
         (&_S149)->uv_0 = _S147.uv_1;
 
-#line 820
+#line 823
         (&_S149)->data_0 = _S147.data_2;
 
-#line 820
+#line 823
         float _S150 = shape_aliased_0(&_S149, &kernelContext_25);
 
-#line 820
+#line 823
         thread VS_Shape_Out_0 _S151;
 
-#line 820
+#line 823
         (&_S151)->position_0 = position_1;
 
-#line 820
+#line 823
         (&_S151)->rc_2 = _S147.rc_5;
 
-#line 820
+#line 823
         (&_S151)->fpos_0 = _S147.fpos_4;
 
-#line 820
+#line 823
         (&_S151)->uv_0 = _S147.uv_1;
 
-#line 820
+#line 823
         (&_S151)->data_0 = _S147.data_2;
 
-#line 820
+#line 823
         float4 _S152 = shape_fill_0(&_S151, _S150, &kernelContext_25);
 
-#line 820
+#line 823
         pixelOutput_0 _S153 = { _S152 };
         return _S153;
     }
     float _S154 = curves_coverage_0((&kernelContext_25)->shapes_0, _S147.data_2.x, _S147.rc_5, float2(abs(_S147.uv_1.x), abs(_S147.uv_1.w)), (_S148 & 1U) != 0U);
 
-#line 823
+#line 826
     thread VS_Shape_Out_0 _S155;
 
-#line 823
+#line 826
     (&_S155)->position_0 = position_1;
 
-#line 823
+#line 826
     (&_S155)->rc_2 = _S147.rc_5;
 
-#line 823
+#line 826
     (&_S155)->fpos_0 = _S147.fpos_4;
 
-#line 823
+#line 826
     (&_S155)->uv_0 = _S147.uv_1;
 
-#line 823
+#line 826
     (&_S155)->data_0 = _S147.data_2;
 
-#line 823
+#line 826
     float4 _S156 = shape_fill_0(&_S155, _S154, &kernelContext_25);
 
-#line 823
+#line 826
     pixelOutput_0 _S157 = { _S156 };
 
-#line 823
+#line 826
     return _S157;
 }
 

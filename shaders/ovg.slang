@@ -806,9 +806,12 @@ float4 shape_fill(VS_Shape_Out i, float coverage) {
     return result * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
 }
 
-// The pixel center's winding, for an aliased instance.
+// The winding a 64th of a pixel right of and below the pixel center, for
+// an aliased instance: an edge through the center itself (common when
+// pixel art is scaled by a fraction) then falls the same side in every
+// shape, whatever each one's rounding.
 float shape_aliased(VS_Shape_Out i) {
-    int w = curves_winding(shapes, i.data.x, i.rc);
+    int w = curves_winding(shapes, i.data.x, i.rc + (i.uv.xy + i.uv.zw) / 64.0);
     return ((i.data.z & 1u) != 0u ? (w & 1) != 0 : w != 0) ? 1.0 : 0.0;
 }
 

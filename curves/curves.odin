@@ -263,14 +263,17 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 	}
 	mono := s.mono[:]
 	lo, hi := mono[0].p1, mono[0].p1
+	// NaN and infinity reach the sum (min and max may drop them).
+	sum: f32
 	for c in mono {
 		for p in ([3]Vec2{c.p1, c.p2, c.p3}) {
 			lo = {min(lo.x, p.x), min(lo.y, p.y)}
 			hi = {max(hi.x, p.x), max(hi.y, p.y)}
+			sum += p.x + p.y
 		}
 	}
 	extent = max(hi.x - lo.x, hi.y - lo.y)
-	if extent <= 0 {
+	if !(extent > 0) || math.is_nan(sum) || math.is_inf(sum) {
 		return
 	}
 	origin = lo
@@ -296,6 +299,9 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 	for n in first ..= last {
 		cx, cy := max(1, int(math.ceil(size.x * f32(n) - 1e-4))), max(1, int(math.ceil(size.y * f32(n) - 1e-4)))
 		w, h := size.x / f32(cx), size.y / f32(cy)
+		// A shape of no width (or height) has one column (row): any size.
+		w = w if w > 0 else 1
+		h = h if h > 0 else 1
 		clear(&s.split)
 		if cx == 1 {
 			append(&s.split, ..mono)
@@ -875,7 +881,16 @@ affine_curve :: proc "contextless" (s: []u32, c: u32, rc: Vec2, fp: ^Footprint, 
 	y1, y2 := clamp(-fp.h1, ca, cb), clamp(fp.h1, ca, cb)
 	t1 := ta if y1 == ca else (tb if y1 == cb else solve_monotone(q.D, q.E, q.F, y1))
 	t2 := ta if y2 == ca else (tb if y2 == cb else solve_monotone(q.D, q.E, q.F, y2))
-	return footprint_piece(fp^, 0, q, ta, t1) + footprint_piece(fp^, 1, q, t1, t2) + footprint_piece(fp^, 2, q, t2, tb)
+	// Each piece in a parameter starting at its stretch: the footprint's
+	// thin triangles have steep sides, and their area from coefficients in
+	// t far from 0 would be lost to rounding.
+	return footprint_piece(fp^, 0, from(q, ta), 0, t1 - ta) + footprint_piece(fp^, 1, from(q, t1), 0, t2 - t1) + footprint_piece(fp^, 2, from(q, t2), 0, tb - t2)
+}
+
+// `q` as a polynomial in s = t - t0.
+@(private = "file")
+from :: #force_inline proc "contextless" (q: Quadratic, t0: f32) -> Quadratic {
+	return {q.A, 2 * q.A * t0 + q.B, (q.A * t0 + q.B) * t0 + q.C, q.D, 2 * q.D * t0 + q.E, (q.D * t0 + q.E) * t0 + q.F}
 }
 
 // A pixel's parallelogram footprint, centered on the origin. Its lowest

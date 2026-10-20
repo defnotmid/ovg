@@ -267,3 +267,62 @@ test_backdrops :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, wrong, 0)
 }
+
+@(test)
+test_affine_near_upright :: proc(t: ^testing.T) {
+	// A pixel turned a hair off upright over a straight edge: its
+	// footprint's top and bottom triangles are thin with steep sides, and
+	// their area must not be lost to rounding.
+	b: Builder
+	defer builder_destroy(&b)
+	square(&b, 0, 0, 220, 250)
+	words, origin, extent := built(t, &b)
+	defer delete(words)
+	worst: f32
+	for ang in ([3]f32{0.03, -0.01, 0.002}) {
+		u := Vec2{math.cos(ang), math.sin(ang)} * 0.8
+		v := Vec2{-math.sin(ang), math.cos(ang)} * 0.8
+		for k in 0 ..< 40 {
+			// Centers across the left edge x = 0, where the area right of
+			// it is (x + 0.4) / 0.8 of the pixel, nearly.
+			q := Vec2{f32(k) * 0.02 - 0.4, 100}
+			got := coverage_affine(words, (q - origin) / extent, u / extent, v / extent, false)
+			worst = max(worst, abs(got - clamp((q.x + 0.4) / 0.8, 0, 1)))
+		}
+	}
+	testing.expectf(t, worst < 0.03, "worst %v", worst)
+}
+
+@(test)
+test_build_rejects_non_finite :: proc(t: ^testing.T) {
+	nan := math.nan_f32()
+	for bad in ([3]Vec2{{nan, 1}, {1, nan}, {math.inf_f32(1), 0}}) {
+		b: Builder
+		defer builder_destroy(&b)
+		square(&b, 0, 0, 10, 10)
+		move_to(&b, {0, 0})
+		line_to(&b, bad)
+		line_to(&b, {5, 5})
+		words, _, _, ok := build(&b)
+		testing.expect(t, !ok)
+		delete(words)
+	}
+}
+
+@(test)
+test_build_flat_shapes :: proc(t: ^testing.T) {
+	// No width or no height: built (nothing covered), never a division by 0.
+	for end in ([2]Vec2{{0, 10}, {10, 0}}) {
+		for search in ([2]bool{true, false}) {
+			b: Builder
+			defer builder_destroy(&b)
+			move_to(&b, {0, 0})
+			line_to(&b, end)
+			close(&b)
+			words, origin, extent, ok := build(&b, context.allocator, search)
+			testing.expect(t, ok)
+			testing.expect_value(t, winding(words, (end * 0.5 - origin) / extent + {0.1, 0.1}), 0)
+			delete(words)
+		}
+	}
+}

@@ -367,6 +367,18 @@ float curves_backdrop_fp(StructuredBuffer<uint> words, uint s, uint cell, float 
 // The area a curve crossing the footprint adds over its rows [ca, cb]: its
 // parameters at the rows' ends and where they cross the pieces'
 // boundaries (no solve where those coincide), then each piece.
+// `q` as a polynomial in s = t - t0.
+Curves_Quadratic curves_from(Curves_Quadratic q, float t0) {
+    Curves_Quadratic r;
+    r.A = q.A;
+    r.B = 2.0 * q.A * t0 + q.B;
+    r.C = (q.A * t0 + q.B) * t0 + q.C;
+    r.D = q.D;
+    r.E = 2.0 * q.D * t0 + q.E;
+    r.F = (q.D * t0 + q.E) * t0 + q.F;
+    return r;
+}
+
 float curves_affine_curve(StructuredBuffer<uint> words, uint c, float2 rc, Curves_Footprint fp, float ca, float cb) {
     Curves_Quadratic q = curves_quadratic(curves_point(words, c, rc), curves_point(words, c + 2, rc), curves_point(words, c + 4, rc));
     float ta = curves_solve_monotone(q.D, q.E, q.F, ca);
@@ -375,7 +387,8 @@ float curves_affine_curve(StructuredBuffer<uint> words, uint c, float2 rc, Curve
     float y2 = clamp(fp.h1, ca, cb);
     float t1 = y1 == ca ? ta : (y1 == cb ? tb : curves_solve_monotone(q.D, q.E, q.F, y1));
     float t2 = y2 == ca ? ta : (y2 == cb ? tb : curves_solve_monotone(q.D, q.E, q.F, y2));
-    return curves_footprint_piece(fp, 0, q, ta, t1) + curves_footprint_piece(fp, 1, q, t1, t2) + curves_footprint_piece(fp, 2, q, t2, tb);
+    // Each piece in a parameter starting at its stretch (see affine_curve).
+    return curves_footprint_piece(fp, 0, curves_from(q, ta), 0.0, t1 - ta) + curves_footprint_piece(fp, 1, curves_from(q, t1), 0.0, t2 - t1) + curves_footprint_piece(fp, 2, curves_from(q, t2), 0.0, tb - t2);
 }
 
 // Exact coverage of the parallelogram rc + a u + b v, a, b in [-1/2, 1/2]

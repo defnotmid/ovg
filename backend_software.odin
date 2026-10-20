@@ -345,7 +345,8 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, frame_words: []u32) {
 @(private = "file")
 instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc, u, v: Vec2) -> f32 {
 	if inst.aliased {
-		w := cv.winding(words, rc)
+		// Off center as the shader samples it.
+		w := cv.winding(words, rc + (u + v) / 64)
 		return 1 if (w & 1 != 0 if inst.even_odd else w != 0) else 0
 	}
 	return shape_coverage(words, rc, u, v, inst.even_odd)
