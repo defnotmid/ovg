@@ -15,9 +15,12 @@ env:
   # The Odin nightly ovg is developed against (same pin as onimite).
   ODIN_VERSION: dev-2026-10
 
-# ovg imports no sibling repositories. The core package and the software
-# backend are tested; the SDL_GPU backend (sdlgpu/) is type-checked only,
-# since hosted runners have no GPU and `odin check` needs no SDL3 library.
+# ovg reads odecs (image decoding and PNG writing) through
+# `-collection:deps=..`, so the job checks both out side by side:
+#   $GITHUB_WORKSPACE/{ovg,odecs}
+# odecs is pinned to the tag onimite builds with. The core package and the
+# software backend are tested; the SDL_GPU backend (sdlgpu/) is type-checked
+# only, since hosted runners have no GPU and `odin check` needs no SDL3 library.
 
 jobs:
   test:
@@ -27,8 +30,18 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: ovg
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: ovg
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/odecs
+          ref: v0.0.7
+          path: odecs
 
       - name: Cache Odin
         id: odin-cache
@@ -48,10 +61,9 @@ jobs:
             "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/$asset"
           mkdir -p ~/.odin
           tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C ~/.odin --strip-components=1
-          # vendor:kb_text_shape (and vendor:stb on Linux; macOS ships it
-          # prebuilt) come as C source. ODIN_ROOT tells the scripts where.
+          # vendor:kb_text_shape comes as C source. ODIN_ROOT tells the
+          # script where.
           export ODIN_ROOT="$HOME/.odin"
-          if [ "$RUNNER_OS" = Linux ]; then sh "$ODIN_ROOT/vendor/stb/src/build_stb.sh" unix; fi
           sh "$ODIN_ROOT/vendor/kb_text_shape/src/build_unix.sh"
 
       - name: Set up Odin
@@ -70,7 +82,7 @@ jobs:
       - name: Test
         run: |
           mkdir -p build
-          odin test . -vet -strict-style -out:build/ovg_test
+          odin test . -collection:deps=.. -vet -strict-style -out:build/ovg_test
           odin test curves -vet -strict-style -out:build/curves_test
           odin test font -vet -strict-style -out:build/font_test
 
@@ -83,8 +95,8 @@ jobs:
 
       - name: Check the SDL_GPU backend
         run: |
-          odin check sdlgpu -no-entry-point -vet -strict-style
+          odin check sdlgpu -collection:deps=.. -no-entry-point -vet -strict-style
           # The other desktop target's compile (Windows needs an SDK to check).
           if [ "$RUNNER_OS" = Linux ]; then
-            odin check sdlgpu -no-entry-point -target:darwin_arm64
+            odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64
           fi

@@ -6,9 +6,9 @@
 // TEXT_FRAC of their pixels off: glyph edges differ from a browser's font
 // rasterizer (hinting, subpixel placement) even when the layout matches.
 //
-//     odin run tools/lottie_suite -o:speed -- [-tol:32] [-frac:0.02] [-dump:dir] [-v] dir
-//     odin run tools/lottie_suite -o:speed -- -render:file.json -frames:0,30 -out:dir
-//     odin run tools/lottie_suite -o:speed -- -bench:file.json [-n:60]
+//     odin run tools/lottie_suite -collection:deps=.. -o:speed -- [-tol:32] [-frac:0.02] [-dump:dir] [-v] dir
+//     odin run tools/lottie_suite -collection:deps=.. -o:speed -- -render:file.json -frames:0,30 -out:dir
+//     odin run tools/lottie_suite -collection:deps=.. -o:speed -- -bench:file.json [-n:60]
 //
 // `-dump:dir` writes every render and a diff image there (keep it out of
 // the repository). `-bench` times parsing, recording (draw calls on a
@@ -23,7 +23,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 import vg "../.."
 
@@ -149,7 +149,7 @@ main :: proc() {
 			fr, _ := strconv.parse_f32(f)
 			px := render(&rd, &doc, fr)
 			out := fmt.tprintf("%s/%s_%s.png", out_dir, stem, f)
-			vg.write_png(out, px, u32(doc.width), u32(doc.height))
+			image.write_png(out, px, int(doc.width), int(doc.height))
 			fmt.println(out)
 		}
 		return
@@ -190,18 +190,21 @@ main :: proc() {
 			if !is_num {
 				continue
 			}
-			rw, rh, ch: i32
-			cpath := strings.clone_to_cstring(fi.fullpath, context.temp_allocator)
-			ref := stbi.load(cpath, &rw, &rh, &ch, 4)
-			if ref == nil {
+			png, perr := os.read_entire_file(fi.fullpath, context.temp_allocator)
+			if perr != nil {
 				continue
 			}
+			ref_img, ierr := image.decode(png)
+			if ierr != nil {
+				continue
+			}
+			ref, rw, rh := ref_img.pixels, ref_img.width, ref_img.height
 			px := render(&rd, &doc, fr)
 			total += 1
 			off, worst := 0, 0
 			sum: f64
-			n := int(rw * rh)
-			if u32(rw) != u32(doc.width) || u32(rh) != u32(doc.height) {
+			n := rw * rh
+			if rw != int(doc.width) || rh != int(doc.height) {
 				off = n
 			} else {
 				diff := make([]u8, n * 4, context.temp_allocator) if dump != "" else nil
@@ -222,11 +225,11 @@ main :: proc() {
 					}
 				}
 				if dump != "" {
-					vg.write_png(fmt.tprintf("%s/%s_%s_ours.png", dump, stem, frame_str), px, u32(rw), u32(rh))
-					vg.write_png(fmt.tprintf("%s/%s_%s_diff.png", dump, stem, frame_str), diff, u32(rw), u32(rh))
+					image.write_png(fmt.tprintf("%s/%s_%s_ours.png", dump, stem, frame_str), px, rw, rh)
+					image.write_png(fmt.tprintf("%s/%s_%s_diff.png", dump, stem, frame_str), diff, rw, rh)
 				}
 			}
-			stbi.image_free(ref)
+			image.destroy_image(&ref_img)
 			share := f64(off) / f64(max(n, 1))
 			ok_frame := share <= (max(frac, TEXT_FRAC) if strings.contains(stem, "text") else frac)
 			pass += int(ok_frame)

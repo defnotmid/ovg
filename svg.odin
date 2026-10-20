@@ -8,7 +8,7 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 // SVG import: `svg_parse` turns SVG markup into an `Svg_Document`, a
 // render-ready, data-oriented copy (like usvg's tree): `<use>` instances
@@ -2290,27 +2290,23 @@ svg_convert_svg_image :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent
 // Decodes PNG / JPEG / ... bytes to straight RGBA8 with `allocator`. Images
 // over the budget's (or DEFAULT_LIMITS') Image_Pixels are not decoded.
 svg_decode_image :: proc(data: []u8, allocator: mem.Allocator, budget: ^Budget = nil) -> (pixels: []u8, width, height: u32, ok: bool) {
-	if len(data) == 0 || len(data) > int(max(i32)) {
+	info, ierr := image.info(data)
+	if ierr != nil {
 		return
 	}
-	w, h, ch: i32
-	if stbi.info_from_memory(raw_data(data), i32(len(data)), &w, &h, &ch) == 0 {
+	if budget != nil && budget_over(budget, .Image_Pixels, info.width * info.height) {
+		return
+	} else if budget == nil && info.width * info.height > DEFAULT_LIMITS[.Image_Pixels] {
 		return
 	}
-	if budget != nil && budget_over(budget, .Image_Pixels, int(w) * int(h)) {
-		return
-	} else if budget == nil && int(w) * int(h) > DEFAULT_LIMITS[.Image_Pixels] {
-		return
-	}
-	px := stbi.load_from_memory(raw_data(data), i32(len(data)), &w, &h, &ch, 4)
-	if px == nil {
+	// The decoder's scratch is freed as it goes, so it stays out of an arena
+	// `allocator`: decode on the heap, then copy.
+	img, err := image.decode(data)
+	if err != nil {
 		return
 	}
-	defer stbi.image_free(px)
-	n := int(w) * int(h) * 4
-	pixels = make([]u8, n, allocator)
-	copy(pixels, px[:n])
-	return pixels, u32(w), u32(h), true
+	defer image.destroy_image(&img)
+	return slice.clone(img.pixels, allocator), u32(img.width), u32(img.height), true
 }
 
 // ---- text ---------------------------------------------------------------------------

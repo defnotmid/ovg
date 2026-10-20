@@ -2,7 +2,7 @@
 // (headless) and compares the pixels. Writes `<scene>_sw.png`,
 // `<scene>_gpu.png` and `<scene>_diff.png` into the output directory.
 //
-//     odin run tools/sdlgpu_parity -- [out_dir]
+//     odin run tools/sdlgpu_parity -collection:deps=.. -- [out_dir]
 //
 // `SDL_GPU_DRIVER=vulkan|metal|direct3d12` picks SDL's GPU driver.
 package sdlgpu_parity

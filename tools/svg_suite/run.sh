@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 out="${TMPDIR:-/tmp}/ovg_svg_suite"
-odin build . -o:speed -out:"$out"
+odin build . -collection:deps=../../.. -o:speed -out:"$out"
 status=0
 timeout 600 "$out" "$@" tests | tee "$out.log" || status=$?
 rm -f "$out"

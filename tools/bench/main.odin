@@ -3,7 +3,7 @@
 // rasterization), with the allocations each warm frame makes, heap and
 // temp allocator counted apart, and the frame's size.
 //
-//     odin run tools/bench -o:speed [-- -n:200 -only:svg]
+//     odin run tools/bench -collection:deps=.. -o:speed [-- -n:200 -only:svg]
 //
 // Workloads: a styled SVG scene (cascade, gradients, clips, masks, group
 // opacity, a filter), an SVG of text, a Lottie scene (keyframes, trims,

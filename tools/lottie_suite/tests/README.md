@@ -41,6 +41,6 @@ progress along a motion path (lottie-web jumps to the end; ovg holds
 the start) and skewed strokes (ovg strokes with the transform's average
 scale, as nanovg does).
 
-`./run.sh` (or `odin run tools/lottie_suite -o:speed -- -v tools/lottie_suite/tests`)
+`./run.sh` (or `odin run tools/lottie_suite -collection:deps=.. -o:speed -- -v tools/lottie_suite/tests`)
 passes a frame when at most 2% (text files: 6%) of its pixels differ by
 more than 32/255.

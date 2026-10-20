@@ -40,23 +40,28 @@ Added in ovg:
 - **Recording and playback**: record a frame's commands on one thread and play
   them on the GPU thread, for parallel frame building.
 
-Two backends: a software rasterizer (no dependencies beyond prebuilt stb) and
-an SDL_GPU backend (SDL3's GPU API: Vulkan on Linux, Metal on macOS, Vulkan or
-D3D12 on Windows). The only dependencies are Odin's own `vendor` packages:
+Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
+Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Images are
+decoded and PNGs written by [odecs](https://github.com/defnotmid/odecs)
+(Odin, MIT), read through the `deps` collection: clone it next to ovg and
+build with `-collection:deps=..` (the parent of both). The other
+dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.7), `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
+git clone -b v0.0.7 https://github.com/defnotmid/odecs
 ```
 
 ```odin
-import vg "ovg"        // e.g. -collection:libs=.. then "libs:ovg"
+import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg and odecs)
+import image "deps:odecs/image"
 
 sw: vg.Software_Backend
 vg.software_backend_init(&sw)
@@ -74,7 +79,7 @@ stroke.stroke.line_width = 3
 vg.stroke_path(&c, &p, stroke)
 
 vg.flush(&c)
-vg.write_png("out.png", sw.pixels, sw.width, sw.height)
+image.write_png("out.png", sw.pixels, int(sw.width), int(sw.height))
 ```
 
 ### SDL_GPU
@@ -328,7 +333,7 @@ vg.layer_stack_end(&ls, &c)
   resvg), dominant-baseline, CSS whitespace collapsing (the XML reader trims
   bodies, so text whitespace is protected before parsing). Images: data:
   URIs and other hrefs through `Svg_Parse_Options.load_file`; raster
-  (stb_image) or SVG (its tree joins the document under a viewport group).
+  (odecs' image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
 - `svg_draw(c, ls, r, doc, transform, overrides)` draws in the document's
   `width x height` space. Effects map to one layer (opacity, path clip or
   clip-as-mask, mask, filter, blend), two when a non-path clip meets a mask;
@@ -724,15 +729,17 @@ every part follows:
 ## Test
 
 ```sh
-odin test . -vet -strict-style                        # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
+# with odecs cloned next to ovg (see Use); every build takes -collection:deps=..
+odin test . -collection:deps=.. -vet -strict-style    # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
 odin test curves -vet -strict-style                   # the curves package alone (core only)
+odin test font -vet -strict-style                     # the font reader alone (core only)
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
-odin run tools/bench -o:speed                         # CPU time and allocations per warm frame, generated workloads
-odin check sdlgpu -no-entry-point -vet -strict-style  # SDL_GPU backend
-odin run tools/sdlgpu_parity -- out_dir               # SDL_GPU vs software, headless
-odin check sdlgpu -no-entry-point -target:darwin_arm64    # macOS / Windows compile
-odin check sdlgpu -no-entry-point -target:windows_amd64
+odin run tools/bench -collection:deps=.. -o:speed     # CPU time and allocations per warm frame, generated workloads
+odin check sdlgpu -collection:deps=.. -no-entry-point -vet -strict-style  # SDL_GPU backend
+odin run tools/sdlgpu_parity -collection:deps=.. -- out_dir # SDL_GPU vs software, headless
+odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64    # macOS / Windows compile
+odin check sdlgpu -collection:deps=.. -no-entry-point -target:windows_amd64
 ./shaders/build.sh                                    # after editing ovg.slang
 ./tools/scenes/build_program.sh                       # after editing the parity scene's program.slang
 ```
@@ -747,7 +754,7 @@ by the tests and as a `Font_Collection`'s default fallback face.
 MIT, see [LICENSE](LICENSE). Third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The mascot, a chameleon (it changes colour, its tail is a spiral and its tongue a
-curve), is drawn by `tools/mascot` (`odin run tools/mascot -- assets`):
+curve), is drawn by `tools/mascot` (`odin run tools/mascot -collection:deps=.. -- assets`):
 `assets/logo.svg` keeps its skins (green, pink, blue), eyes, mouths and tongue
 as layers a script can switch by id, each colour one traced path, plus a
 hidden `silhouette` (the whole chameleon as one outline) for

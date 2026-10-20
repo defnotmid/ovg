@@ -2,11 +2,7 @@ package ovg
 
 import "core:math"
 import "core:mem"
-import "core:os"
-import "core:path/filepath"
-import "core:strings"
 import "core:testing"
-import stbi "vendor:stb/image"
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -1021,49 +1017,4 @@ test_sw_zero_length_round_half_smooth :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, u32(outside.x), u32(outside.y)), [4]u8{255, 255, 255, 255})
 	// The square side reaches the corner.
 	testing.expect_value(t, px(&s, 35, 35), [4]u8{0, 0, 0, 255})
-}
-
-@(test)
-test_write_png_round_trip :: proc(t: ^testing.T) {
-	// Noise spills over several IDAT chunks; the gradient and flat band
-	// exercise every Paeth predictor.
-	W, H :: 700, 500
-	src := make([]u8, W * H * 4)
-	defer delete(src)
-	seed := u32(1)
-	for y in 0 ..< H {
-		for x in 0 ..< W {
-			p := src[(y * W + x) * 4:][:4]
-			switch {
-			case y < 200:
-				seed = seed * 1664525 + 1013904223
-				p[0], p[1], p[2], p[3] = u8(seed >> 24), u8(seed >> 16), u8(seed >> 8), u8(seed)
-			case y < 400:
-				p[0], p[1], p[2], p[3] = u8(x), u8(y), u8(x + y), 255
-			case:
-				p[0], p[1], p[2], p[3] = 30, 60, 90, 128
-			}
-		}
-	}
-	dir, _ := os.temp_directory(context.temp_allocator)
-	path, _ := filepath.join({dir, "ovg_write_png_test.png"}, context.temp_allocator)
-	testing.expect_value(t, write_png(path, src, W, H), Error.None)
-	defer os.remove(path)
-	w, h, ch: i32
-	got := stbi.load(strings.clone_to_cstring(path, context.temp_allocator), &w, &h, &ch, 4)
-	if !testing.expect(t, got != nil) {
-		return
-	}
-	defer stbi.image_free(got)
-	testing.expect_value(t, w, W)
-	testing.expect_value(t, h, H)
-	testing.expect(t, mem.compare(got[:W * H * 4], src) == 0)
-	testing.expect_value(t, write_png(path, src, W, H + 1), Error.Unsupported_Format)
-
-	file, _ := os.read_entire_file(path, context.allocator)
-	defer delete(file)
-	mem_png, err := encode_png(src, W, H)
-	defer delete(mem_png)
-	testing.expect_value(t, err, Error.None)
-	testing.expect(t, mem.compare(mem_png, file) == 0)
 }

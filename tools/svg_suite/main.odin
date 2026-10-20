@@ -5,8 +5,8 @@
 // than `-tol` (8-bit); a test passes when at most `-frac` of its pixels
 // differ.
 //
-//     odin run tools/svg_suite -o:speed -- [-tol:24] [-frac:0.01] [-fonts:dir] [-dump:dir] [-v] dir_or_svg...
-//     odin run tools/svg_suite -o:speed -- -bench:file.svg [-n:20]
+//     odin run tools/svg_suite -collection:deps=.. -o:speed -- [-tol:24] [-frac:0.01] [-fonts:dir] [-dump:dir] [-v] dir_or_svg...
+//     odin run tools/svg_suite -collection:deps=.. -o:speed -- -bench:file.svg [-n:20]
 //
 // `-dump:dir` writes the failing renders there (for debugging; keep it out
 // of the repository). `-bench` times parsing, recording (draw calls on a
@@ -21,7 +21,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import stbi "vendor:stb/image"
+import image "deps:odecs/image"
 
 import vg "../.."
 
@@ -221,13 +221,13 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 	if perr != nil {
 		return
 	}
-	rw, rh, ch: i32
-	ref := stbi.load_from_memory(raw_data(png), i32(len(png)), &rw, &rh, &ch, 4)
-	if ref == nil {
+	ref_img, ierr := image.decode(png)
+	if ierr != nil {
 		return
 	}
-	defer stbi.image_free(ref)
-	w, h := u32(rw), u32(rh)
+	defer image.destroy_image(&ref_img)
+	ref := ref_img.pixels
+	w, h := u32(ref_img.width), u32(ref_img.height)
 
 	data, err := os.read_entire_file(svg_path, context.allocator)
 	if err != nil {
@@ -275,7 +275,7 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 	if !res.passed && opts.dump != "" {
 		os.make_directory(opts.dump)
 		name := strings.concatenate({opts.dump, "/", flat_name(opts.root, svg_path), ".png"}, context.temp_allocator)
-		vg.write_png(name, px, w, h)
+		image.write_png(name, px, int(w), int(h))
 	}
 	if opts.verbose && len(doc.warnings) > 0 {
 		for wmsg in doc.warnings {

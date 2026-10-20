@@ -38,7 +38,7 @@ kb_allocator :: proc "c" (data: rawptr, op: ^kb.allocator_op) {
 }
 
 // One (face, script) shaping setup of a shaper. `kb_font == nil` shapes
-// without OpenType (stb_truetype advances and kerning).
+// without OpenType (ovg/font advances and kerning).
 @(private)
 Shape_Config :: struct {
 	data:      rawptr, // face identity: font bytes + offset

@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:math"
 
 import vg "../.."
+import image "deps:odecs/image"
 
 W :: 256
 H :: 192
@@ -717,9 +718,9 @@ report :: proc(out_dir, name, a_tag, b_tag: string, a, b: []u8, d: Diff) -> bool
 		d.over16,
 		"ok" if ok else "MISMATCH",
 	)
-	vg.write_png(fmt.tprintf("%s/%s_%s.png", out_dir, name, a_tag), a, W, H)
-	vg.write_png(fmt.tprintf("%s/%s_%s.png", out_dir, name, b_tag), b, W, H)
-	vg.write_png(fmt.tprintf("%s/%s_diff.png", out_dir, name), d.image, W, H)
+	image.write_png(fmt.tprintf("%s/%s_%s.png", out_dir, name, a_tag), a, W, H)
+	image.write_png(fmt.tprintf("%s/%s_%s.png", out_dir, name, b_tag), b, W, H)
+	image.write_png(fmt.tprintf("%s/%s_diff.png", out_dir, name), d.image, W, H)
 	return ok
 }
 
