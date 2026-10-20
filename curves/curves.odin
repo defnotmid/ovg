@@ -31,8 +31,8 @@
 // the scale and origin back to source units.
 //
 // The mean coverage is the fraction of the bounds the shape fills (non-zero
-// rule, from a 32 x 32 grid of `winding` samples): what a pixel tends to as
-// its footprint grows past a band and the rays miss curves (`fade`).
+// rule, from a 32 x 32 grid of `winding` samples): what a pixel covering the
+// whole shape sees, where the rays through its center alias (`fade`).
 package curves
 
 import "core:math"
@@ -438,8 +438,9 @@ coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: b
 // the shape's axes, so this is exact for scales and translations; under a
 // rotation the box is wider than the pixel (up to sqrt 2 at 45 degrees:
 // slightly softer edges), and at grazing angles in 3D one axis grows long,
-// softening edges along it, until the footprint passes a band and the rays
-// miss curves: then `fade` to the mean.
+// softening edges along it. Band size does not matter (a ray meets every
+// curve on its line however fine the bands); a footprint near the shape's
+// own size aliases: then `fade` to the mean.
 footprint_of :: proc "contextless" (j: matrix[2, 2]f32) -> Vec2 {
 	return {abs(j[0, 0]) + abs(j[0, 1]), abs(j[1, 0]) + abs(j[1, 1])}
 }
@@ -449,11 +450,13 @@ coverage_jacobian :: proc "contextless" (s: []u32, rc: Vec2, j: matrix[2, 2]f32,
 	return coverage(s, rc, footprint_of(j), even_odd)
 }
 
-// `cov` blended toward the shape's mean coverage as the footprint grows from
-// one to two bands (along either axis), where rays start missing curves.
+// `cov` blended toward the shape's mean coverage as the footprint grows
+// from half the shape's size to all of it (along either axis): there one
+// sample's rays alias the whole shape.
 fade :: proc "contextless" (s: []u32, cov: f32, footprint: Vec2) -> f32 {
-	bands := max(footprint.x * transmute(f32)s[2], footprint.y * transmute(f32)s[3])
-	t := clamp(bands - 1, 0, 1)
+	size := Vec2{transmute(f32)s[10], transmute(f32)s[11]}
+	k := max(footprint.x / max(size.x, 1e-6), footprint.y / max(size.y, 1e-6))
+	t := clamp(2 * k - 1, 0, 1)
 	return cov + (mean_coverage(s) - cov) * t
 }
 

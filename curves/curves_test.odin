@@ -87,9 +87,10 @@ test_footprint :: proc(t: ^testing.T) {
 	c := math.cos(f32(math.PI / 4)) * s
 	rot := matrix[2, 2]f32{c, -c, c, c}
 	testing.expect(t, abs(footprint_of(rot).x - math.SQRT_TWO * s) < 1e-6)
-	// Minified past two bands, coverage is the shape's mean.
-	far := Vec2{1, 1} * 2.5 / transmute(f32)words[2]
-	testing.expect_value(t, fade(words, 0.25, far), mean_coverage(words))
+	// A pixel the size of the whole shape sees its mean; below half the
+	// shape's size coverage is left alone, however fine the bands.
+	testing.expect_value(t, fade(words, 0.25, {1, 1}), mean_coverage(words))
+	testing.expect_value(t, fade(words, 0.25, {0.4, 0.4}), 0.25)
 	testing.expect_value(t, fade(words, 0.25, {s, s}), 0.25)
 }
 
