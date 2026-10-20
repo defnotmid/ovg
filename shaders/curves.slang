@@ -1,8 +1,7 @@
 // The GPU twin of ovg's curves package (curves/curves.odin): exact
 // coverage of a pixel's footprint (a box, or any parallelogram) by a shape's
-// monotone quadratic curves in horizontal bands (the bands are Eric
-// Lengyel's Slug, JCGT 2017; MIT, patent public domain). The same
-// arithmetic, except that a pixel's crossing curves are integrated after
+// monotone quadratic pieces in a grid of cells with backdrops. The same
+// arithmetic, except that a pixel's crossing pieces are integrated after
 // the scan (see curves_coverage), so sums may round differently. `words`
 // holds any number of shapes; `s` is a shape's first word. The layout is
 // documented in curves.odin.
@@ -14,17 +13,59 @@ float2 curves_point(StructuredBuffer<uint> words, uint c, float2 rc) {
     return float2(curves_f(words, c), curves_f(words, c + 1)) - rc;
 }
 
-int curves_band_of(StructuredBuffer<uint> words, uint s, float y) {
-    return clamp(int(y * curves_f(words, s + 3) + curves_f(words, s + 5)), 0, int(words[s]) - 1);
+// The cells a footprint covers (columns x, rows y, clamped to the grid) and
+// the grid's size.
+struct Curves_Span {
+    int nx, ny, i0, i1, j0, j1;
+    float y0, y1;
+};
+
+Curves_Span curves_span(StructuredBuffer<uint> words, uint s, float2 rc, float x0, float x1, float y0, float y1) {
+    Curves_Span g;
+    g.nx = int(words[s]);
+    g.ny = int(words[s + 1]);
+    float cw = curves_f(words, s + 2);
+    float ch = curves_f(words, s + 3);
+    g.i0 = clamp(int(floor((rc.x + x0) / cw)), 0, g.nx - 1);
+    g.i1 = clamp(int(floor((rc.x + x1) / cw)), 0, g.nx - 1);
+    g.j0 = clamp(int(floor((rc.y + y0) / ch)), 0, g.ny - 1);
+    g.j1 = clamp(int(floor((rc.y + y1) / ch)), 0, g.ny - 1);
+    g.y0 = y0;
+    g.y1 = y1;
+    return g;
 }
 
-// The rows of `band` it answers for, clipped to [y0, y1] (relative to ry).
-float2 curves_band_rows(StructuredBuffer<uint> words, uint s, int band, float ry, float y0, float y1) {
-    float scale = curves_f(words, s + 3);
-    float offset = curves_f(words, s + 5);
-    float lo = band == 0 ? y0 : max(y0, (float(band) - offset) / scale - ry);
-    float hi = band == int(words[s]) - 1 ? y1 : min(y1, (float(band + 1) - offset) / scale - ry);
-    return float2(lo, hi);
+// Row j's part of the footprint's rows (xy; the first and last rows reach
+// out) and the row's own extent (zw), relative to ry.
+float4 curves_rows(StructuredBuffer<uint> words, uint s, Curves_Span g, int j, float ry) {
+    float ch = curves_f(words, s + 3);
+    float rlo = float(j) * ch - ry;
+    float rhi = float(j + 1) * ch - ry;
+    return float4(j == 0 ? g.y0 : max(g.y0, rlo), j == g.ny - 1 ? g.y1 : min(g.y1, rhi), rlo, rhi);
+}
+
+uint curves_cell(uint s, Curves_Span g, int i, int j) {
+    return s + 12 + 4 * uint(j * g.nx + i);
+}
+
+// The integral over rows [a, b] (relative to ry) of the cell's backdrop.
+float curves_backdrop_box(StructuredBuffer<uint> words, uint s, uint cell, float ry, float a, float b) {
+    if (a >= b) return 0.0;
+    int v = int(words[cell + 2]);
+    uint n = words[cell + 1] >> 16;
+    uint at = s + words[cell + 3];
+    float area = 0.0;
+    float pos = a;
+    for (uint k = 0; k < n; k++) {
+        float y = curves_f(words, at + 2 * k) - ry;
+        if (y >= b) break;
+        if (y > a) {
+            area += float(v) * (y - pos);
+            pos = y;
+        }
+        v += int(words[at + 2 * k + 1]);
+    }
+    return area + float(v) * (b - pos);
 }
 
 // t in [0, 1] where a t^2 + b t + c = v, for a coordinate monotone on
@@ -115,52 +156,52 @@ float curves_box_curve(StructuredBuffer<uint> words, uint c, float2 rc, float ca
 
 // Exact coverage of the axis-aligned box `footprint` centered at `rc`: a
 // pixel without rotation or skew (curves_coverage_affine for the others).
-// The scan only sums the curves wholly right of the box and keeps the few
-// crossing it, integrated after: pixels running together then do their
-// integrations together instead of each stalling the others' scans.
+// Its cells' pieces wholly right of it are summed as found and the few
+// crossing it kept, integrated after: pixels running together then
+// integrate together instead of each stalling the others' scans.
 float curves_coverage(StructuredBuffer<uint> words, uint s, float2 rc, float2 footprint, bool even_odd) {
     float fx = footprint.x;
     float fy = footprint.y;
     if (fx <= 0.0 || fy <= 0.0) return 0.0;
     float x0 = -0.5 * fx;
     float x1 = 0.5 * fx;
-    float y0 = -0.5 * fy;
-    float y1 = 0.5 * fy;
+    Curves_Span g = curves_span(words, s, rc, x0, x1, -0.5 * fy, 0.5 * fy);
     uint curves = s + words[s + 6];
     float area = 0.0;
-    // Up to two crossing curves: word offsets and rows.
+    // Up to two crossing pieces: word offsets and rows.
     uint2 kept = uint2(0, 0);
     float2 kept_a = float2(0, 0);
     float2 kept_b = float2(0, 0);
     int n = 0;
-    int b_hi = curves_band_of(words, s, rc.y + y1);
-    for (int band = curves_band_of(words, s, rc.y + y0); band <= b_hi; band++) {
-        float2 rows = curves_band_rows(words, s, band, rc.y, y0, y1);
+    for (int j = g.j0; j <= g.j1; j++) {
+        float4 rows = curves_rows(words, s, g, j, rc.y);
         if (rows.x >= rows.y) continue;
-        uint hb = s + 12 + 2 * uint(band);
-        uint list = s + words[hb + 1];
-        uint count = words[hb];
-        for (uint k = 0; k < count; k++) {
-            uint c = curves + 6 * words[list + k];
-            float x1c = curves_f(words, c) - rc.x;
-            float y1c = curves_f(words, c + 1) - rc.y;
-            float x3c = curves_f(words, c + 4) - rc.x;
-            float y3c = curves_f(words, c + 5) - rc.y;
-            if (max(x1c, x3c) <= x0) break;
-            float ca = max(rows.x, min(y1c, y3c));
-            float cb = min(rows.y, max(y1c, y3c));
-            if (ca >= cb) continue;
-            if (min(x1c, x3c) >= x1) {
-                area += (y3c > y1c ? fx : -fx) * (cb - ca);
-            } else if (n < 2) {
-                kept[n] = c;
-                kept_a[n] = ca;
-                kept_b[n] = cb;
-                n++;
-            } else {
-                area += curves_box_curve(words, c, rc, ca, cb, x0, x1);
+        for (int i = g.i0; i <= g.i1; i++) {
+            uint cell = curves_cell(s, g, i, j);
+            uint list = s + words[cell];
+            uint count = words[cell + 1] & 0xffffu;
+            for (uint k = 0; k < count; k++) {
+                uint c = curves + 6 * words[list + k];
+                float x1c = curves_f(words, c) - rc.x;
+                float y1c = curves_f(words, c + 1) - rc.y;
+                float x3c = curves_f(words, c + 4) - rc.x;
+                float y3c = curves_f(words, c + 5) - rc.y;
+                float ca = max(rows.x, min(y1c, y3c));
+                float cb = min(rows.y, max(y1c, y3c));
+                if (ca >= cb || max(x1c, x3c) <= x0) continue;
+                if (min(x1c, x3c) >= x1) {
+                    area += (y3c > y1c ? fx : -fx) * (cb - ca);
+                } else if (n < 2) {
+                    kept[n] = c;
+                    kept_a[n] = ca;
+                    kept_b[n] = cb;
+                    n++;
+                } else {
+                    area += curves_box_curve(words, c, rc, ca, cb, x0, x1);
+                }
             }
         }
+        area += fx * curves_backdrop_box(words, s, curves_cell(s, g, g.i1, j), rc.y, max(rows.x, rows.z), min(rows.y, rows.w));
     }
     for (int i = 0; i < n; i++) {
         area += curves_box_curve(words, kept[i], rc, kept_a[i], kept_b[i], x0, x1);
@@ -302,6 +343,27 @@ float curves_footprint_piece(Curves_Footprint fp, int k, Curves_Quadratic q, flo
     return area;
 }
 
+// The integral over rows [a, b] (relative to ry) of the cell's backdrop
+// times the footprint's slice widths.
+float curves_backdrop_fp(StructuredBuffer<uint> words, uint s, uint cell, float ry, float a, float b, Curves_Footprint fp) {
+    if (a >= b) return 0.0;
+    int v = int(words[cell + 2]);
+    uint n = words[cell + 1] >> 16;
+    uint at = s + words[cell + 3];
+    float area = 0.0;
+    float pos = a;
+    for (uint k = 0; k < n; k++) {
+        float y = curves_f(words, at + 2 * k) - ry;
+        if (y >= b) break;
+        if (y > a) {
+            area += float(v) * (curves_width_below(fp, y) - curves_width_below(fp, pos));
+            pos = y;
+        }
+        v += int(words[at + 2 * k + 1]);
+    }
+    return area + float(v) * (curves_width_below(fp, b) - curves_width_below(fp, pos));
+}
+
 // The area a curve crossing the footprint adds over its rows [ca, cb]: its
 // parameters at the rows' ends and where they cross the pieces'
 // boundaries (no solve where those coincide), then each piece.
@@ -324,41 +386,43 @@ float curves_coverage_affine(StructuredBuffer<uint> words, uint s, float2 rc, fl
     }
     Curves_Footprint fp;
     if (!curves_footprint_parallelogram(u, v, fp)) return 0.0;
+    Curves_Span g = curves_span(words, s, rc, fp.xmin, fp.xmax, -fp.h0, fp.h0);
     uint curves = s + words[s + 6];
     float area = 0.0;
-    // Up to two crossing curves, integrated after the scan (as curves_coverage).
+    // Up to two crossing pieces, integrated after the scan (as curves_coverage).
     uint2 kept = uint2(0, 0);
     float2 kept_a = float2(0, 0);
     float2 kept_b = float2(0, 0);
     int n = 0;
-    int b_hi = curves_band_of(words, s, rc.y + fp.h0);
-    for (int band = curves_band_of(words, s, rc.y - fp.h0); band <= b_hi; band++) {
-        float2 rows = curves_band_rows(words, s, band, rc.y, -fp.h0, fp.h0);
+    for (int j = g.j0; j <= g.j1; j++) {
+        float4 rows = curves_rows(words, s, g, j, rc.y);
         if (rows.x >= rows.y) continue;
-        uint hb = s + 12 + 2 * uint(band);
-        uint list = s + words[hb + 1];
-        uint count = words[hb];
-        for (uint k = 0; k < count; k++) {
-            uint c = curves + 6 * words[list + k];
-            float2 p1 = curves_point(words, c, rc);
-            float2 p2 = curves_point(words, c + 2, rc);
-            float2 p3 = curves_point(words, c + 4, rc);
-            float cxmax = max(p1.x, p3.x);
-            if (cxmax <= fp.xmin) break;
-            float ca = max(rows.x, min(p1.y, p3.y));
-            float cb = min(rows.y, max(p1.y, p3.y));
-            if (ca >= cb) continue;
-            if (min(p1.x, p3.x) >= fp.xmax) {
-                area += (p3.y > p1.y ? 1.0 : -1.0) * (curves_width_below(fp, cb) - curves_width_below(fp, ca));
-            } else if (n < 2) {
-                kept[n] = c;
-                kept_a[n] = ca;
-                kept_b[n] = cb;
-                n++;
-            } else {
-                area += curves_affine_curve(words, c, rc, fp, ca, cb);
+        for (int i = g.i0; i <= g.i1; i++) {
+            uint cell = curves_cell(s, g, i, j);
+            uint list = s + words[cell];
+            uint count = words[cell + 1] & 0xffffu;
+            for (uint k = 0; k < count; k++) {
+                uint c = curves + 6 * words[list + k];
+                float x1c = curves_f(words, c) - rc.x;
+                float y1c = curves_f(words, c + 1) - rc.y;
+                float x3c = curves_f(words, c + 4) - rc.x;
+                float y3c = curves_f(words, c + 5) - rc.y;
+                float ca = max(rows.x, min(y1c, y3c));
+                float cb = min(rows.y, max(y1c, y3c));
+                if (ca >= cb || max(x1c, x3c) <= fp.xmin) continue;
+                if (min(x1c, x3c) >= fp.xmax) {
+                    area += (y3c > y1c ? 1.0 : -1.0) * (curves_width_below(fp, cb) - curves_width_below(fp, ca));
+                } else if (n < 2) {
+                    kept[n] = c;
+                    kept_a[n] = ca;
+                    kept_b[n] = cb;
+                    n++;
+                } else {
+                    area += curves_affine_curve(words, c, rc, fp, ca, cb);
+                }
             }
         }
+        area += curves_backdrop_fp(words, s, curves_cell(s, g, g.i1, j), rc.y, max(rows.x, rows.z), min(rows.y, rows.w), fp);
     }
     for (int i = 0; i < n; i++) {
         area += curves_affine_curve(words, kept[i], rc, fp, kept_a[i], kept_b[i]);
@@ -388,21 +452,27 @@ float curves_fade(StructuredBuffer<uint> words, uint s, float cov, float2 footpr
 // The winding number at `p` (shape units): signed crossings of the ray
 // toward +x (non-zero: != 0; even-odd: odd). For sample masks.
 int curves_winding(StructuredBuffer<uint> words, uint s, float2 p) {
-    int band = curves_band_of(words, s, p.y);
+    if (p.x >= curves_f(words, s + 10) || p.y < 0.0 || p.y >= curves_f(words, s + 11)) return 0;
+    Curves_Span g = curves_span(words, s, p, 0.0, 0.0, 0.0, 0.0);
+    uint cell = curves_cell(s, g, g.i0, g.j0);
+    // The backdrop at p.y, then the cell's pieces right of p.
+    int w = int(words[cell + 2]);
+    uint at = s + words[cell + 3];
+    uint steps = words[cell + 1] >> 16;
+    for (uint k = 0; k < steps; k++) {
+        if (curves_f(words, at + 2 * k) <= p.y) w += int(words[at + 2 * k + 1]);
+    }
     uint curves = s + words[s + 6];
-    uint hb = s + 12 + 2 * uint(band);
-    uint list = s + words[hb + 1];
-    uint count = words[hb];
-    int w = 0;
+    uint list = s + words[cell];
+    uint count = words[cell + 1] & 0xffffu;
     for (uint k = 0; k < count; k++) {
         uint c = curves + 6 * words[list + k];
         float2 p1 = curves_point(words, c, p);
         float2 p2 = curves_point(words, c + 2, p);
         float2 p3 = curves_point(words, c + 4, p);
-        if (max(p1.x, p3.x) <= 0.0) break;
         float lo = min(p1.y, p3.y);
         float hi = max(p1.y, p3.y);
-        if (0.0 < lo || 0.0 >= hi) continue;
+        if (0.0 < lo || 0.0 >= hi || max(p1.x, p3.x) <= 0.0) continue;
         float t = curves_solve_monotone(p1.y - 2.0 * p2.y + p3.y, 2.0 * (p2.y - p1.y), p1.y, 0.0);
         if (((p1.x - 2.0 * p2.x + p3.x) * t + 2.0 * (p2.x - p1.x)) * t + p1.x > 0.0) {
             w += p3.y > p1.y ? 1 : -1;

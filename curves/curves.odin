@@ -1,20 +1,26 @@
 // Shapes as curves for exact per-pixel coverage. Core only: ovg's shapes
 // (shape.odin) and other renderers share it, and shaders/curves.slang is its
-// GPU twin, step for step.
+// GPU twin.
 //
-// A shape is quadratic Bézier curves, each split so it is monotone in x and
-// in y, listed in horizontal bands (Eric Lengyel's Slug: JCGT 2017,
-// reference shaders MIT, patent dedicated to the public domain). A pixel's
-// coverage is the area of its footprint inside the shape, integrated in
-// closed form: the footprint is the parallelogram the pixel's sides map to
-// in shape units (an axis-aligned box under scales and translations, the
-// fast case: `coverage`; `coverage_affine` for the rest), and by Green's
-// theorem that area is the sum, over the curves crossing the footprint's
-// rows, of the length of each row left of the crossing. A curve wholly
-// right of the footprint adds its rows' full width (no root finding); only
-// the few curves through it need solving, and the integral over each piece
-// is a polynomial. Exact for any affine footprint (rotation, skew, the
-// anisotropic footprints of 3D), up to the non-zero rule where contours
+// A shape is quadratic Bézier curves split so each is monotone in x and y,
+// then cut at the vertical lines of a grid of cells, so every piece lies in
+// one column. A cell lists the pieces crossing it and its backdrop: the
+// winding number just right of its right edge, as it varies over the
+// cell's rows (a value at the bottom and the steps where curves cross the
+// edge; nothing else changes it).
+//
+// A pixel's coverage is the area of its footprint inside the shape: the
+// parallelogram the pixel's sides span in shape units (an axis-aligned box
+// under scales and translations: `coverage`; `coverage_affine` for the
+// rest). By Green's theorem that area is the sum, over the curves crossing
+// the footprint's rows, of the length of each row left of the crossing. In
+// a row of cells the curves right of the footprint's last column add the
+// backdrop times the rows' widths, a closed form; only the pieces in the
+// cells the footprint covers are integrated (in closed form too), and only
+// the few crossing the footprint need root finding. So a pixel's cost is
+// the pieces near it, not the shape's size, and an interior pixel reads its
+// cell and nothing more. Exact for any affine footprint (rotation, skew,
+// the anisotropic footprints of 3D), up to the non-zero rule where contours
 // overlap within the pixel: the signed area counts an overlap twice.
 //
 // A built shape is one block of 32-bit words, read as is from a storage
@@ -22,21 +28,22 @@
 // every offset is relative to the shape's first word, so one buffer holds
 // many shapes:
 //
-//	[0] band count                [1] 0 (reserved)
-//	[2] 0 (reserved)              [3] band scale (f32)
-//	[4] 0 (reserved)              [5] band offset (f32)
+//	[0] columns nx                [1] rows ny
+//	[2] cell width (f32)          [3] cell height (f32)
+//	[4] 0 (reserved)              [5] 0 (reserved)
 //	[6] word offset of the curves [7] mean coverage (f32)
 //	[8..11] bounds min x, min y, max x, max y (f32)
-//	[12..] each band: curve count, word offset of its curve list; then the
-//	       lists (curve indices by descending max x); then the curves, six
-//	       f32 each (p1, p2, p3), each monotone in x and y (p2 within the box
-//	       of p1 and p3).
+//	[12..] each cell, row by row: word offset of its piece list, piece
+//	       count | step count << 16, backdrop at its bottom (i32), word
+//	       offset of its steps; then the lists (piece indices), the steps
+//	       (y f32, change i32: the backdrop is the bottom value plus the
+//	       changes at or below y), and the pieces, six f32 each (p1, p2, p3;
+//	       p2 within the box of p1 and p3).
 //
-// Band `i` holds the curves crossing y in [i / scale, (i + 1) / scale]
-// (plus 1/1024 of the shape's height either side); the first and last bands
-// reach out to infinity. Curves are in shape units: the source scaled so the
-// shape's larger side is 1 (bounds start at 0); `build` returns the scale
-// and origin back to source units.
+// Cell (i, j) spans x in [i, i + 1] * width, y in [j, j + 1] * height;
+// pieces are in shape units: the source scaled so the shape's larger side is
+// 1 (bounds start at 0); `build` returns the scale and origin back to source
+// units. A piece is listed in every row it crosses.
 //
 // The mean coverage is the fraction of the bounds the shape fills (exact,
 // non-zero): what a pixel covering the whole shape sees (`fade`).
@@ -52,7 +59,8 @@ Curve :: struct {
 }
 
 HEADER :: 12
-MAX_BANDS :: 32
+// Columns or rows at most.
+MAX_CELLS :: 16
 
 // ---- building -------------------------------------------------------------------
 
@@ -204,56 +212,131 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 	}
 	origin = lo
 	inv := 1 / extent
-	curves := make([]Curve, len(mono), context.temp_allocator)
-	for c, i in mono {
-		curves[i] = {(c.p1 - lo) * inv, (c.p2 - lo) * inv, (c.p3 - lo) * inv}
+	for &c in mono {
+		c = {(c.p1 - lo) * inv, (c.p2 - lo) * inv, (c.p3 - lo) * inv}
 	}
 	size := (hi - lo) * inv
 
-	count := band_count(curves, size.y)
-	scale := f32(count) / max(size.y, 1e-6)
-	lists := make([][dynamic]u32, count, context.temp_allocator)
-	eps := size.y / 1024
+	// The grid: the cell size (of n per unit) keeping the fullest cell
+	// smallest, fewer cells on a tie.
+	nx, ny: int
+	cw, ch: f32
+	pieces: [dynamic]Curve
+	best := max(int)
+	for n in 1 ..= MAX_CELLS {
+		cx, cy := max(1, int(math.ceil(size.x * f32(n) - 1e-4))), max(1, int(math.ceil(size.y * f32(n) - 1e-4)))
+		w, h := size.x / f32(cx), size.y / f32(cy)
+		split := make([dynamic]Curve, context.temp_allocator)
+		for c in mono {
+			split_columns(c, w, cx, &split)
+		}
+		counts := make([]int, cx * cy, context.temp_allocator)
+		for c in split {
+			i, j0, j1, crosses := piece_cells(c, w, h, cx, cy)
+			if !crosses {
+				continue
+			}
+			for j in j0 ..= j1 {
+				counts[j * cx + i] += 1
+			}
+		}
+		fullest := slice.max(counts)
+		if fullest < best {
+			best, nx, ny, cw, ch, pieces = fullest, cx, cy, w, h, split
+		}
+		if fullest <= 6 {
+			break
+		}
+	}
+
+	cells := nx * ny
+	lists := make([][dynamic]u32, cells, context.temp_allocator)
 	for &l in lists {
 		l = make([dynamic]u32, context.temp_allocator)
 	}
-	for c, i in curves {
-		c0, c1 := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
-		if c0 == c1 {
-			continue // horizontal: crosses no row
+	for c, k in pieces {
+		i, j0, j1, crosses := piece_cells(c, cw, ch, nx, ny)
+		if !crosses {
+			continue
 		}
-		for band in 0 ..< count {
-			if c1 >= f32(band) / scale - eps && c0 <= f32(band + 1) / scale + eps {
-				append(&lists[band], u32(i))
+		for j in j0 ..= j1 {
+			append(&lists[j * nx + i], u32(k))
+		}
+	}
+	// Backdrops: per row, the pieces in the columns right of each cell,
+	// as a bottom value and the steps at their ends inside the row (the
+	// steps of joined ends cancel, so only edge crossings remain).
+	Step :: struct {
+		y:     f32,
+		delta: i32,
+	}
+	backdrop := make([]i32, cells, context.temp_allocator)
+	steps := make([][dynamic]Step, cells, context.temp_allocator)
+	for j in 0 ..< ny {
+		y0, y1 := f32(j) * ch, f32(j + 1) * ch
+		bottom: i32
+		ends := make([dynamic]Step, context.temp_allocator)
+		for i := nx - 1; i >= 0; i -= 1 {
+			k := j * nx + i
+			backdrop[k] = bottom
+			slice.sort_by(ends[:], proc(a, b: Step) -> bool {return a.y < b.y})
+			steps[k] = make([dynamic]Step, context.temp_allocator)
+			for e in ends {
+				if n := len(steps[k]); n > 0 && steps[k][n - 1].y == e.y {
+					steps[k][n - 1].delta += e.delta
+				} else {
+					append(&steps[k], e)
+				}
+			}
+			for n := 0; n < len(steps[k]); {
+				if steps[k][n].delta == 0 {
+					ordered_remove(&steps[k], n)
+				} else {
+					n += 1
+				}
+			}
+			// Then this column's pieces join the ones right of the next cell.
+			for p in lists[k] {
+				c := pieces[p]
+				clo, chi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
+				dir: i32 = 1 if c.p3.y > c.p1.y else -1
+				if clo <= y0 && y0 < chi {
+					bottom += dir
+				}
+				if clo > y0 && clo < y1 {
+					append(&ends, Step{clo, dir})
+				}
+				if chi > y0 && chi < y1 {
+					append(&ends, Step{chi, -dir})
+				}
 			}
 		}
 	}
-	for l in lists {
-		context.user_ptr = raw_data(curves)
-		slice.sort_by(l[:], proc(x, y: u32) -> bool {
-			curves := ([^]Curve)(context.user_ptr)
-			mx := max(curves[x].p1.x, curves[x].p3.x)
-			my := max(curves[y].p1.x, curves[y].p3.x)
-			return mx > my || (mx == my && x < y)
-		})
-	}
 
-	n := HEADER + 2 * count + 6 * len(curves)
-	for l in lists {
-		n += len(l)
+	n := HEADER + 4 * cells + 6 * len(pieces)
+	for k in 0 ..< cells {
+		n += len(lists[k]) + 2 * len(steps[k])
 	}
 	d := make([]u32, n, allocator)
-	d[0] = u32(count)
-	d[3] = transmute(u32)scale
+	d[0], d[1] = u32(nx), u32(ny)
+	d[2], d[3] = transmute(u32)cw, transmute(u32)ch
 	d[8], d[9], d[10], d[11] = 0, 0, transmute(u32)size.x, transmute(u32)size.y
-	at := HEADER + 2 * count
-	for l, band in lists {
-		d[HEADER + 2 * band], d[HEADER + 2 * band + 1] = u32(len(l)), u32(at)
-		copy(d[at:], l[:])
-		at += len(l)
+	at := HEADER + 4 * cells
+	for k in 0 ..< cells {
+		cell := d[HEADER + 4 * k:][:4]
+		cell[0] = u32(at)
+		cell[1] = u32(len(lists[k])) | u32(len(steps[k])) << 16
+		cell[2] = u32(backdrop[k])
+		copy(d[at:], lists[k][:])
+		at += len(lists[k])
+		cell[3] = u32(at)
+		for e in steps[k] {
+			d[at], d[at + 1] = transmute(u32)e.y, u32(e.delta)
+			at += 2
+		}
 	}
 	d[6] = u32(at)
-	for c in curves {
+	for c in pieces {
 		w := transmute([6]u32)[6]f32{c.p1.x, c.p1.y, c.p2.x, c.p2.y, c.p3.x, c.p3.y}
 		copy(d[at:][:6], w[:])
 		at += 6
@@ -288,46 +371,73 @@ split_monotone :: proc(c: Curve, out: ^[dynamic]Curve) {
 	for i in 0 ..= n {
 		piece := rest
 		if i < n {
-			t := (ts[i] - done) / (1 - done)
-			m1 := rest.p1 + (rest.p2 - rest.p1) * t
-			m2 := rest.p2 + (rest.p3 - rest.p2) * t
-			m := m1 + (m2 - m1) * t
-			piece = {rest.p1, m1, m}
-			rest = {m, m2, rest.p3}
+			piece, rest = split_at(rest, (ts[i] - done) / (1 - done))
 			done = ts[i]
 		}
-		for axis in 0 ..< 2 {
-			lo, hi := min(piece.p1[axis], piece.p3[axis]), max(piece.p1[axis], piece.p3[axis])
-			piece.p2[axis] = clamp(piece.p2[axis], lo, hi)
-		}
-		append(out, piece)
+		append(out, pin(piece))
 	}
 }
 
-// The band count (1 to MAX_BANDS) that keeps the fullest band smallest;
-// fewer bands on a tie.
+// Appends a monotone `c` cut where it crosses the lines x = k * w, the cut
+// points put exactly on the lines.
 @(private = "file")
-band_count :: proc(curves: []Curve, size: f32) -> int {
-	best, best_max := 1, len(curves) + 1
-	counts: [MAX_BANDS]int
-	for n in 1 ..= min(MAX_BANDS, max(1, len(curves) / 2)) {
-		scale := f32(n) / max(size, 1e-6)
-		eps := size / 1024
-		counts = {}
-		for c in curves {
-			lo, hi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
-			b0 := clamp(int(math.floor((lo - eps) * scale)), 0, n - 1)
-			b1 := clamp(int(math.floor((hi + eps) * scale)), 0, n - 1)
-			for b in b0 ..= b1 {
-				counts[b] += 1
-			}
+split_columns :: proc(c: Curve, w: f32, nx: int, out: ^[dynamic]Curve) {
+	forward := c.p3.x >= c.p1.x
+	lo, hi := min(c.p1.x, c.p3.x), max(c.p1.x, c.p3.x)
+	q := quadratic(c.p1, c.p2, c.p3)
+	rest := c
+	done: f32 = 0
+	k0, k1 := int(math.floor(lo / w)) + 1, min(int(math.ceil(hi / w)) - 1, nx - 1)
+	for m in 0 ..= k1 - k0 {
+		k := k0 + m if forward else k1 - m
+		xv := f32(k) * w
+		if xv <= lo || xv >= hi {
+			continue
 		}
-		m := slice.max(counts[:n])
-		if m < best_max {
-			best, best_max = n, m
+		t := solve_monotone(q.A, q.B, q.C, xv)
+		if t <= done || t >= 1 {
+			continue
 		}
+		piece: Curve
+		piece, rest = split_at(rest, (t - done) / (1 - done))
+		piece.p3.x, rest.p1.x = xv, xv
+		append(out, pin(piece))
+		done = t
 	}
-	return best
+	append(out, pin(rest))
+}
+
+@(private = "file")
+split_at :: #force_inline proc "contextless" (c: Curve, t: f32) -> (a, b: Curve) {
+	m1 := c.p1 + (c.p2 - c.p1) * t
+	m2 := c.p2 + (c.p3 - c.p2) * t
+	m := m1 + (m2 - m1) * t
+	return {c.p1, m1, m}, {m, m2, c.p3}
+}
+
+// `c` with its control point inside its endpoints' box.
+@(private = "file")
+pin :: #force_inline proc "contextless" (c: Curve) -> Curve {
+	c := c
+	for axis in 0 ..< 2 {
+		lo, hi := min(c.p1[axis], c.p3[axis]), max(c.p1[axis], c.p3[axis])
+		c.p2[axis] = clamp(c.p2[axis], lo, hi)
+	}
+	return c
+}
+
+// A piece's column and the rows it crosses; false for a horizontal piece
+// (it crosses no row).
+@(private = "file")
+piece_cells :: proc "contextless" (c: Curve, w, h: f32, nx, ny: int) -> (i, j0, j1: int, crosses: bool) {
+	lo, hi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
+	if lo == hi {
+		return
+	}
+	i = clamp(int(math.floor(0.5 * (c.p1.x + c.p3.x) / w)), 0, nx - 1)
+	j0 = clamp(int(math.floor(lo / h)), 0, ny - 1)
+	j1 = clamp(int(math.ceil(hi / h)) - 1, j0, ny - 1)
+	return i, j0, j1, true
 }
 
 // ---- reading (mirrored by shaders/curves.slang) ------------------------------------
@@ -342,19 +452,45 @@ mean_coverage :: proc "contextless" (s: []u32) -> f32 {
 	return transmute(f32)s[7]
 }
 
-// The band holding row y, clamped to the shape's bands.
-band_of :: #force_inline proc "contextless" (s: []u32, y: f32) -> i32 {
-	return clamp(i32(y * transmute(f32)s[3] + transmute(f32)s[5]), 0, i32(s[0]) - 1)
+// The integral over rows [a, b] (relative to `ry`, within the cell's rows)
+// of the cell's backdrop, weighted by `w(y)`: the footprint's slice width
+// (`width_below` differences), or a box's constant width.
+@(private)
+backdrop_integral :: #force_inline proc "contextless" (s: []u32, cell: u32, ry, a, b: f32, fp: ^Footprint, box_width: f32) -> f32 {
+	if a >= b {
+		return 0
+	}
+	v := i32(s[cell + 2])
+	n := s[cell + 1] >> 16
+	at := s[cell + 3]
+	k: u32
+	for k < n && transmute(f32)s[at + 2 * k] - ry <= a {
+		v += i32(s[at + 2 * k + 1])
+		k += 1
+	}
+	area: f32
+	pos := a
+	for k < n {
+		y := transmute(f32)s[at + 2 * k] - ry
+		if y >= b {
+			break
+		}
+		area += f32(v) * span_width(fp, box_width, pos, y)
+		v += i32(s[at + 2 * k + 1])
+		pos = y
+		k += 1
+	}
+	return area + f32(v) * span_width(fp, box_width, pos, b)
 }
 
-// The rows [lo, hi] of `band` that it answers for, clipped to [y0, y1]
-// (shape units relative to `ry`): the first and last bands reach out.
+// The footprint's area between rows a and b: a box's width times b - a,
+// or the parallelogram's slices.
 @(private)
-band_rows :: #force_inline proc "contextless" (s: []u32, band: i32, ry, y0, y1: f32) -> (lo, hi: f32) {
-	scale, offset := transmute(f32)s[3], transmute(f32)s[5]
-	lo = y0 if band == 0 else max(y0, (f32(band) - offset) / scale - ry)
-	hi = y1 if band == i32(s[0]) - 1 else min(y1, (f32(band + 1) - offset) / scale - ry)
-	return
+span_width :: #force_inline proc "contextless" (fp: ^Footprint, box_width, a, b: f32) -> f32 {
+	if fp == nil {
+		return box_width * (b - a)
+	}
+	return width_below(fp^, b) - width_below(fp^, a)
 }
 
 // t in [0, 1] where q(t) = a t^2 + b t + c equals v, for a coordinate
@@ -406,62 +542,96 @@ coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: b
 		return 0
 	}
 	x0, x1 := -0.5 * fx, 0.5 * fx
-	y0, y1 := -0.5 * fy, 0.5 * fy
-	curves := s[6]
+	g := grid_span(s, rc, x0, x1, -0.5 * fy, 0.5 * fy)
 	area: f32
-	for band in band_of(s, rc.y + y0) ..= band_of(s, rc.y + y1) {
-		ylo, yhi := band_rows(s, band, rc.y, y0, y1)
+	for j in g.j0 ..= g.j1 {
+		ylo, yhi, rlo, rhi := grid_rows(s, g, j, rc.y)
 		if ylo >= yhi {
 			continue
 		}
-		hb := HEADER + 2 * u32(band)
-		list := s[hb + 1]
-		for k in 0 ..< s[hb] {
-			c := curves + 6 * s[list + k]
-			p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
-			p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
-			p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
-			cxmax := max(p1.x, p3.x)
-			if cxmax <= x0 {
-				break
+		for i in g.i0 ..= g.i1 {
+			cell := HEADER + 4 * u32(j * g.nx + i)
+			list := s[cell]
+			for k in 0 ..< s[cell + 1] & 0xffff {
+				area += box_curve(s, s[6] + 6 * s[list + k], rc, ylo, yhi, x0, x1)
 			}
-			ca, cb := max(ylo, min(p1.y, p3.y)), min(yhi, max(p1.y, p3.y))
-			if ca >= cb {
-				continue
-			}
-			cxmin := min(p1.x, p3.x)
-			if cxmin >= x1 {
-				// Wholly right of the box: its rows' full width.
-				area += (fx if p3.y > p1.y else -fx) * (cb - ca)
-				continue
-			}
-			q := quadratic(p1, p2, p3)
-			ta := solve_monotone(q.D, q.E, q.F, ca)
-			tb := solve_monotone(q.D, q.E, q.F, cb)
-			ta, tb = min(ta, tb), max(ta, tb)
-			// Within its rows the curve spans x from x(ta) to x(tb).
-			xa, xb := (q.A * ta + q.B) * ta + q.C, (q.A * tb + q.B) * tb + q.C
-			xlo, xhi := min(xa, xb), max(xa, xb)
-			if xhi <= x0 {
-				continue
-			}
-			if xlo >= x1 {
-				area += (fx if p3.y > p1.y else -fx) * (cb - ca)
-				continue
-			}
-			// Where x crosses the box's sides split the rows into pieces.
-			s1, s2 := tb, tb
-			if x0 > xlo && x0 < xhi {
-				s1 = clamp(solve_monotone(q.A, q.B, q.C, x0), ta, tb)
-			}
-			if x1 > xlo && x1 < xhi {
-				s2 = clamp(solve_monotone(q.A, q.B, q.C, x1), ta, tb)
-			}
-			lo, hi := min(s1, s2), max(s1, s2)
-			area += box_piece(q, x0, x1, ta, lo) + box_piece(q, x0, x1, lo, hi) + box_piece(q, x0, x1, hi, tb)
 		}
+		area += backdrop_integral(s, HEADER + 4 * u32(j * g.nx + g.i1), rc.y, max(ylo, rlo), min(yhi, rhi), nil, fx)
 	}
 	return fill(area / (fx * fy), even_odd)
+}
+
+// The cells a footprint covers: columns i0..i1 and rows j0..j1, clamped to
+// the grid.
+@(private)
+Grid_Span :: struct {
+	nx, ny, i0, i1, j0, j1: i32,
+	y0, y1:                 f32,
+}
+
+@(private)
+grid_span :: #force_inline proc "contextless" (s: []u32, rc: Vec2, x0, x1, y0, y1: f32) -> Grid_Span {
+	nx, ny := i32(s[0]), i32(s[1])
+	cw, ch := transmute(f32)s[2], transmute(f32)s[3]
+	return {
+		nx, ny,
+		clamp(i32(math.floor((rc.x + x0) / cw)), 0, nx - 1),
+		clamp(i32(math.floor((rc.x + x1) / cw)), 0, nx - 1),
+		clamp(i32(math.floor((rc.y + y0) / ch)), 0, ny - 1),
+		clamp(i32(math.floor((rc.y + y1) / ch)), 0, ny - 1),
+		y0, y1,
+	}
+}
+
+// Row j's part of the footprint's rows, [ylo, yhi] (the first and last rows
+// reach out), and the row's own extent [rlo, rhi], relative to `ry`.
+@(private)
+grid_rows :: #force_inline proc "contextless" (s: []u32, g: Grid_Span, j: i32, ry: f32) -> (ylo, yhi, rlo, rhi: f32) {
+	ch := transmute(f32)s[3]
+	rlo, rhi = f32(j) * ch - ry, f32(j + 1) * ch - ry
+	ylo = g.y0 if j == 0 else max(g.y0, rlo)
+	yhi = g.y1 if j == g.ny - 1 else min(g.y1, rhi)
+	return
+}
+
+// The area the piece at word `c` adds to the box [x0, x1] over rows
+// [ylo, yhi] (relative to `rc`).
+@(private)
+box_curve :: proc "contextless" (s: []u32, c: u32, rc: Vec2, ylo, yhi, x0, x1: f32) -> f32 {
+	p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
+	p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
+	ca, cb := max(ylo, min(p1.y, p3.y)), min(yhi, max(p1.y, p3.y))
+	if ca >= cb || max(p1.x, p3.x) <= x0 {
+		return 0
+	}
+	full := ((x1 - x0) if p3.y > p1.y else (x0 - x1)) * (cb - ca)
+	if min(p1.x, p3.x) >= x1 {
+		return full
+	}
+	p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
+	q := quadratic(p1, p2, p3)
+	ta := solve_monotone(q.D, q.E, q.F, ca)
+	tb := solve_monotone(q.D, q.E, q.F, cb)
+	ta, tb = min(ta, tb), max(ta, tb)
+	// Within its rows the curve spans x from x(ta) to x(tb).
+	xa, xb := (q.A * ta + q.B) * ta + q.C, (q.A * tb + q.B) * tb + q.C
+	xlo, xhi := min(xa, xb), max(xa, xb)
+	if xhi <= x0 {
+		return 0
+	}
+	if xlo >= x1 {
+		return full
+	}
+	// Where x crosses the box's sides split the rows into pieces.
+	s1, s2 := tb, tb
+	if x0 > xlo && x0 < xhi {
+		s1 = clamp(solve_monotone(q.A, q.B, q.C, x0), ta, tb)
+	}
+	if x1 > xlo && x1 < xhi {
+		s2 = clamp(solve_monotone(q.A, q.B, q.C, x1), ta, tb)
+	}
+	lo, hi := min(s1, s2), max(s1, s2)
+	return box_piece(q, x0, x1, ta, lo) + box_piece(q, x0, x1, lo, hi) + box_piece(q, x0, x1, hi, tb)
 }
 
 // A curve as polynomials: x(t) = A t^2 + B t + C, y(t) = D t^2 + E t + F.
@@ -505,47 +675,48 @@ coverage_affine :: proc "contextless" (s: []u32, rc: Vec2, u, v: Vec2, even_odd:
 	if !ok {
 		return 0
 	}
-	curves := s[6]
+	g := grid_span(s, rc, fp.xmin, fp.xmax, -fp.h0, fp.h0)
 	area: f32
-	for band in band_of(s, rc.y - fp.h0) ..= band_of(s, rc.y + fp.h0) {
-		blo, bhi := band_rows(s, band, rc.y, -fp.h0, fp.h0)
-		if blo >= bhi {
+	for j in g.j0 ..= g.j1 {
+		ylo, yhi, rlo, rhi := grid_rows(s, g, j, rc.y)
+		if ylo >= yhi {
 			continue
 		}
-		hb := HEADER + 2 * u32(band)
-		list := s[hb + 1]
-		for k in 0 ..< s[hb] {
-			c := curves + 6 * s[list + k]
-			p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
-			p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
-			p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
-			cxmax := max(p1.x, p3.x)
-			if cxmax <= fp.xmin {
-				break
+		for i in g.i0 ..= g.i1 {
+			cell := HEADER + 4 * u32(j * g.nx + i)
+			list := s[cell]
+			for k in 0 ..< s[cell + 1] & 0xffff {
+				area += affine_curve(s, s[6] + 6 * s[list + k], rc, &fp, ylo, yhi)
 			}
-			ca, cb := max(blo, min(p1.y, p3.y)), min(bhi, max(p1.y, p3.y))
-			if ca >= cb {
-				continue
-			}
-			if min(p1.x, p3.x) >= fp.xmax {
-				// Wholly right of the footprint: its rows' full width.
-				area += (1 if p3.y > p1.y else -1) * (width_below(fp, cb) - width_below(fp, ca))
-				continue
-			}
-			// The curve's parameters at its rows' ends and where they cross
-			// the pieces' boundaries (no solve where those coincide).
-			q := quadratic(p1, p2, p3)
-			ta := solve_monotone(q.D, q.E, q.F, ca)
-			tb := solve_monotone(q.D, q.E, q.F, cb)
-			y1, y2 := clamp(-fp.h1, ca, cb), clamp(fp.h1, ca, cb)
-			t1 := ta if y1 == ca else (tb if y1 == cb else solve_monotone(q.D, q.E, q.F, y1))
-			t2 := ta if y2 == ca else (tb if y2 == cb else solve_monotone(q.D, q.E, q.F, y2))
-			area += footprint_piece(fp, 0, q, ta, t1)
-			area += footprint_piece(fp, 1, q, t1, t2)
-			area += footprint_piece(fp, 2, q, t2, tb)
 		}
+		area += backdrop_integral(s, HEADER + 4 * u32(j * g.nx + g.i1), rc.y, max(ylo, rlo), min(yhi, rhi), &fp, 0)
 	}
 	return fill(area / (fp.width * (fp.h0 + fp.h1)), even_odd)
+}
+
+// The area the piece at word `c` adds to the footprint over rows [ylo,
+// yhi] (relative to `rc`): its parameters at the rows' ends and where they
+// cross the footprint's pieces' boundaries (no solve where those coincide),
+// then each piece.
+@(private)
+affine_curve :: proc "contextless" (s: []u32, c: u32, rc: Vec2, fp: ^Footprint, ylo, yhi: f32) -> f32 {
+	p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
+	p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
+	ca, cb := max(ylo, min(p1.y, p3.y)), min(yhi, max(p1.y, p3.y))
+	if ca >= cb || max(p1.x, p3.x) <= fp.xmin {
+		return 0
+	}
+	if min(p1.x, p3.x) >= fp.xmax {
+		return (1 if p3.y > p1.y else -1) * (width_below(fp^, cb) - width_below(fp^, ca))
+	}
+	p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
+	q := quadratic(p1, p2, p3)
+	ta := solve_monotone(q.D, q.E, q.F, ca)
+	tb := solve_monotone(q.D, q.E, q.F, cb)
+	y1, y2 := clamp(-fp.h1, ca, cb), clamp(fp.h1, ca, cb)
+	t1 := ta if y1 == ca else (tb if y1 == cb else solve_monotone(q.D, q.E, q.F, y1))
+	t2 := ta if y2 == ca else (tb if y2 == cb else solve_monotone(q.D, q.E, q.F, y2))
+	return footprint_piece(fp^, 0, q, ta, t1) + footprint_piece(fp^, 1, q, t1, t2) + footprint_piece(fp^, 2, q, t2, tb)
 }
 
 // A pixel's parallelogram footprint, centered on the origin. Its lowest
@@ -748,21 +919,28 @@ fade :: proc "contextless" (s: []u32, cov: f32, footprint: Vec2) -> f32 {
 // the sign `coverage`'s area has. A curve counts at its rows [lower end,
 // upper end), so a contour's joints count once.
 winding :: proc "contextless" (s: []u32, p: Vec2) -> i32 {
-	band := band_of(s, p.y)
-	curves := s[6]
-	hb := HEADER + 2 * u32(band)
-	list := s[hb + 1]
-	w: i32
-	for k in 0 ..< s[hb] {
-		c := curves + 6 * s[list + k]
+	_, _, sx, sy := bounds(s)
+	if p.x >= sx || p.y < 0 || p.y >= sy {
+		return 0
+	}
+	g := grid_span(s, p, 0, 0, 0, 0)
+	cell := HEADER + 4 * u32(g.j0 * g.nx + g.i0)
+	// The backdrop at p.y, then the cell's pieces right of p.
+	w := i32(s[cell + 2])
+	at := s[cell + 3]
+	for k in 0 ..< s[cell + 1] >> 16 {
+		if transmute(f32)s[at + 2 * k] <= p.y {
+			w += i32(s[at + 2 * k + 1])
+		}
+	}
+	list := s[cell]
+	for k in 0 ..< s[cell + 1] & 0xffff {
+		c := s[6] + 6 * s[list + k]
 		p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - p
 		p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - p
 		p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - p
-		if max(p1.x, p3.x) <= 0 {
-			break
-		}
 		lo, hi := min(p1.y, p3.y), max(p1.y, p3.y)
-		if 0 < lo || 0 >= hi {
+		if 0 < lo || 0 >= hi || max(p1.x, p3.x) <= 0 {
 			continue
 		}
 		t := solve_monotone(p1.y - 2 * p2.y + p3.y, 2 * (p2.y - p1.y), p1.y, 0)

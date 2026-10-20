@@ -616,14 +616,16 @@ every part follows:
   `winding` at a point for sample masks, a mean coverage to `fade` to when
   minified) are filled by exact per-pixel coverage instead of
   tessellation: a `Shape` is quadratic curves, each monotone in x and y,
-  in horizontal bands (the banding is Eric Lengyel's Slug: reference
-  shaders MIT, patent dedicated to the public domain), built once from a
+  cut into the columns of a grid of cells, each cell listing its pieces
+  and its backdrop (the winding number right of it), built once from a
   path or a glyph (`shape_from_path`, `shape_from_glyph`); `fill_shape`
   draws it under any transform for the cost of its bounds. A pixel's
   coverage is the area of its footprint inside the shape, integrated in
-  closed form over the curves crossing its rows (Green's theorem): exact
-  under any transform (the footprint is a parallelogram, a box without
-  rotation or skew). Against 8x8-supersampled small italic text the mean
+  closed form (Green's theorem) over the pieces in the cells it covers,
+  plus the backdrop over its rows: exact under any transform (the footprint
+  is a parallelogram, a box without rotation or skew), and a pixel's cost is
+  the pieces near it, not the shape's size (16 lines of text, each one
+  shape, at 150 px on 4K: 2.2 ms with rows of curves, 0.93 ms with cells). Against 8x8-supersampled small italic text the mean
   error is 0.0005 (Slug's two-ray estimate, which ovg used before: 0.008);
   rotated pixels are about 20 times closer than Slug's. On the GPU a run of
   shapes is one instanced draw, its instances pulled from a storage buffer
