@@ -41,6 +41,14 @@ Lottie_Renderer :: struct {
 	contours: [dynamic]Lottie_Contour,
 	// Per document shape: its contours (geometry items).
 	geometry: [dynamic]Range,
+	// Per document shape, for paints whose geometry nothing animates (no
+	// keyframed path, transform, stroke width or dash in their scope, no
+	// trim or repeater in their layer): the paint's shape, built the first
+	// time it is drawn and drawn after that (`shaped`: 1 static, -1 not, 0
+	// unchecked); dropped when another document is bound.
+	shapes:     [dynamic]Shape,
+	shaped:     [dynamic]i8,
+	scratch:    Shape_Scratch,
 	// Repeater scratch: the geometry its copies repeat (lottie_gather).
 	copy_verbs:  [dynamic]Verb,
 	copy_coords: [dynamic]Vec2,
@@ -85,16 +93,22 @@ lottie_renderer_destroy :: proc(r: ^Lottie_Renderer, c: ^Canvas) {
 	delete(r.override_of)
 	delete(r.missing)
 	lottie_text_scratch_destroy(&r.text)
+	lottie_drop_shapes(r)
+	delete(r.shapes)
+	delete(r.shaped)
+	shape_scratch_destroy(&r.scratch)
 	lottie_renderer_unbind(r, c)
 	delete(r.images)
 	r^ = {}
 }
 
 // Makes the canvas images of `doc`'s image assets for drawing it on `c`,
-// releasing those of the document bound before. A host drawing several
+// releasing those of the document bound before and the shapes its paints
+// kept (render the frames that drew them first). A host drawing several
 // documents keeps a renderer for each.
 lottie_renderer_bind :: proc(r: ^Lottie_Renderer, c: ^Canvas, doc: ^Lottie_Document) {
 	lottie_renderer_unbind(r, c)
+	lottie_drop_shapes(r)
 	resize(&r.images, len(doc.bitmaps))
 	for &b, i in doc.bitmaps {
 		// Shared by pixel address: players of several recording canvases
@@ -126,6 +140,10 @@ lottie_draw :: proc(c: ^Canvas, ls: ^Layer_Stack, r: ^Lottie_Renderer, doc: ^Lot
 	}
 	if len(r.geometry) < len(doc.shapes) {
 		resize(&r.geometry, len(doc.shapes))
+	}
+	if len(r.shapes) < len(doc.shapes) {
+		resize(&r.shapes, len(doc.shapes))
+		resize(&r.shaped, len(doc.shapes))
 	}
 	if len(overrides) > 0 {
 		resize(&r.override_of, len(doc.layers))
@@ -159,6 +177,19 @@ Lottie_Draw :: struct {
 	// precomp layer it is in).
 	fill, stroke: Maybe(Color),
 	budget:       Budget,
+	// The layer being drawn has no trim or repeater (its paints may own
+	// their shapes).
+	unmodified:   bool,
+}
+
+// Frees the paints' shapes (drawn frames must have been rendered).
+@(private)
+lottie_drop_shapes :: proc(r: ^Lottie_Renderer) {
+	for &s in r.shapes {
+		shape_destroy(&s)
+	}
+	clear(&r.shapes)
+	clear(&r.shaped)
 }
 
 // Whether any document layer has name `name` (an override's target).
@@ -538,6 +569,7 @@ lottie_draw_layer :: proc(d: ^Lottie_Draw, li: i32, frame: f32, depth: int, blen
 	case .Shape:
 		clear(&d.r.pts)
 		clear(&d.r.contours)
+		d.unmodified = !lottie_has_modifier(doc, l.shapes)
 		lottie_build_items(d, l.shapes, lt)
 		lottie_draw_items(d, l.shapes, 0, l.shapes.count, lt)
 	case .Solid:
@@ -1495,11 +1527,6 @@ lottie_paint :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, items: Range, k: u32, t
 			return
 		}
 	}
-	path_reset(&r.path)
-	lottie_gather(d, items, k, TRANSFORM_IDENTITY, t)
-	if len(r.path.verbs) == 0 {
-		return
-	}
 	paint: Paint
 	if over, ok := (d.stroke if stroke else d.fill).?; ok {
 		paint = paint_color({over.r, over.g, over.b, over.a * opacity})
@@ -1520,13 +1547,55 @@ lottie_paint :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, items: Range, k: u32, t
 	}
 	if !stroke {
 		paint.fill_rule = .Even_Odd if .Even_Odd in sh.flags else .Non_Zero
-		fill_path(c, &r.path, paint)
+	} else {
+		lottie_stroke_settings(d, sh, &paint, width, t)
+	}
+	// The paint's geometry: its own shape when nothing in it animates.
+	i := items.start + k
+	if r.shaped[i] == 0 {
+		r.shaped[i] = 1 if d.unmodified && lottie_scope_static(doc, sh, items, k) else -1
+	}
+	owned := &r.shapes[i]
+	if r.shaped[i] > 0 && owned.data == nil {
+		path_reset(&r.path)
+		lottie_gather(d, items, k, TRANSFORM_IDENTITY, t)
+		ok: bool
+		if stroke {
+			owned^, ok, _ = shape_from_stroke(&r.path, paint.stroke, search = false, scratch = &r.scratch)
+		} else {
+			owned^, ok = shape_from_path(&r.path, search = false, scratch = &r.scratch)
+		}
+		if !ok {
+			r.shaped[i] = -1
+		}
+	}
+	if owned.data != nil {
+		if stroke {
+			paint.fill_rule = .Non_Zero
+		}
+		fill_shape(c, owned, paint)
 		return
 	}
+	path_reset(&r.path)
+	lottie_gather(d, items, k, TRANSFORM_IDENTITY, t)
+	if len(r.path.verbs) == 0 {
+		return
+	}
+	if stroke {
+		stroke_path(c, &r.path, paint)
+	} else {
+		fill_path(c, &r.path, paint)
+	}
+}
+
+// A stroke paint's settings at `t`.
+@(private)
+lottie_stroke_settings :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, paint: ^Paint, width, t: f32) {
+	doc, r := d.doc, d.r
 	paint.stroke.line_width = width
 	paint.stroke.line_join = sh.join
 	paint.stroke.miter_limit = sh.miter
-	paint_set_line_cap(&paint, sh.cap)
+	paint_set_line_cap(paint, sh.cap)
 	if sh.dash.count > 0 {
 		clear(&r.dashes)
 		offset: f32
@@ -1555,7 +1624,69 @@ lottie_paint :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, items: Range, k: u32, t
 			paint.stroke.dash_offset = offset
 		}
 	}
-	stroke_path(c, &r.path, paint)
+}
+
+// Whether a trim or repeater is in `items` (or their groups).
+@(private)
+lottie_has_modifier :: proc(doc: ^Lottie_Document, items: Range) -> bool {
+	for i in items.start ..< items.start + items.count {
+		sh := &doc.shapes[i]
+		#partial switch sh.kind {
+		case .Trim, .Repeater:
+			return true
+		case .Group:
+			if lottie_has_modifier(doc, sh.children) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Whether paint `sh`'s geometry (items [0, k) of its group, their groups'
+// transforms, a stroke's width and dashes) is the same at every frame.
+@(private)
+lottie_scope_static :: proc(doc: ^Lottie_Document, sh: ^Lottie_Shape, items: Range, k: u32) -> bool {
+	fixed :: proc(doc: ^Lottie_Document, idx: i32) -> bool {
+		return idx < 0 || doc.props[idx].keys.count <= 1
+	}
+	items_fixed :: proc(doc: ^Lottie_Document, items: Range, k: u32) -> bool {
+		for i in items.start ..< items.start + k {
+			s := &doc.shapes[i]
+			#partial switch s.kind {
+			case .Group:
+				if s.transform >= 0 {
+					x := &doc.transforms[s.transform]
+					for p in ([?]i32{x.anchor, x.position, x.position_x, x.position_y, x.scale, x.rotation, x.skew, x.skew_axis}) {
+						if !fixed(doc, p) {
+							return false
+						}
+					}
+				}
+				if !items_fixed(doc, s.children, s.children.count) {
+					return false
+				}
+			case .Rect, .Ellipse, .Path, .Star:
+				for p in s.props {
+					if !fixed(doc, p) {
+						return false
+					}
+				}
+			}
+		}
+		return true
+	}
+	if sh.kind == .Stroke || sh.kind == .Gradient_Stroke {
+		if !fixed(doc, sh.props[LOTTIE_WIDTH]) {
+			return false
+		}
+		for di in sh.dash.start ..< sh.dash.start + sh.dash.count {
+			if !fixed(doc, doc.dashes[di].prop) {
+				return false
+			}
+		}
+	}
+	return items_fixed(doc, items, k)
 }
 
 // A gradient fill / stroke's paint: color stops merged with opacity stops.

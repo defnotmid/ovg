@@ -658,19 +658,15 @@ svg_draw_shape :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Col
 	if !has_fill && !has_stroke {
 		return
 	}
-	p := &d.r.path
-	path_reset(p)
-	append(&p.verbs, ..doc.verbs[sh.verbs.start:][:sh.verbs.count])
-	append(&p.coords, ..doc.coords[sh.coords.start:][:sh.coords.count])
-	if has_fill {
+	if has_fill && sh.fill.data != nil {
 		fill.fill_rule = s.fill_rule
 		fill.anti_alias = aa
-		fill_path(c, p, fill)
+		fill_shape(c, &sh.fill, fill)
 	}
-	if has_stroke {
-		svg_stroke_settings(&stroke, s, doc, sh.path_length)
+	if has_stroke && sh.stroke.data != nil {
+		stroke.fill_rule = .Non_Zero
 		stroke.anti_alias = aa
-		stroke_path(c, p, stroke)
+		fill_shape(c, &sh.stroke, stroke)
 	}
 }
 

@@ -58,45 +58,9 @@ Range :: struct {
 	start, count: u32,
 }
 
-// A run of a draw's vertices: a triangle list, or a strip (triangle i is
-// vertices i, i+1, i+2). A GPU backend draws both through generated indices
-// (`piece_index_count`), so draws of either kind merge.
-Piece :: struct {
-	verts: Range,
-	strip: bool,
-}
-
-// The triangle indices `p` takes: 3 per triangle.
-piece_index_count :: #force_inline proc "contextless" (p: Piece) -> u32 {
-	if !p.strip {
-		return p.verts.count
-	}
-	return 3 * (p.verts.count - 2) if p.verts.count >= 3 else 0
-}
-
-// How a draw uses the stencil (femtovg's GL backend).
-Stencil_Mode :: enum u8 {
-	// No stencil test.
-	None,
-	// Winding count: front faces increment, back faces decrement (wrapping);
-	// no color.
-	Winding,
-	// Where `stencil & 0xff == 0` / `stencil & 1 == 0`, keeping it.
-	Outside_Non_Zero,
-	Outside_Even_Odd,
-	// Where the masked stencil is set, zeroing it.
-	Cover_Non_Zero,
-	Cover_Even_Odd,
-	// Where the stencil is 0, then incrementing it: each pixel once.
-	Once,
-	// Zeroes the stencil; no color.
-	Clear,
-}
-
 Shader_Type :: enum u8 {
 	Fill_Gradient             = 0,
 	Fill_Image                = 1,
-	Stencil                   = 2,
 	Fill_Image_Gradient       = 3,
 	Filter_Image              = 4,
 	Fill_Color                = 5,
@@ -298,14 +262,10 @@ Cmd_Clear_Rect :: struct {
 	x, y, w, h: u32,
 	color:      Color,
 }
-// The triangles of `Command.pieces` under `stencil`, painted with
-// `Frame.paints[paint]` (every vertex names the same row). A convex fill
-// is one draw; a concave fill three (its winding, the fringe outside it,
-// cover); a stroke one, or two when it paints each pixel once (once, then
-// clear, over the same pieces).
+// The triangle list `Frame.verts[Command.verts]` (glyphs from an atlas),
+// painted with `Frame.paints[paint]` (every vertex names the same row).
 Cmd_Draw :: struct {
-	stencil: Stencil_Mode,
-	paint:   u32,
+	paint: u32,
 }
 // Shape instances `Frame.shapes[instances]`, each filled by coverage
 // (shape.odin) with its own paint row; one command covers a run of them
@@ -318,12 +278,39 @@ Cmd_Draw_Shapes :: struct {
 	instances:      Range,
 	union_coverage: bool,
 }
-// A shape drawn under `transform` (shape units to drawing coordinates).
+// A shape drawn under `transform` (shape units to drawing coordinates):
+// `shape` (kept by its owner; GPU backends upload it once), or when nil
+// `Frame.shape_words[words]` (a path filled this frame). A pixel's
+// coverage is its footprint's, `widen` pixels wider than the pixel (a
+// feathered edge), or with `aliased` its center's winding.
 Shape_Instance :: struct {
 	shape:     ^Shape,
+	words:     Range,
 	transform: Transform2D,
 	paint:     u32,
 	even_odd:  bool,
+	aliased:   bool,
+	widen:     f32,
+}
+
+// The instance's shape words; `frame_words` is the frame's `shape_words`.
+instance_words :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> []u32 {
+	if inst.shape != nil {
+		return inst.shape.data
+	}
+	return frame_words[inst.words.start:][:inst.words.count]
+}
+
+// The pixels the instance's coverage reaches.
+instance_bounds :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> Bounds {
+	return device_bounds(instance_words(inst, frame_words), inst.transform, 1 + inst.widen)
+}
+
+// A pixel's sides in shape units under the instance's transform, widened:
+// its footprint (shape_footprint).
+instance_footprint :: proc "contextless" (inst: Shape_Instance) -> (u, v: Vec2) {
+	u, v = shape_footprint(inst.transform)
+	return u * (1 + inst.widen), v * (1 + inst.widen)
 }
 // `Frame.filters[filter]` from the command's image into `target_image`.
 Cmd_Filter_Image :: struct {
@@ -343,8 +330,8 @@ Command_Type :: union {
 
 Command :: struct {
 	type:                Command_Type,
-	// Cmd_Draw's triangles: a range of `Frame.pieces`.
-	pieces:              Range,
+	// Cmd_Draw's triangles: a range of `Frame.verts`.
+	verts:               Range,
 	// Paint image, gradient ramp, or the filter source.
 	image:               Image_Id,
 	glyph_texture:       Glyph_Texture,
@@ -358,7 +345,6 @@ Command :: struct {
 // Everything one `flush` hands to the backend.
 Frame :: struct {
 	verts:     []Vertex,
-	pieces:    []Piece,
 	paints:    []Params,
 	commands:  []Command,
 	// Uniform blocks of program runs (`Program_Run.uniforms`).
@@ -368,10 +354,8 @@ Frame :: struct {
 	filters:   []Image_Filter,
 	runs:      []Program_Run,
 	shapes:    []Shape_Instance,
-}
-
-frame_pieces :: #force_inline proc "contextless" (f: Frame, cmd: Command) -> []Piece {
-	return f.pieces[cmd.pieces.start:][:cmd.pieces.count]
+	// The words of the shapes built this frame (`Shape_Instance.words`).
+	shape_words: []u32,
 }
 
 // Backend-specific output for `render`; the SDL_GPU backend reads it as a

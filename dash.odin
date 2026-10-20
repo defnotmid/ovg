@@ -4,11 +4,12 @@ import "core:math"
 
 // Dashes `src` into `dst` (SVG stroke-dasharray / stroke-dashoffset /
 // pathLength: when `total_length` > 0, dash lengths are fractions of it).
-// Curves are flattened first (into `flat`, scratch reused across calls);
-// the dash pattern runs on across segments and restarts at each subpath,
-// as in SVG. A pattern that would make more than `max_dashes` dashes
-// leaves the path undashed (as Skia; dashes that fine look solid) and
-// returns false. Allocates nothing once `flat` and `dst` have grown.
+// Curves stay curves: a cubic is cut at the dash ends, found along it by
+// arc length (`flat`, scratch reused across calls, measures the path). The
+// dash pattern runs on across segments and restarts at each subpath, as in
+// SVG. A pattern that would make more than `max_dashes` dashes leaves the
+// path undashed (as Skia; dashes that fine look solid) and returns false.
+// Allocates nothing once `flat` and `dst` have grown.
 path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst: ^Path, flat: ^Flat_Path, max_dashes := DEFAULT_LIMITS[.Dash_Segments]) -> bool {
 	undashed :: proc(src, dst: ^Path) {
 		path_reset(dst)
@@ -29,8 +30,7 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 		total *= 2
 	}
 
-	path_flatten(src, flat)
-	length := flat_path_length(flat)
+	length := path_length(src, flat)
 	scale: f32 = 1
 	if total_length > 0 {
 		scale = length / total_length
@@ -43,57 +43,158 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 		undashed(src, dst)
 		return false
 	}
-	// Bounds the loop below too, where f32 positions could stop advancing.
-	budget := max_dashes
-	dash :: #force_inline proc "contextless" (dashes: []f32, i: int) -> f32 {
-		return dashes[i % len(dashes)]
+	// Bounds the walk too, where f32 positions could stop advancing.
+	d := Dasher {
+		dst     = dst,
+		dashes  = dashes,
+		n       = n,
+		scale   = scale,
+		budget  = max_dashes,
+		lengths = &flat.points,
 	}
+	start, pen: Vec2
+	open := false
+	it := path_iter(src)
+	for verb, coords in path_iter_next(&it) {
+		ok := true
+		switch verb {
+		case .Move_To:
+			start, pen, open = coords[0], coords[0], true
+			// Where in the pattern the subpath starts.
+			phase := math.mod(offset * scale, total * scale)
+			if phase < 0 {
+				phase += total * scale
+			}
+			d.idx = 0
+			for phase >= dash_length(&d) {
+				phase -= dash_length(&d)
+				d.idx = (d.idx + 1) % n
+			}
+			d.remaining = dash_length(&d) - phase
+			d.on = d.idx % 2 == 0
+			if d.on {
+				path_move_to(dst, pen.x, pen.y)
+			}
+		case .Line_To:
+			if open {
+				ok = dash_segment(&d, {pen, pen, coords[0], coords[0]}, false)
+				pen = coords[0]
+			}
+		case .Bezier_To:
+			if open {
+				ok = dash_segment(&d, {pen, coords[0], coords[1], coords[2]}, true)
+				pen = coords[2]
+			}
+		case .Close:
+			if open {
+				ok = dash_segment(&d, {pen, pen, start, start}, false)
+				pen = start
+			}
+		case .Solid, .Hole:
+		}
+		if !ok {
+			undashed(src, dst)
+			return false
+		}
+	}
+	return true
+}
 
-	for ct in flat.contours {
-		pts := flat.points[ct.first:][:ct.count]
-		// Where in the pattern the subpath starts.
-		phase := math.mod(offset * scale, total * scale)
-		if phase < 0 {
-			phase += total * scale
+@(private = "file")
+Dasher :: struct {
+	dst:       ^Path,
+	dashes:    []f32,
+	n:         int,
+	scale:     f32,
+	// The pattern: its entry, what is left of it, whether it draws.
+	idx:       int,
+	remaining: f32,
+	on:        bool,
+	budget:    int,
+	// A cubic's arc lengths at even steps of t (scratch).
+	lengths:   ^[dynamic]Vec2,
+}
+
+@(private = "file")
+dash_length :: #force_inline proc "contextless" (d: ^Dasher) -> f32 {
+	return d.dashes[d.idx % len(d.dashes)] * d.scale
+}
+
+@(private = "file")
+cubic_at :: #force_inline proc "contextless" (c: [4]Vec2, t: f32) -> Vec2 {
+	u := 1 - t
+	return c[0] * (u * u * u) + c[1] * (3 * u * u * t) + c[2] * (3 * u * t * t) + c[3] * (t * t * t)
+}
+
+// Walks the pattern along one segment (a line from c[0] to c[3], or a
+// cubic): the parts that draw go to the path as lines or cubics.
+@(private = "file")
+dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
+	seg := vec_len(c[3] - c[0])
+	steps := 1
+	if cubic {
+		// Arc length at t = k / steps (about 1.5 units a step, as
+		// path_flatten measures it).
+		approx := vec_len(c[1] - c[0]) + vec_len(c[2] - c[1]) + vec_len(c[3] - c[2])
+		steps = clamp(int(approx / 1.5), 2, 256)
+		clear(d.lengths)
+		append(d.lengths, Vec2{0, 0})
+		seg = 0
+		prev := c[0]
+		for k in 1 ..= steps {
+			t := f32(k) / f32(steps)
+			q := cubic_at(c, t)
+			seg += vec_len(q - prev)
+			append(d.lengths, Vec2{seg, t})
+			prev = q
 		}
-		idx := 0
-		for phase >= dash(dashes, idx) * scale {
-			phase -= dash(dashes, idx) * scale
-			idx = (idx + 1) % n
+	}
+	// t at arc length s, reading the table forward.
+	at := 0
+	t_at :: proc(d: ^Dasher, s, seg: f32, cubic: bool, at: ^int) -> f32 {
+		if !cubic {
+			return s / seg if seg > 0 else 1
 		}
-		remaining := dash(dashes, idx) * scale - phase
-		on := idx % 2 == 0
-		if on {
-			path_move_to(dst, pts[0].x, pts[0].y)
+		l := d.lengths[:]
+		for at^ < len(l) - 2 && l[at^ + 1].x < s {
+			at^ += 1
 		}
-		for k in 1 ..< len(pts) {
-			a, b := pts[k - 1], pts[k]
-			seg := vec_len(b - a)
-			pos: f32 = 0
-			for seg - pos > remaining {
-				if budget -= 1; budget < 0 {
-					undashed(src, dst)
-					return false
-				}
-				pos += remaining
-				p := a + (b - a) * (pos / seg)
-				if on {
-					path_line_to(dst, p.x, p.y)
-				} else {
-					path_move_to(dst, p.x, p.y)
-				}
-				on = !on
-				idx = (idx + 1) % n
-				remaining = dash(dashes, idx) * scale
-				if remaining <= 0 {
-					remaining = 1e-6
-				}
-			}
-			remaining -= seg - pos
-			if on {
-				path_line_to(dst, b.x, b.y)
-			}
+		a, b := l[at^], l[at^ + 1]
+		return a.y + (b.y - a.y) * ((s - a.x) / (b.x - a.x) if b.x > a.x else 0)
+	}
+	draw :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool, t0, t1: f32) {
+		if !cubic {
+			p := c[0] + (c[3] - c[0]) * t1
+			path_line_to(d.dst, p.x, p.y)
+			return
 		}
+		_, c1, c2, p := cubic_split(c[0], c[1], c[2], c[3], t0, t1)
+		path_bezier_to(d.dst, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+	}
+	pos, from: f32 = 0, 0
+	for seg - pos > d.remaining {
+		if d.budget -= 1; d.budget < 0 {
+			return false
+		}
+		pos += d.remaining
+		t := t_at(d, pos, seg, cubic, &at)
+		if d.on {
+			draw(d, c, cubic, from, t)
+		} else {
+			p := cubic_at(c, t) if cubic else c[0] + (c[3] - c[0]) * t
+			path_move_to(d.dst, p.x, p.y)
+		}
+		from = t
+		d.on = !d.on
+		d.idx = (d.idx + 1) % d.n
+		d.remaining = dash_length(d)
+		if d.remaining <= 0 {
+			d.remaining = 1e-6
+		}
+	}
+	d.remaining -= seg - pos
+	if d.on {
+		draw(d, c, cubic, from, 1)
 	}
 	return true
 }

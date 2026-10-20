@@ -6,9 +6,10 @@
 [femtovg](https://github.com/femtovg/femtovg) (the nanovg lineage) and grew well
 beyond it.
 
-From femtovg: paths, strokes, gradients, image paints, scissoring,
-compositing, render-to-image and antialiased fills, on a canvas that records
-commands for a backend.
+From femtovg: the canvas API (paths, strokes, gradients, image paints,
+scissoring, compositing, render-to-image), recording commands for a
+backend. Fills and strokes no longer tessellate: every path is drawn by
+exact per-pixel coverage of its curves (see Shapes below).
 
 Added in ovg:
 
@@ -103,24 +104,23 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - `vgsdl.image_texture(&c, id)` is the `^sdl.GPUTexture` behind a canvas image,
   and `vgsdl.offscreen_texture(&gpu)` is the default screen texture, for
   compositing in host UI code. `vgsdl.read_texture` copies a texture back.
-- Each `flush` records one command buffer (vertex upload in a copy pass,
-  then a render pass per target run) and waits on a fence, unless
+- Each `flush` records one command buffer (its streams uploaded in a copy
+  pass: vertices, paints, shape instances and shape words; then a render
+  pass per target run) and waits on a fence, unless
   `gpu.frames_in_flight` (at most 3) lets that many frames keep running while
   the next is recorded; reading a frame back waits for its own copy. Image
   uploads use their own command buffers, submitted before the frame's.
-  Stencils, filter intermediates and vertex buffers a frame needs are
+  Filter intermediates, mask pages and the buffers a frame needs are
   created before its command buffer is recorded: SDL_GPU submits a command
   buffer when it creates a texture, a submit may defragment memory (moving
   textures), and a texture the frame had already bound then lost the draws
   made into it (rare, history-dependent pixel errors on RADV).
 - Redundant state is skipped within a render pass: uniforms, samplers and
-  scissor are set only when they change (a fill and its fringe share them).
-- Stencil modes are baked into pipelines (SDL_GPU has no dynamic stencil
-  ops); pipelines are cached by blend factors, stencil mode, color write
-  mask, primitive type and target format. Each target size gets a
-  depth-stencil texture (`D24_UNORM_S8_UINT`, else `D32_FLOAT_S8_UINT`), and
-  blur intermediates are kept per image shape; both are released after 30
-  frames unused.
+  scissor are set only when they change.
+- Pipelines are cached by blend factors, target format and kind (triangles,
+  shapes, box shapes). There is no depth or stencil buffer. Blur
+  intermediates are kept per image shape and released after 30 frames
+  unused.
 - RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
   `R16G16B16A16_FLOAT`. `Generate_Mipmaps` is ignored.
 - Tested on Linux (Vulkan, RADV) and macOS (Metal, Apple M4: tests and
@@ -272,7 +272,7 @@ for run in layout.runs {
   fill rows (outline, transform, solid or gradient) and its outlines cached,
   so a warm glyph draws without parsing or allocating. A line of 20 Noto
   emoji (321 fills) builds in 0.41 ms at 64 px and 0.87 ms at 512 px
-  (layout, tessellation, commands; Ryzen 9 9900X3D, `-o:speed`); the SDL_GPU
+  (layout, shapes, commands; Ryzen 9 9900X3D, `-o:speed`); the SDL_GPU
   frame with readback takes 1.7 ms at 64 px.
 
 ## SVG import
@@ -508,7 +508,7 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
   (Shadertoy). Uniform bytes are copied into the frame (`Frame.bytes`,
   16-byte aligned). Channel `n` samples `channels[n]`; unbound channels read
   transparent black, and a channel may not be the target.
-- SDL_GPU: the program gets its own render pass (no stencil) and one quad,
+- SDL_GPU: the program gets its own render pass and one quad,
   with one pipeline cached per (target format, opaque). Bindings follow
   SDL_GPU's convention, as oksl emits them:
   - Vertex input: position in target pixels at location 0, uv (0..1 from the
@@ -574,20 +574,23 @@ every part follows:
   rows carry live in side tables; kinds and properties are enum-indexed
   table rows (`svg_props`, `LOTTIE_EFFECTS`, `LIMIT_INFO`).
 
-- **`Canvas` records, backends draw.** Drawing calls tessellate paths into
-  vertices and record `Command`s; `flush` hands a `Frame` to the backend.
-  A backend is a `Backend` value (data pointer + procedures).
-- **Antialiasing** is femtovg's: a one-pixel fringe strip whose coverage the
-  shader computes (`strokeMask`). Concave fills use a stencil winding pass;
-  self-overlapping translucent strokes use stencil strokes so each pixel is
-  painted once. Contours keep their winding (`Solidity.None`, so SVG
-  non-zero / even-odd holes work); the fringe goes outside the path's
-  largest contour whichever way it winds (fills of a clockwise path reverse
-  all its contours, which keeps the fill), so clockwise paths and glyphs
-  cover exactly their area. A hole wound like its outer contour (even-odd)
-  is the exception: it fills about a pixel smaller.
+- **`Canvas` records, backends draw.** Drawing calls record `Command`s:
+  shape instances whose words go into the frame (each shape once), and
+  triangles only for glyphs from an atlas and the backend's own quads;
+  `flush` hands a `Frame` to the backend. A backend is a `Backend` value
+  (data pointer + procedures).
+- **One way to draw a path: its shape.** A fill or a stroke is a `Shape`
+  (shape.odin) whose pixels take their exact area coverage. What makes a
+  path long-lived owns its shape, built once and drawn under any transform
+  (`fill_shape`): fonts own glyph shapes, SVG documents their elements'
+  fills and strokes. `fill_path` and `stroke_path` build one for paths
+  made on the fly (in drawing coordinates, cubics within 1/16 px). A
+  stroke is its outline (`stroke.odin`: lines and quadratics offset as
+  such, joins, caps, dashes along the curves) filled non-zero, so each
+  pixel paints once however the stroke overlaps itself. Contours keep their
+  winding, so non-zero and even-odd holes are exact.
 - **The software backend is the pixel reference for the GPU backend.** It
-  evaluates the fragment shader's formulas, replays the stencil passes,
+  evaluates the fragment shader's formulas and the same coverage function,
   samples textures like the GPU and uses the top-left fill rule.
   `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
   and diffs them; on an RX 9070 XT (Vulkan, RADV) all 28 checks match, with
@@ -614,40 +617,43 @@ every part follows:
   word layout, `coverage` of a box footprint, `coverage_affine` of any
   parallelogram (`coverage_jacobian` from a 3D footprint's Jacobian),
   `winding` at a point for sample masks, a mean coverage to `fade` to when
-  minified) are filled by exact per-pixel coverage instead of
-  tessellation: a `Shape` is quadratic curves, each monotone in x and y,
+  minified) are filled by exact per-pixel coverage: a `Shape` is
+  quadratic curves, each monotone in x and y,
   cut into the columns of a grid of cells, each cell listing its pieces
   and its backdrop (the winding number right of it), built once from a
-  path or a glyph (`shape_from_path`, `shape_from_glyph`); `fill_shape`
-  draws it under any transform for the cost of its bounds. A pixel's
+  path or a glyph (`shape_from_path`, `shape_from_glyph`) in time linear in
+  its pieces; `fill_shape` draws it under any transform for the cost of its
+  bounds. A pixel's
   coverage is the area of its footprint inside the shape, integrated in
   closed form (Green's theorem) over the pieces in the cells it covers,
   plus the backdrop over its rows: exact under any transform (the footprint
   is a parallelogram, a box without rotation or skew), and a pixel's cost is
   the pieces near it, not the shape's size (16 lines of text, each one
   shape, at 150 px on 4K: 2.2 ms with rows of curves, 0.93 ms with cells). Against 8x8-supersampled small italic text the mean
-  error is 0.0005 (Slug's two-ray estimate, which ovg used before: 0.008);
-  rotated pixels are about 20 times closer than Slug's. On the GPU a run of
-  shapes is one instanced draw, its instances pulled from a storage buffer
-  (the box shader for upright instances, the parallelogram one for the
-  rest); a pixel scans its band and integrates the few curves crossing it
-  after the scan, so pixels running together integrate together. Each shape
-  is uploaded the first frame it is drawn and freed with it. Against Slug
-  (4K, Linux / M4): dense upright text costs 17% / 18% more, rotated text
-  50% / 26% more. The software backend evaluates the same coverage function
-  (parity: max diff 1 in the `curves` scene).
+  error is 0.0005 (the two-ray estimate ovg used before: 0.008); rotated
+  pixels are about 20 times closer. On the GPU a run of shapes is one
+  instanced draw, its instances pulled from a storage buffer (the box
+  shader for upright instances, the parallelogram one for the rest); a
+  pixel scans its cells and integrates the few pieces crossing it after the
+  scan, so pixels running together integrate together. A frame carries
+  the words of the shapes it draws (each once), uploaded with its other
+  streams. Against the
+  two-ray estimate (4K, Linux / M4): dense upright text costs 17% / 18%
+  more, rotated text 50% / 26% more. The software backend evaluates the
+  same coverage function (parity: max diff 1 in the `curves` scene).
 - **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
   font's shape (`font_glyph_shape`: built on first use with the font's
   allocator, the context's at `font_load`, whatever the drawing code runs
   under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
-  outline or tessellation work, and draws in one call. Opaque runs draw
+  outline work, and draws in one call. Opaque runs draw
   each glyph as it is; a run with global alpha, a translucent paint or
   another blend fills as one (its coverages united in an 8-bit mask, the
   paint blended once through it), so overlapping glyphs never darken where
   they meet. On the GPU all of a frame's masks share packed pages drawn
   first, one pass per page, so each translucent run costs one quad in the
   frame's pass (24 runs at 4K: 0.96 ms before, 0.26 ms). Feathered and aliased paints fill the outlines as one
-  path. `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
+  shape (a feather widens each pixel's footprint; aliased takes each pixel
+  center's winding). `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
   (baked at one scale). Both take glyph ids, so shaped runs draw as is.
   The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its
   Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
@@ -688,20 +694,19 @@ every part follows:
 
 - Software + SDL_GPU backends (femtovg: OpenGL / wgpu) behind a runtime
   backend interface.
-- The software backend matches the GPU shader: stroke-mask AA (was a plain
-  `v` coverage), the GPU stencil-pass order for concave fills and stencil
-  strokes, one gradient formula for linear/box/radial (the radial path was off
-  by half a feather), no double `Flip_Y`, GPU texel conversions, rounding to
-  8 bits, rotated-scissor mask, top-left rule (no seams on translucent fills),
-  the GPU blur coefficients.
-- Concave-fill cover quad covers `miny - fringe` (could leave stale stencil).
+- The software backend matches the GPU shader: the same shape coverage,
+  one gradient formula for linear/box/radial (the radial path was off by
+  half a feather), no double `Flip_Y`, GPU texel conversions, rounding to 8
+  bits, rotated-scissor mask, top-left rule for atlas glyph quads, the GPU
+  blur coefficients.
 - `clear_rect` clears only its rectangle (∩ scissor) with premultiplied color.
 - Second blur pass reads the intermediate as premultiplied (straight-alpha
   sources were premultiplied twice).
 - `realloc_image` frees the old backend image.
 - Gradient ramps pad past the last stop.
-- Paths are plain data, read-only while drawn: each draw tessellates into
-  the canvas's scratch. Scratch and frame buffers reuse their allocations;
+- Paths are plain data, read-only while drawn: `fill_path` builds the
+  path's shape into the frame. Scratch and frame buffers reuse their
+  allocations;
   paints never allocate. Font variations were dropped (stb_truetype has no
   variable-font support).
 

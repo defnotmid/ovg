@@ -442,14 +442,13 @@ fill_glyph_run :: proc(c: ^Canvas, f: ^Font, atlas: ^Glyph_Atlas, glyphs: []Posi
 		return nil
 	}
 	add_paint(c, params)
-	append(&c.pieces, Piece{{u32(start), u32(len(c.verts) - start)}, false})
 	cmd := Command {
 		glyph_texture       = glyph_tex,
 		composite_operation = st.composite_operation,
 		scissor_rect        = current_scissor_rect(c),
 	}
 	attach_paint_image(c, &cmd, &flavor)
-	push_draw(c, cmd, .None, paint_row, len(c.pieces) - 1)
+	push_draw(c, cmd, paint_row, start)
 	return nil
 }
 

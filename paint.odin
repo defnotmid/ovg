@@ -103,9 +103,8 @@ Paint_Flavor :: union {
 	Paint_Conic_Gradient,
 }
 
+// A stroke paints each pixel once, however it overlaps itself.
 Stroke_Settings :: struct {
-	// Paint each pixel of a self-overlapping stroke once.
-	stencil_strokes: bool,
 	miter_limit:     f32,
 	line_width:      f32,
 	line_cap_start:  Line_Cap,
@@ -121,9 +120,8 @@ Stroke_Settings :: struct {
 }
 
 DEFAULT_STROKE :: Stroke_Settings {
-	stencil_strokes = true,
-	miter_limit     = 10,
-	line_width      = 1,
+	miter_limit = 10,
+	line_width  = 1,
 }
 
 // What linear, radial and box gradients do beyond their ends (SVG

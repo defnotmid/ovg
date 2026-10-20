@@ -145,36 +145,20 @@ test_path_shapes :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_tessellation :: proc(t: ^testing.T) {
+test_path_queries :: proc(t: ^testing.T) {
+	vb: Void_Backend
+	c: Canvas
+	canvas_init(&c, void_backend(&vb))
+	defer canvas_destroy(&c)
+	set_size(&c, 100, 100)
 	p: Path
 	defer path_destroy(&p)
 	path_rect(&p, 0, 0, 10, 20)
-	tess: Tessellation
-	defer tessellation_destroy(&tess)
-	tessellation_build(&tess, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
-	c := &tess
-	testing.expect_value(t, len(c.contours), 1)
-	testing.expect(t, c.contours[0].closed)
-	testing.expect_value(t, c.contours[0].point_end - c.contours[0].point_start, 4)
-	testing.expect(t, c.bounds.minx == 0 && c.bounds.maxy == 20)
-	testing.expect(t, tessellation_contains_point(c, 5, 5, .Even_Odd))
-	testing.expect(t, !tessellation_contains_point(c, 20, 20, .Even_Odd))
-
-	tessellation_fill(c, 0, .Miter, 10)
-	r, is_rect := tessellation_fill_is_rect(c)
-	testing.expect(t, is_rect)
-	testing.expect_value(t, r, Rect{0, 0, 10, 20})
-
-	path_reset(&p)
-	path_move_to(&p, 50, 0)
-	path_line_to(&p, 21, 90)
-	path_line_to(&p, 98, 35)
-	path_line_to(&p, 2, 35)
-	path_line_to(&p, 79, 90)
-	path_close(&p)
-	tessellation_build(c, &p, TRANSFORM_IDENTITY, 0.25, 0.01)
-	tessellation_fill(c, 1, .Miter, 10)
-	testing.expect_value(t, c.contours[0].convexity, Convexity.Concave)
+	testing.expect_value(t, path_bounds(&c, &p), Bounds{0, 0, 10, 20})
+	testing.expect(t, contains_point(&c, &p, 5, 5, .Even_Odd))
+	testing.expect(t, !contains_point(&c, &p, 20, 20, .Even_Odd))
+	// Queries leave nothing in the frame.
+	testing.expect_value(t, len(c.shape_words), 0)
 }
 
 @(test)
@@ -209,9 +193,10 @@ test_canvas_void :: proc(t: ^testing.T) {
 	stroke_path(&c, &p, sp)
 	clear_rect(&c, 0, 0, 10, 10, WHITE)
 	flush(&c)
-	// A stroke paints each pixel once, then clears its stencil: two draws.
-	testing.expect_value(t, vb.last_frame_commands, 5)
-	testing.expect(t, vb.last_frame_verts > 0)
+	// The fill and the stroke are shapes in one draw (after the frame's
+	// render target), then the clear; no triangles.
+	testing.expect_value(t, vb.last_frame_commands, 3)
+	testing.expect_value(t, vb.last_frame_verts, 0)
 
 	save(&c)
 	translate(&c, 10, 20)
@@ -319,12 +304,6 @@ test_sw_concave_star :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, 32, 32), [4]u8{0, 0, 0, 255})
 	testing.expect_value(t, px(&s, 1, 1), [4]u8{255, 255, 255, 255})
 	testing.expect_value(t, px(&s, 32, 56), [4]u8{255, 255, 255, 255})
-	// The stencil is left clean for the next command.
-	for v in s.backend.stencil {
-		if v != 0 {
-			testing.fail_now(t, "stencil not cleared")
-		}
-	}
 }
 
 @(test)
@@ -492,7 +471,7 @@ test_sw_destination_over :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_sw_stencil_stroke :: proc(t: ^testing.T) {
+test_sw_stroke_once :: proc(t: ^testing.T) {
 	s: Sw
 	sw_open(&s, 64, 64)
 	defer sw_close(&s)
@@ -870,14 +849,16 @@ test_sw_glyph_outline_area :: proc(t: ^testing.T) {
 	covered, _ := fill_ink(&s, &p, .Non_Zero)
 
 	// Exact area and perimeter of the flattened outline.
-	c := tessellate(&s.canvas, &p, TRANSFORM_IDENTITY)
+	f: Flat_Path
+	defer flat_path_destroy(&f)
+	path_flatten(&p, &f)
 	area, perimeter: f32
-	for ct in c.contours {
-		pts := c.points[ct.point_start:ct.point_end]
+	for ct in f.contours {
+		pts := f.points[ct.first:][:ct.count]
 		for i in 0 ..< len(pts) {
 			p0 := pts[len(pts) - 1 if i == 0 else i - 1]
-			area += (pts[i].pos.x - p0.pos.x) * (pts[i].pos.y + p0.pos.y) * 0.5
-			perimeter += p0.len
+			area += (pts[i].x - p0.x) * (pts[i].y + p0.y) * 0.5
+			perimeter += math.hypot(pts[i].x - p0.x, pts[i].y - p0.y)
 		}
 	}
 	area = abs(area)

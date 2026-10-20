@@ -3,6 +3,8 @@ package ovg
 import "core:math"
 import "core:mem"
 
+import cv "curves"
+
 // The 2D drawing context. Records draw commands for a frame; `flush` hands
 // them to the backend. Port of femtovg's `Canvas`.
 Canvas :: struct {
@@ -16,33 +18,26 @@ Canvas :: struct {
 	states:                [dynamic]State,
 	commands:              [dynamic]Command,
 	verts:                 [dynamic]Vertex,
-	pieces:                [dynamic]Piece,
 	paints:                [dynamic]Params,
 	// Uniform blocks of custom program runs (program.odin).
 	bytes:                 [dynamic]u8,
 	filters:               [dynamic]Image_Filter,
 	runs:                  [dynamic]Program_Run,
 	shapes:                [dynamic]Shape_Instance,
+	// The words of the shapes paths are filled with this frame.
+	shape_words:           [dynamic]u32,
+	// Building the shapes of paths filled and stroked.
+	scratch:               Shape_Scratch,
 	images:                Image_Store,
 	programs:              Slot_Map(Backend_Program),
 	gradients:             Gradient_Store,
 	fringe_width:          f32,
 	device_px_ratio:       f32,
-	tess_tol:              f32,
-	dist_tol:              f32,
-	// Dashed copy of the path being stroked.
-	dash_scratch:          Path,
-	// The stroke being dashed, flattened.
-	dash_flat:             Flat_Path,
-	// The path being drawn, tessellated (`tessellate`).
-	tess:                  Tessellation,
 	// Bounds on per-draw work (limits.odin); canvas_init sets
 	// DEFAULT_LIMITS. Dashes use Dash_Segments.
 	limits:                Limits,
 	// The limits reached since init (clear it to watch again).
 	limited:               bit_set[Limit],
-	// Caps of zero-length subpaths (round / square dots).
-	cap_scratch:           Path,
 	// Programs registered on a recording canvas, for the player to create.
 	program_ops:           [dynamic]Program_Op,
 }
@@ -54,15 +49,13 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		states          = make([dynamic]State, allocator),
 		commands        = make([dynamic]Command, allocator),
 		verts           = make([dynamic]Vertex, allocator),
-		pieces          = make([dynamic]Piece, allocator),
 		paints          = make([dynamic]Params, allocator),
 		shapes          = make([dynamic]Shape_Instance, allocator),
+		shape_words     = make([dynamic]u32, allocator),
 		bytes           = make([dynamic]u8, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
 		device_px_ratio = 1,
-		tess_tol        = 0.25,
-		dist_tol        = 0.01,
 	}
 	image_store_init(&c.images, backend, allocator)
 	gradient_store_init(&c.gradients, allocator)
@@ -85,19 +78,16 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.states)
 	delete(c.commands)
 	delete(c.verts)
-	delete(c.pieces)
 	delete(c.paints)
 	delete(c.bytes)
 	delete(c.filters)
 	delete(c.runs)
 	delete(c.shapes)
+	delete(c.shape_words)
+	shape_scratch_destroy(&c.scratch)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
 	gradient_store_destroy(&c.gradients)
-	path_destroy(&c.dash_scratch)
-	flat_path_destroy(&c.dash_flat)
-	tessellation_destroy(&c.tess)
-	path_destroy(&c.cap_scratch)
 	delete(c.program_ops)
 	c^ = {}
 }
@@ -130,8 +120,6 @@ set_size :: proc(c: ^Canvas, width, height: u32, dpi: f32 = 1) {
 	c.width = width
 	c.height = height
 	c.fringe_width = 1.0 / dpi
-	c.tess_tol = 0.25 / dpi
-	c.dist_tol = 0.01 / dpi
 	c.device_px_ratio = dpi
 	c.backend.set_size(c.backend.data, width, height, dpi)
 	c.current_render_target = nil
@@ -335,26 +323,43 @@ filter_image :: proc(c: ^Canvas, target: Image_Id, filter: Image_Filter, source:
 
 // ---- paths ----------------------------------------------------------------------
 
-@(private)
-// Tessellates `p` under `t` into the canvas's scratch, valid until the next
-// call.
-tessellate :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> ^Tessellation {
-	tessellation_build(&c.tess, p, t, c.tess_tol, c.dist_tol)
-	return &c.tess
-}
-
+// Whether drawing coordinates (x, y) are inside `p` (under the current
+// transform) by `rule`.
 contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool {
-	cache := tessellate(c, p, state(c).transform)
-	b := cache.bounds
-	if b.maxx < 0 || b.minx > f32(c.width) || b.maxy < 0 || b.miny > f32(c.height) {
-		return false
-	}
-	return tessellation_contains_point(cache, x, y, rule)
+	words, origin, extent := path_words(c, p, state(c).transform) or_return
+	defer resize(&c.shape_words, len(c.shape_words) - len(words))
+	w := cv.winding(words, (Vec2{x, y} - origin) / extent)
+	return w & 1 != 0 if rule == .Even_Odd else w != 0
 }
 
 // Bounds of the path under the current transform.
 path_bounds :: proc(c: ^Canvas, p: ^Path) -> Bounds {
-	return tessellate(c, p, state(c).transform).bounds
+	return path_device_bounds(c, p, state(c).transform)
+}
+
+// Bounds of `p` under `t`: its curves', exactly.
+@(private)
+path_device_bounds :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> Bounds {
+	words, origin, extent, ok := path_words(c, p, t)
+	if !ok {
+		return EMPTY_BOUNDS
+	}
+	defer resize(&c.shape_words, len(c.shape_words) - len(words))
+	x0, y0, x1, y1 := cv.bounds(words)
+	return {origin.x + x0 * extent, origin.y + y0 * extent, origin.x + x1 * extent, origin.y + y1 * extent}
+}
+
+// `p` under `t` as shape words at the end of the frame's, for a query to
+// read and drop.
+@(private = "file")
+path_words :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> (words: []u32, origin: Vec2, extent: f32, ok: bool) {
+	b := &c.scratch.builder
+	shape_builder_reset(b)
+	b.tol = 1.0 / 16
+	shape_add_path(b, p, t)
+	start := len(c.shape_words)
+	origin, extent = cv.build_append(b, &c.shape_words, search = false) or_return
+	return c.shape_words[start:], origin, extent, true
 }
 
 @(private)
@@ -364,83 +369,78 @@ outside_target :: proc(c: ^Canvas, b: Bounds) -> bool {
 	return b.maxx < x || b.minx > x + f32(w) || b.maxy < y || b.miny > y + f32(h)
 }
 
+// Fills `p` by per-pixel coverage: the path becomes a shape for this frame
+// (shape.odin), built in drawing coordinates, so its pixels' footprints
+// are upright boxes. A feathered paint widens the footprint and eases the
+// coverage in (Params.smooth_edge); one without anti-aliasing takes each
+// pixel center's winding.
 fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
-	st := state(c)
-	t := st.transform
-	cache := tessellate(c, p, t)
-	if outside_target(c, cache.bounds) {
+	t := state(c).transform
+	b := &c.scratch.builder
+	shape_builder_reset(b)
+	b.tol = 1.0 / 16
+	shape_add_path(b, p, t)
+	fill_built(c, paint, t)
+}
+
+// Fills the canvas's builder's curves (drawing coordinates) with `paint`,
+// as a shape for this frame; `t` is the transform they were made under.
+@(private)
+fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
+	start := len(c.shape_words)
+	origin, extent, ok := cv.build_append(&c.scratch.builder, &c.shape_words, search = false)
+	if !ok {
 		return
 	}
+	words := c.shape_words[start:]
+	inst := paint_instance(paint, t)
+	inst.words = {u32(start), u32(len(words))}
+	inst.transform = {extent, 0, 0, extent, origin.x, origin.y}
+	if outside_target(c, device_bounds(words, inst.transform, 1 + inst.widen)) {
+		resize(&c.shape_words, start)
+		return
+	}
+	cmd: Command
+	cmd, inst.paint = shape_paint(c, paint)
+	push_shape(c, cmd, inst, false)
+}
 
-	flavor := paint.flavor
-	flavor_mul_alpha(&flavor, st.alpha)
-
-	fringe := c.fringe_width if paint.anti_alias else 0
+// An instance filling with `paint` drawn under `t` (path units to drawing
+// coordinates): the paint's fill rule, anti-aliasing and feather.
+@(private)
+paint_instance :: proc "contextless" (paint: Paint, t: Transform2D) -> Shape_Instance {
+	inst := Shape_Instance {
+		even_odd = paint.fill_rule == .Even_Odd,
+		aliased  = !paint.anti_alias,
+	}
 	if paint.feather > 0 {
-		// The fringe straddles the edge: at most the shape's smaller extent,
-		// so the inner edge does not cross over.
+		// femtovg's fringe for the feather, as the footprint's growth.
 		scale := math.sqrt(abs(t[0] * t[3] - t[1] * t[2]))
-		b := cache.bounds
-		fringe = min(c.fringe_width + 1.5 * paint.feather * scale * math.SQRT_TWO * math.sqrt(f32(math.PI)), min(b.maxx - b.minx, b.maxy - b.miny))
+		inst.widen = 1.5 * paint.feather * scale * math.SQRT_TWO * math.sqrt(f32(math.PI))
 	}
-	tessellation_fill(cache, fringe, .Miter, 2.4)
-	convex := len(cache.contours) == 1 && cache.contours[0].convexity == .Convex
-
-	cmd := Command {
-		composite_operation = st.composite_operation,
-		scissor_rect        = current_scissor_rect(c),
-	}
-	attach_paint_image(c, &cmd, &flavor)
-	params := params_from_paint(&c.images, paint_space(paint, t), &flavor, {}, st.scissor, c.fringe_width, c.fringe_width, -1)
-	params.spread = f32(paint.spread)
-	params.smooth_edge = paint.feather > 0
-	fill := add_paint(c, params)
-	if convex {
-		start := len(c.pieces)
-		for ct in cache.contours {
-			emit_list(c, cache.fill_verts[ct.fill.start:][:ct.fill.count], fill)
-			emit_strip(c, cache.stroke_verts[ct.stroke.start:][:ct.stroke.count], fill)
-		}
-		push_draw(c, cmd, .None, fill, start)
-		return
-	}
-
-	// Winding count from the fan triangles (no color, so the fill's paint
-	// serves), the fringe outside the shape, then cover the path bounds
-	// where the count is set (zeroing it).
-	even_odd := paint.fill_rule == .Even_Odd
-	start := len(c.pieces)
-	for ct in cache.contours {
-		emit_list(c, cache.fill_verts[ct.fill.start:][:ct.fill.count], fill)
-	}
-	push_draw(c, cmd, .Winding, fill, start)
-	start = len(c.pieces)
-	for ct in cache.contours {
-		emit_strip(c, cache.stroke_verts[ct.stroke.start:][:ct.stroke.count], fill)
-	}
-	push_draw(c, cmd, .Outside_Even_Odd if even_odd else .Outside_Non_Zero, fill, start)
-	b := cache.bounds
-	x0, y0, x1, y1 := b.minx - fringe, b.miny - fringe, b.maxx + fringe, b.maxy + fringe
-	start = len(c.pieces)
-	emit_list(c, {{x0, y0, 0.5, 1}, {x1, y0, 0.5, 1}, {x1, y1, 0.5, 1}, {x0, y0, 0.5, 1}, {x1, y1, 0.5, 1}, {x0, y1, 0.5, 1}}, fill)
-	push_draw(c, cmd, .Cover_Even_Odd if even_odd else .Cover_Non_Zero, fill, start)
+	return inst
 }
 
 // Fills a shape (shape.odin) with `paint` under the current transform, by
 // per-pixel coverage: no tessellation, so a shape built once draws at any
 // transform for the cost of its bounds. `local` maps the shape's source
 // units (its path's, or a glyph's font units, y down) to current units.
-// The paint's fill rule applies; feathering is not supported. The frame
-// keeps `s`'s address: the shape must stay there, undestroyed, until the
-// frame has been rendered.
+// The paint fills as with fill_path (fill rule, anti-aliasing, feather).
+// The frame keeps `s`'s address: the shape must stay there, undestroyed,
+// until the frame has been rendered.
 fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY) {
-	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
-	if outside_target(c, shape_device_bounds(s, t)) {
+	to := transform_multiply(local, state(c).transform)
+	inst := paint_instance(paint, to)
+	inst.transform = transform_multiply(shape_local(s), to)
+	if outside_target(c, device_bounds(s.data, inst.transform, 1 + inst.widen)) {
 		return
 	}
-	cmd, row := shape_paint(c, paint)
-	push_shape(c, cmd, {s, t, row, paint.fill_rule == .Even_Odd}, false)
+	inst.shape = s
+	cmd: Command
+	cmd, inst.paint = shape_paint(c, paint)
+	push_shape(c, cmd, inst, false)
 }
+
 
 // Whether shapes filled with `paint` under the current state can overlap
 // without showing it: opaque colours blended source-over with no global
@@ -499,6 +499,7 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, {}, st.scissor, c.fringe_width, c.fringe_width, -1)
 	params.spread = f32(paint.spread)
+	params.smooth_edge = paint.feather > 0
 	return cmd, add_paint(c, params)
 }
 
@@ -509,19 +510,25 @@ push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, r
 	if outside_target(c, shape_device_bounds(s, t)) {
 		return
 	}
-	push_shape(c, cmd, {s, t, row, even_odd}, union_coverage)
+	push_shape(c, cmd, {shape = s, transform = t, paint = row, even_odd = even_odd}, union_coverage)
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),
 // grown by the pixel its edge coverage reaches.
 shape_device_bounds :: proc "contextless" (s: ^Shape, t: Transform2D) -> Bounds {
-	x0, y0, x1, y1 := shape_bounds(s)
+	return device_bounds(s.data, t, 1)
+}
+
+// Device bounds of shape words under `t`, grown by `grow` pixels.
+@(private)
+device_bounds :: proc "contextless" (words: []u32, t: Transform2D, grow: f32) -> Bounds {
+	x0, y0, x1, y1 := cv.bounds(words)
 	b := EMPTY_BOUNDS
 	for p in ([4]Vec2{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}) {
 		q := transform_point(t, p.x, p.y)
 		b = {min(b.minx, q.x), min(b.miny, q.y), max(b.maxx, q.x), max(b.maxy, q.y)}
 	}
-	return {b.minx - 1, b.miny - 1, b.maxx + 1, b.maxy + 1}
+	return {b.minx - grow, b.miny - grow, b.maxx + grow, b.maxy + grow}
 }
 
 // Appends a shape instance, extending the frame's last command when it is
@@ -543,159 +550,24 @@ push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, union_covera
 	append(&c.commands, cmd)
 }
 
+// Strokes `p` with `paint`: the stroke's outline (stroke.odin) filled by
+// coverage like fill_path, each pixel once however the stroke overlaps
+// itself.
 stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
-	p := p
-	if len(paint.stroke.dash) > 0 {
-		// Dash in path units, before the transform (SVG).
-		path_reset(&c.dash_scratch)
-		if !path_dash(p, paint.stroke.dash, paint.stroke.dash_offset, paint.stroke.path_length, &c.dash_scratch, &c.dash_flat, c.limits[.Dash_Segments]) {
-			c.limited += {.Dash_Segments}
-		}
-		p = &c.dash_scratch
-	}
-	if paint.stroke.line_cap_start != .Butt || paint.stroke.line_cap_end != .Butt {
-		stroke_zero_length_caps(c, p, paint)
-	}
-	st := state(c)
-	t := st.transform
-	cache := tessellate(c, p, t)
-	if outside_target(c, cache.bounds) {
-		return
-	}
-
-	flavor := paint.flavor
-	line_width := max(paint.stroke.line_width * transform_average_scale(t), 0)
-	if line_width < c.fringe_width {
-		// Thinner than a pixel: keep the width and fade out instead, which
-		// preserves apparent coverage. Linear in the width (femtovg's fix of
-		// nanovg's squared fade): a 0.5 px line is half covered, as in
-		// Skia's hairlines and the browsers.
-		a := clamp(line_width / c.fringe_width, 0, 1)
-		flavor_mul_alpha(&flavor, a)
-		line_width = c.fringe_width
-	}
-	flavor_mul_alpha(&flavor, st.alpha)
-
-	fringe := c.fringe_width if paint.anti_alias else 0
-	tessellation_stroke(
-		cache,
-		line_width * 0.5,
-		fringe,
-		paint.stroke.line_cap_start,
-		paint.stroke.line_cap_end,
-		paint.stroke.line_join,
-		paint.stroke.miter_limit,
-		c.tess_tol,
-	)
-
-	cmd := Command {
-		composite_operation = st.composite_operation,
-		scissor_rect        = current_scissor_rect(c),
-	}
-	attach_paint_image(c, &cmd, &flavor)
-	params := params_from_paint(&c.images, paint_space(paint, t), &flavor, {}, st.scissor, line_width, c.fringe_width, -1)
-	params.spread = f32(paint.spread)
-	stroke := add_paint(c, params)
-	start := len(c.pieces)
-	for ct in cache.contours {
-		emit_strip(c, cache.stroke_verts[ct.stroke.start:][:ct.stroke.count], stroke)
-	}
-	if !paint.stroke.stencil_strokes {
-		push_draw(c, cmd, .None, stroke, start)
-		return
-	}
-	// Each pixel once (overlapping parts of a translucent stroke do not
-	// darken), then zero the stencil over the same pieces.
-	push_draw(c, cmd, .Once, stroke, start)
-	push_draw(c, cmd, .Clear, stroke, start)
-}
-
-// Zero-length subpaths ("M p L p", "M p Z", zero dashes) have no stroke
-// geometry, but round and square caps still draw a dot there (SVG).
-@(private)
-stroke_zero_length_caps :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	t := state(c).transform
-	tol := c.dist_tol / max(transform_average_scale(t), 1e-6)
-	dots := &c.cap_scratch
-	path_reset(dots)
-	hw := paint.stroke.line_width * 0.5
-	caps := [2]Line_Cap{paint.stroke.line_cap_start, paint.stroke.line_cap_end}
-	start, last, dir: Vec2
-	length: f32
-	open, has_seg := false, false
-	// The dot is the start cap behind the subpath's direction and the end
-	// cap ahead of it, each its own style.
-	finish :: proc(dots: ^Path, open, has_seg: bool, length, tol: f32, at, dir: Vec2, hw: f32, caps: [2]Line_Cap) {
-		if !open || !has_seg || length > tol {
-			return
-		}
-		if caps == {.Round, .Round} {
-			path_circle(dots, at.x, at.y, hw)
-			return
-		}
-		d := dir if dir != {} else Vec2{1, 0}
-		n := Vec2{-d.y, d.x}
-		// One cap's half, from `at + from * hw` round to `at - from * hw`
-		// on the `side` half-plane.
-		half :: proc(dots: ^Path, at, from, side: Vec2, hw: f32, cap: Line_Cap) {
-			switch cap {
-			case .Butt:
-			case .Square:
-				for q in ([2]Vec2{at + (from + side) * hw, at + (side - from) * hw}) {
-					path_line_to(dots, q.x, q.y)
-				}
-			case .Round:
-				// Half a circle from `from` through `side` (path_arc: .Hole
-				// sweeps to larger angles).
-				a0 := math.atan2(from.y, from.x)
-				up := from.x * side.y - from.y * side.x > 0
-				path_arc(dots, at.x, at.y, hw, a0, a0 + (math.PI if up else -math.PI), .Hole if up else .Solid)
-			}
-			e := at - from * hw
-			path_line_to(dots, e.x, e.y)
-		}
-		s := at + n * hw
-		path_move_to(dots, s.x, s.y)
-		half(dots, at, n, d, hw, caps[1])
-		half(dots, at, -n, -d, hw, caps[0])
-		path_close(dots)
-	}
-	it := path_iter(p)
-	for verb, coords in path_iter_next(&it) {
-		switch verb {
-		case .Move_To:
-			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-			start, last = coords[0], coords[0]
-			length, dir = 0, {}
-			open, has_seg = true, false
-		case .Line_To, .Bezier_To:
-			to := coords[len(coords) - 1]
-			d := coords[0] - last
-			if l := math.hypot(d.x, d.y); l > 0 && dir == {} {
-				dir = d / l
-			}
-			for q in coords {
-				e := q - last
-				length += math.hypot(e.x, e.y)
-				last = q
-			}
-			last = to
-			has_seg = true
-		case .Close:
-			has_seg = true
-			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-			open = false
-		case .Solid, .Hole:
-		}
-	}
-	finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-	if len(dots.verbs) == 0 {
+	scale := transform_average_scale(t)
+	if scale <= 0 {
 		return
+	}
+	b := &c.scratch.builder
+	shape_builder_reset(b)
+	b.tol = 1.0 / 16
+	if !stroke_add(&c.scratch, p, t, paint.stroke, b.tol / scale, c.limits[.Dash_Segments]) {
+		c.limited += {.Dash_Segments}
 	}
 	fill := paint
 	fill.fill_rule = .Non_Zero
-	fill.stroke.dash = nil
-	fill_path(c, dots, fill)
+	fill_built(c, fill, t)
 }
 
 // Adds a paint row to the frame and returns its index.
@@ -705,42 +577,16 @@ add_paint :: proc(c: ^Canvas, params: Params) -> u32 {
 	return u32(len(c.paints) - 1)
 }
 
-// Appends `src` painted with `paint` as one piece: a triangle list, or a
-// strip.
+// A draw of the vertices from `start` to the end of the frame's; none when
+// there are none.
 @(private)
-emit_piece :: proc(c: ^Canvas, src: []Path_Vertex, paint: u32, strip: bool) {
-	if len(src) < 3 {
-		return
-	}
-	base := len(c.verts)
-	// Every new vertex is written below: no zeroing first.
-	non_zero_resize(&c.verts, base + len(src))
-	for v, i in src {
-		c.verts[base + i] = vertex(v.x, v.y, v.u, v.v, paint)
-	}
-	append(&c.pieces, Piece{{u32(base), u32(len(src))}, strip})
-}
-
-@(private)
-emit_list :: #force_inline proc(c: ^Canvas, src: []Path_Vertex, paint: u32) {
-	emit_piece(c, src, paint, false)
-}
-
-@(private)
-emit_strip :: #force_inline proc(c: ^Canvas, src: []Path_Vertex, paint: u32) {
-	emit_piece(c, src, paint, true)
-}
-
-// A draw of the pieces from `start` to the end of the frame's, under
-// `stencil`; none when there are none.
-@(private)
-push_draw :: proc(c: ^Canvas, base: Command, stencil: Stencil_Mode, paint: u32, start: int) {
-	if len(c.pieces) == start {
+push_draw :: proc(c: ^Canvas, base: Command, paint: u32, start: int) {
+	if len(c.verts) == start {
 		return
 	}
 	cmd := base
-	cmd.type = Cmd_Draw{stencil, paint}
-	cmd.pieces = {u32(start), u32(len(c.pieces) - start)}
+	cmd.type = Cmd_Draw{paint}
+	cmd.verts = {u32(start), u32(len(c.verts) - start)}
 	append(&c.commands, cmd)
 }
 
@@ -766,16 +612,16 @@ attach_paint_image :: proc(c: ^Canvas, cmd: ^Command, flavor: ^Paint_Flavor) {
 Canvas_Mark :: struct {
 	commands: int,
 	verts:    int,
-	pieces:   int,
 	paints:   int,
 	bytes:    int,
 	filters:  int,
 	runs:     int,
 	shapes:   int,
+	words:    int,
 }
 
 canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
-	return {len(c.commands), len(c.verts), len(c.pieces), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes)}
+	return {len(c.commands), len(c.verts), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes), len(c.shape_words)}
 }
 
 // Drops everything recorded since `m`. The render target must be the one
@@ -784,12 +630,12 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	// Shrinking keeps the capacity.
 	resize(&c.commands, m.commands)
 	resize(&c.verts, m.verts)
-	resize(&c.pieces, m.pieces)
 	resize(&c.paints, m.paints)
 	resize(&c.bytes, m.bytes)
 	resize(&c.filters, m.filters)
 	resize(&c.runs, m.runs)
 	resize(&c.shapes, m.shapes)
+	resize(&c.shape_words, m.words)
 }
 
 // ---- flush ----------------------------------------------------------------------
@@ -804,16 +650,16 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	clear(&c.filters)
 	clear(&c.runs)
 	clear(&c.verts)
-	clear(&c.pieces)
 	clear(&c.paints)
 	clear(&c.shapes)
+	clear(&c.shape_words)
 	frame_end(c)
 }
 
 // The frame recorded so far, as `flush` hands it over.
 @(private)
 canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
-	return {verts = c.verts[:], pieces = c.pieces[:], paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:]}
+	return {verts = c.verts[:], paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:], shape_words = c.shape_words[:]}
 }
 
 @(private)
@@ -832,13 +678,13 @@ Recorded_Frame :: struct {
 	height:      u32,
 	dpi:         f32,
 	verts:       [dynamic]Vertex,
-	pieces:      [dynamic]Piece,
 	paints:      [dynamic]Params,
 	commands:    [dynamic]Command,
 	bytes:       [dynamic]u8,
 	filters:     [dynamic]Image_Filter,
 	runs:        [dynamic]Program_Run,
 	shapes:      [dynamic]Shape_Instance,
+	shape_words: [dynamic]u32,
 	image_ops:   [dynamic]Image_Op,
 	pixels:      [dynamic]u8,
 	program_ops: [dynamic]Program_Op,
@@ -846,13 +692,13 @@ Recorded_Frame :: struct {
 
 recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
 	delete(f.verts)
-	delete(f.pieces)
 	delete(f.paints)
 	delete(f.commands)
 	delete(f.bytes)
 	delete(f.filters)
 	delete(f.runs)
 	delete(f.shapes)
+	delete(f.shape_words)
 	delete(f.image_ops)
 	delete(f.pixels)
 	delete(f.program_ops)
@@ -869,13 +715,13 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 		clear(a)
 	}
 	swap_clear(&c.verts, &out.verts)
-	swap_clear(&c.pieces, &out.pieces)
 	swap_clear(&c.paints, &out.paints)
 	swap_clear(&c.commands, &out.commands)
 	swap_clear(&c.bytes, &out.bytes)
 	swap_clear(&c.filters, &out.filters)
 	swap_clear(&c.runs, &out.runs)
 	swap_clear(&c.shapes, &out.shapes)
+	swap_clear(&c.shape_words, &out.shape_words)
 	swap_clear(&c.images.ops, &out.image_ops)
 	swap_clear(&c.images.pixels, &out.pixels)
 	swap_clear(&c.program_ops, &out.program_ops)

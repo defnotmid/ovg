@@ -1,46 +1,29 @@
 package ovg_sdlgpu
 
 import "core:math"
-import "core:sync"
 import sdl "vendor:sdl3"
 
 import vg ".."
+import cv "../curves"
 
-// The backend's copies of the shapes it has drawn (vg.Shape), in one
-// storage buffer the shape shader reads: a shape is uploaded the first
-// frame it is drawn and stays until it is destroyed (`vg.shape_destroy`
-// calls `store_forget`, on any thread). A freed range is reused once the
-// frames that may still read it have finished. The buffer grows by
-// doubling, keeping every shape's place.
+// The backend's copies of the shapes it draws, in one storage buffer the
+// shape shader reads, found by shape id: a shape is uploaded the first time
+// it is drawn, and a frame's own shapes (filled paths) are appended each
+// frame. Nothing is freed one by one: when a frame doesn't fit, the store
+// starts over in a fresh buffer holding what that frame draws (the old one
+// is released once the frames reading it finish), so destroyed shapes and
+// past frames' words cost nothing beyond it.
 Shape_Store :: struct {
-	lock:              sync.Mutex,
 	buffer:            ^sdl.GPUBuffer,
 	// In 32-bit words.
 	capacity:          u32,
 	top:               u32,
-	ranges:            map[u64]Shape_Range,
-	free:              [dynamic]Free_Range,
-	// Shapes placed but not yet uploaded.
+	// Shape id to its place.
+	at:                map[u64]u32,
+	// Words placed but not yet uploaded.
 	pending:           [dynamic]Pending_Shape,
-	// The buffer before it grew this frame, and the words to copy from it.
-	old:               ^sdl.GPUBuffer,
-	old_top:           u32,
 	transfer:          ^sdl.GPUTransferBuffer,
 	transfer_capacity: u32,
-	// The backend's frame count, for the age of freed ranges.
-	frame:             u64,
-}
-
-@(private = "file")
-Shape_Range :: struct {
-	offset, words: u32,
-}
-
-@(private = "file")
-Free_Range :: struct {
-	offset, words: u32,
-	// The frame it was freed in.
-	frame:         u64,
 }
 
 @(private = "file")
@@ -62,130 +45,88 @@ Gpu_Shape_Instance :: struct {
 
 @(private)
 store_init :: proc(b: ^SDL_Backend) {
-	st := &b.shapes
-	st.ranges = make(map[u64]Shape_Range, b.allocator)
-	st.free = make([dynamic]Free_Range, b.allocator)
-	st.pending = make([dynamic]Pending_Shape, b.allocator)
-	vg.shape_store_register({st, store_forget})
+	b.shapes.at = make(map[u64]u32, b.allocator)
+	b.shapes.pending = make([dynamic]Pending_Shape, b.allocator)
 }
 
 @(private)
 store_destroy :: proc(b: ^SDL_Backend) {
 	st := &b.shapes
-	vg.shape_store_unregister(st)
 	if st.buffer != nil {
 		sdl.ReleaseGPUBuffer(b.device, st.buffer)
-	}
-	if st.old != nil {
-		sdl.ReleaseGPUBuffer(b.device, st.old)
 	}
 	if st.transfer != nil {
 		sdl.ReleaseGPUTransferBuffer(b.device, st.transfer)
 	}
-	delete(st.ranges)
-	delete(st.free)
+	delete(st.at)
 	delete(st.pending)
 	st^ = {}
 }
 
-@(private = "file")
-store_forget :: proc(data: rawptr, id: u64) {
-	st := (^Shape_Store)(data)
-	sync.mutex_lock(&st.lock)
-	defer sync.mutex_unlock(&st.lock)
-	r, ok := st.ranges[id]
-	if !ok {
-		return
+// Places the frame's shapes: each instance's word offset in the store
+// (`b.shape_offsets`), placing the shapes new to it and the frame's own
+// words to upload this frame; false when the store can't be that large.
+@(private)
+store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> bool {
+	st := &b.shapes
+	resize(&b.shape_offsets, len(frame.shapes))
+	if len(st.pending) > 0 {
+		// The last frame was dropped before its upload: what it placed may
+		// be gone, so start over.
+		clear(&st.at)
+		clear(&st.pending)
+		st.top, st.capacity = 0, 0
 	}
-	delete_key(&st.ranges, id)
-	for p, i in st.pending {
-		if p.offset == r.offset {
-			unordered_remove(&st.pending, i)
+	place :: proc(st: ^Shape_Store, data: []u32) -> u32 {
+		offset := st.top
+		if len(data) > 0 {
+			append(&st.pending, Pending_Shape{offset, data})
+			st.top += u32(len(data))
+		}
+		return offset
+	}
+	for again in ([2]bool{false, true}) {
+		own := place(st, frame.shape_words)
+		for inst, i in frame.shapes {
+			if inst.shape == nil {
+				b.shape_offsets[i] = own + inst.words.start
+				continue
+			}
+			offset, ok := st.at[inst.shape.id]
+			if !ok {
+				offset = place(st, inst.shape.data)
+				st.at[inst.shape.id] = offset
+			}
+			b.shape_offsets[i] = offset
+		}
+		if st.top <= st.capacity || again {
 			break
 		}
+		// It doesn't fit: start over with only this frame's shapes, in a
+		// buffer twice their size (store_upload makes it).
+		clear(&st.at)
+		clear(&st.pending)
+		st.top, st.capacity = 0, 0
 	}
-	append(&st.free, Free_Range{r.offset, r.words, st.frame})
+	// Sizes in bytes are 32-bit.
+	return st.top <= 1 << 28
 }
 
-// The shape's word offset in the store, placing it (to upload this frame)
-// on first use; false when the device can't grow the store.
-@(private)
-store_place :: proc(b: ^SDL_Backend, s: ^vg.Shape) -> (offset: u32, ok: bool) {
-	st := &b.shapes
-	sync.mutex_lock(&st.lock)
-	defer sync.mutex_unlock(&st.lock)
-	if r, has := st.ranges[s.id]; has {
-		return r.offset, true
-	}
-	words := u32(len(s.data))
-	offset, ok = store_alloc(b, words)
-	if !ok {
-		return
-	}
-	st.ranges[s.id] = {offset, words}
-	append(&st.pending, Pending_Shape{offset, s.data})
-	return offset, true
-}
-
-@(private = "file")
-store_alloc :: proc(b: ^SDL_Backend, words: u32) -> (offset: u32, ok: bool) {
-	st := &b.shapes
-	// A freed range old enough that no running frame reads it, best fit.
-	best := -1
-	for f, i in st.free {
-		if f.words >= words && st.frame > f.frame + MAX_FRAMES_IN_FLIGHT && (best < 0 || f.words < st.free[best].words) {
-			best = i
-		}
-	}
-	if best >= 0 {
-		f := &st.free[best]
-		offset = f.offset
-		if f.words == words {
-			unordered_remove(&st.free, best)
-		} else {
-			f.offset += words
-			f.words -= words
-		}
-		return offset, true
-	}
-	if st.top + words > st.capacity {
-		capacity := u32(math.next_power_of_two(int(max(st.top + words, 1 << 16))))
-		buffer := sdl.CreateGPUBuffer(b.device, {usage = {.GRAPHICS_STORAGE_READ}, size = capacity * 4})
-		if buffer == nil {
-			return 0, false
-		}
-		if st.old == nil {
-			// Copied into the new buffer before this frame's uploads.
-			st.old, st.old_top = st.buffer, st.top
-		} else if st.buffer != nil {
-			// Grown twice this frame: the middle buffer holds nothing yet.
-			sdl.ReleaseGPUBuffer(b.device, st.buffer)
-		}
-		st.buffer, st.capacity = buffer, capacity
-	}
-	offset = st.top
-	st.top += words
-	return offset, true
-}
-
-// Copies the shapes placed since the last upload into the store; false
-// (nothing recorded, the shapes left pending) when the device fails.
+// Uploads the words placed since the last upload, into a fresh buffer when
+// the store started over; false (nothing recorded) when the device fails.
 @(private)
 store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	st := &b.shapes
-	sync.mutex_lock(&st.lock)
-	defer sync.mutex_unlock(&st.lock)
-	if st.old != nil {
-		if st.old_top > 0 {
-			pass := sdl.BeginGPUCopyPass(cmd)
-			if pass == nil {
-				return false
-			}
-			sdl.CopyGPUBufferToBuffer(pass, {buffer = st.old}, {buffer = st.buffer}, st.old_top * 4, false)
-			sdl.EndGPUCopyPass(pass)
+	if st.top > st.capacity {
+		capacity := u32(math.next_power_of_two(int(max(2 * st.top, 1 << 16))))
+		buffer := sdl.CreateGPUBuffer(b.device, {usage = {.GRAPHICS_STORAGE_READ}, size = capacity * 4})
+		if buffer == nil {
+			return false
 		}
-		sdl.ReleaseGPUBuffer(b.device, st.old)
-		st.old, st.old_top = nil, 0
+		if st.buffer != nil {
+			sdl.ReleaseGPUBuffer(b.device, st.buffer)
+		}
+		st.buffer, st.capacity = buffer, capacity
 	}
 	total: u32
 	for p in st.pending {
@@ -231,28 +172,20 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	return true
 }
 
-// Starts the backend's frame `frame` in the store (the age of freed
-// ranges).
+// The instance as the shader reads it: `words` are its shape's, `offset`
+// their place in the store.
 @(private)
-store_begin_frame :: proc(b: ^SDL_Backend) {
-	sync.mutex_lock(&b.shapes.lock)
-	b.shapes.frame = b.frame
-	sync.mutex_unlock(&b.shapes.lock)
-}
-
-// The instance as the shader reads it: `offset` is the shape's place in
-// the store.
-@(private)
-gpu_shape_instance :: proc(inst: vg.Shape_Instance, offset: u32) -> Gpu_Shape_Instance {
+gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32) -> Gpu_Shape_Instance {
 	t := inst.transform
-	epp := vg.shape_ems_per_pixel(t)
-	u, v := vg.shape_footprint(t)
-	x0, y0, x1, y1 := vg.shape_bounds(inst.shape)
+	epp := vg.shape_ems_per_pixel(t) * (1 + inst.widen)
+	u, v := vg.instance_footprint(inst)
+	x0, y0, x1, y1 := cv.bounds(words)
+	flags: u32 = (1 if inst.even_odd else 0) | (2 if inst.aliased else 0)
 	return {
 		m = {t[0], t[1], t[2], t[3]},
 		t = {t[4], t[5], epp.x, epp.y},
 		bounds = {x0, y0, x1, y1},
 		uv = {u.x, u.y, v.x, v.y},
-		data = {offset, inst.paint, 1 if inst.even_odd else 0, 0},
+		data = {offset, inst.paint, flags, 0},
 	}
 }

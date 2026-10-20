@@ -22,14 +22,14 @@ struct vertexInput_0
 };
 
 
-#line 47 "ovg.slang"
+#line 46 "ovg.slang"
 struct View_0
 {
     float4 size_0;
 };
 
 
-#line 72
+#line 71
 struct VS_Out_0
 {
     float4 position_1;
@@ -39,11 +39,11 @@ struct VS_Out_0
 };
 
 
-#line 72
+#line 71
 [[vertex]] vs_main_Result_0 vs_main(vertexInput_0 _S1 [[stage_in]], View_0 constant* view_0 [[buffer(0)]])
 {
 
-#line 83
+#line 82
     thread VS_Out_0 o_0;
     (&o_0)->ftcoord_1 = _S1.tcoord_0;
     (&o_0)->fpos_1 = _S1.vertex_0;
@@ -51,22 +51,22 @@ struct VS_Out_0
     float2 p_0 = _S1.vertex_0 - view_0->size_0.zw;
     (&o_0)->position_1 = float4(2.0f * p_0.x / view_0->size_0.x - 1.0f, 1.0f - 2.0f * p_0.y / view_0->size_0.y, 0.0f, 1.0f);
 
-#line 88
+#line 87
     thread vs_main_Result_0 _S2;
 
-#line 88
+#line 87
     (&_S2)->position_0 = o_0.position_1;
 
-#line 88
+#line 87
     (&_S2)->ftcoord_0 = o_0.ftcoord_1;
 
-#line 88
+#line 87
     (&_S2)->fpos_0 = o_0.fpos_1;
 
-#line 88
+#line 87
     (&_S2)->paint_0 = o_0.paint_2;
 
-#line 88
+#line 87
     return _S2;
 }
 

@@ -142,7 +142,7 @@ path_morph_eval :: proc(m: ^Path_Morph, t: f32, out: ^Path) {
 }
 
 // The contours of `f` as rings, classified and wound in place: solids with
-// a positive `polygon_area` (the tessellator's `.Solid`), holes negative.
+// a positive `morph_area` (path solidity `.Solid`), holes negative.
 @(private = "file")
 morph_rings :: proc(f: ^Flat_Path, rings: ^[dynamic]Morph_Ring, rule: Fill_Rule) {
 	clear(rings)
@@ -173,7 +173,7 @@ morph_rings :: proc(f: ^Flat_Path, rings: ^[dynamic]Morph_Ring, rule: Fill_Rule)
 		if rule == .Even_Odd {
 			r.hole = w % 2 != 0
 		} else {
-			// Positive polygon_area winds -1 around its inside.
+			// A positive area winds -1 around its inside.
 			own := -1 if r.area > 0 else 1 if r.area < 0 else 0
 			r.hole = w != 0 && w + own == 0
 		}
@@ -400,7 +400,8 @@ morph_at :: proc(pts: []Vec2, params: []f32, at: f32) -> Vec2 {
 	return p0 + (p1 - p0) * ((u - u0) / (u1 - u0))
 }
 
-// `polygon_area` of a ring of positions, and its area centroid (the
+// The signed area of a ring of positions (positive for path solidity
+// `.Solid`), and its area centroid (the
 // vertex mean for a ring of no area).
 @(private = "file")
 morph_area :: proc "contextless" (pts: []Vec2) -> (area: f32, centroid: Vec2) {

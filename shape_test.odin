@@ -349,3 +349,23 @@ test_winding_matches_coverage :: proc(t: ^testing.T) {
 		testing.expectf(t, disagree == 0, "'%c': %v of 97x97 points disagree", r, disagree)
 	}
 }
+
+@(test)
+test_shape_from_stroke :: proc(t: ^testing.T) {
+	// A line 4 wide, butt caps: covered within 2 of the line, not past
+	// its ends or beyond its width.
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 10, 10)
+	path_line_to(&p, 50, 10)
+	st := DEFAULT_STROKE
+	st.line_width = 4
+	s, ok, complete := shape_from_stroke(&p, st)
+	testing.expect(t, ok && complete)
+	defer shape_destroy(&s)
+	inside :: proc(s: ^Shape, x, y: f32) -> bool {
+		return cv.winding(s.data, (Vec2{x, y} - s.origin) / s.extent) != 0
+	}
+	testing.expect(t, inside(&s, 30, 10) && inside(&s, 30, 11.5) && inside(&s, 11, 9))
+	testing.expect(t, !inside(&s, 30, 12.5) && !inside(&s, 8, 10) && !inside(&s, 52, 10))
+}

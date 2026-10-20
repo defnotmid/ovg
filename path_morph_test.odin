@@ -3,15 +3,20 @@ package ovg
 import "core:mem"
 import "core:testing"
 
+import cv "curves"
+
 // Path morphs, text as a path and SVG geometry as a path.
 
 // The fill of `p` at (x, y) under `rule`.
 @(private = "file")
 filled :: proc(p: ^Path, x, y: f32, rule: Fill_Rule) -> bool {
-	tess: Tessellation
-	defer tessellation_destroy(&tess)
-	tessellation_build(&tess, p, TRANSFORM_IDENTITY, 0.25, 0.01)
-	return tessellation_contains_point(&tess, x, y, rule)
+	s, ok := shape_from_path(p)
+	if !ok {
+		return false
+	}
+	defer shape_destroy(&s)
+	w := cv.winding(s.data, (Vec2{x, y} - s.origin) / s.extent)
+	return w & 1 != 0 if rule == .Even_Odd else w != 0
 }
 
 // Total |area| of the polylines of `p` and its contour count.

@@ -1,6 +1,5 @@
 package ovg
 
-import "base:runtime"
 import "core:mem"
 import "core:sync"
 import stbtt "vendor:stb/truetype"
@@ -8,15 +7,15 @@ import stbtt "vendor:stb/truetype"
 import cv "curves"
 
 // Shapes drawn by per-pixel coverage: ovg's handle on the curves package
-// (curves/curves.odin: Slug's algorithm, the word layout, the coverage and
-// winding functions; shaders/curves.slang is its GPU twin). A `Shape` owns
-// its words and an id the GPU backends know its copy by; it is built once
-// (from a path or a glyph) and drawn under any transform with `fill_shape`.
+// (curves/curves.odin: the word layout, the coverage and winding
+// functions; shaders/curves.slang is its GPU twin). A `Shape` owns its
+// words; it is built once (from a path, a stroke or a glyph) by whatever
+// owns it and drawn under any transform with `fill_shape`.
 
 Shape :: struct {
 	data:      []u32,
-	// Unique for the process's life: GPU backends find their copy of the
-	// shape by it, so a shape may be moved.
+	// Unique for the process's life (never reused): GPU backends find
+	// their copy of the shape by it, uploading it when they have none.
 	id:        u64,
 	// Shape units to the units the shape was built in (path units, or font
 	// units with y down): `p = origin + q * extent`.
@@ -25,55 +24,9 @@ Shape :: struct {
 	allocator: mem.Allocator,
 }
 
-// Frees the shape and every GPU backend's copy of it.
 shape_destroy :: proc(s: ^Shape) {
-	if s.id != 0 {
-		sync.mutex_lock(&shape_stores.lock)
-		for st in shape_stores.list {
-			st.forget(st.data, s.id)
-		}
-		sync.mutex_unlock(&shape_stores.lock)
-	}
 	delete(s.data, s.allocator)
 	s^ = {}
-}
-
-// A backend that keeps copies of shapes (in GPU memory) registers here, so
-// a shape's copies are freed with it: `forget` runs from `shape_destroy`,
-// on whatever thread destroys the shape.
-Shape_Store_Hook :: struct {
-	data:   rawptr,
-	forget: proc(data: rawptr, id: u64),
-}
-
-shape_store_register :: proc(h: Shape_Store_Hook) {
-	sync.mutex_lock(&shape_stores.lock)
-	defer sync.mutex_unlock(&shape_stores.lock)
-	if shape_stores.list == nil {
-		shape_stores.list = make([dynamic]Shape_Store_Hook, runtime.heap_allocator())
-	}
-	append(&shape_stores.list, h)
-}
-
-shape_store_unregister :: proc(data: rawptr) {
-	sync.mutex_lock(&shape_stores.lock)
-	defer sync.mutex_unlock(&shape_stores.lock)
-	for h, i in shape_stores.list {
-		if h.data == data {
-			unordered_remove(&shape_stores.list, i)
-			break
-		}
-	}
-	if len(shape_stores.list) == 0 {
-		delete(shape_stores.list)
-		shape_stores.list = nil
-	}
-}
-
-@(private = "file")
-shape_stores: struct {
-	lock: sync.Mutex,
-	list: [dynamic]Shape_Store_Hook,
 }
 
 @(private = "file")
@@ -114,17 +67,30 @@ shape_solidity :: proc(b: ^Shape_Builder, s: Solidity) {
 	}
 }
 
-// Adds a path's contours. Every contour is closed, as filling does.
-shape_add_path :: proc(b: ^Shape_Builder, p: ^Path) {
+// Adds a path's contours under `t`. Every contour is closed, as filling
+// does; segments before the first move go nowhere, and a segment after a
+// close starts a contour where the closed one started.
+shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 	it := path_iter(p)
+	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
+		return transform_point(t, p.x, p.y)
+	}
+	moved := false
 	for verb, coords in path_iter_next(&it) {
+		if (verb == .Line_To || verb == .Bezier_To) && !b.open {
+			if !moved {
+				continue
+			}
+			shape_move_to(b, b.last)
+		}
 		switch verb {
 		case .Move_To:
-			shape_move_to(b, coords[0])
+			shape_move_to(b, at(t, coords[0]))
+			moved = true
 		case .Line_To:
-			shape_line_to(b, coords[0])
+			shape_line_to(b, at(t, coords[0]))
 		case .Bezier_To:
-			shape_cubic_to(b, coords[0], coords[1], coords[2])
+			shape_cubic_to(b, at(t, coords[0]), at(t, coords[1]), at(t, coords[2]))
 		case .Close:
 			shape_close(b)
 		case .Solid:
@@ -163,18 +129,79 @@ shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index) -> bool {
 }
 
 // Builds the shape from the builder's curves; false (and no shape) when
-// there are none.
-shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator) -> (s: Shape, ok: bool) {
-	words, origin, extent := cv.build(b, allocator) or_return
+// there are none. `search` sizes the grid for the fastest drawing
+// (cv.build).
+shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true) -> (s: Shape, ok: bool) {
+	words, origin, extent := cv.build(b, allocator, search) or_return
 	return {data = words, origin = origin, extent = extent, allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}, true
 }
 
+// What building shapes needs, kept by a caller that builds many (it only
+// grows); without one a build takes it from the context's temp allocator.
+Shape_Scratch :: struct {
+	builder: Shape_Builder,
+	// Strokes: the outline's segments, the dashed path (and the measure of
+	// the path it dashes), the dots of zero-length subpaths' caps.
+	segs:    [dynamic]Stroke_Seg,
+	dashed:  Path,
+	flat:    Flat_Path,
+	dots:    Path,
+}
+
+// A scratch allocating from `allocator`.
+shape_scratch_init :: proc(s: ^Shape_Scratch, allocator := context.allocator) {
+	s^ = {}
+	s.builder.curves.allocator = allocator
+	s.segs.allocator = allocator
+	s.dashed.verbs.allocator, s.dashed.coords.allocator = allocator, allocator
+	s.dots.verbs.allocator, s.dots.coords.allocator = allocator, allocator
+	s.flat.points.allocator, s.flat.contours.allocator = allocator, allocator
+}
+
+shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
+	shape_builder_destroy(&s.builder)
+	delete(s.segs)
+	path_destroy(&s.dashed)
+	flat_path_destroy(&s.flat)
+	path_destroy(&s.dots)
+	s^ = {}
+}
+
 // Builds a path's shape.
-shape_from_path :: proc(p: ^Path, allocator := context.allocator) -> (Shape, bool) {
-	b: Shape_Builder
-	b.curves.allocator = context.temp_allocator
-	shape_add_path(&b, p)
-	return shape_build(&b, allocator)
+shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true, scratch: ^Shape_Scratch = nil) -> (Shape, bool) {
+	temp: Shape_Scratch
+	sc := scratch
+	if sc == nil {
+		shape_scratch_init(&temp, context.temp_allocator)
+		sc = &temp
+	}
+	shape_builder_reset(&sc.builder)
+	sc.builder.tol = 0
+	shape_add_path(&sc.builder, p)
+	return shape_build(&sc.builder, allocator, search)
+}
+
+// Builds the shape of `p`'s stroke with `s` (stroke.odin), in path units
+// within 1/4096 of its size; false (and no shape) when it covers nothing.
+// `complete` is false when the dashes ran past `max_dashes` (the stroke is
+// then undashed).
+shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.allocator, search := true, max_dashes := DEFAULT_LIMITS[.Dash_Segments], scratch: ^Shape_Scratch = nil) -> (shape: Shape, ok, complete: bool) {
+	temp: Shape_Scratch
+	sc := scratch
+	if sc == nil {
+		shape_scratch_init(&temp, context.temp_allocator)
+		sc = &temp
+	}
+	shape_builder_reset(&sc.builder)
+	sc.builder.tol = 0
+	lo, hi := Vec2{max(f32), max(f32)}, Vec2{min(f32), min(f32)}
+	for q in p.coords {
+		lo, hi = {min(lo.x, q.x), min(lo.y, q.y)}, {max(hi.x, q.x), max(hi.y, q.y)}
+	}
+	tol := max(hi.x - lo.x, hi.y - lo.y, s.line_width) / 4096
+	complete = stroke_add(sc, p, TRANSFORM_IDENTITY, s, tol, max_dashes)
+	shape, ok = shape_build(&sc.builder, allocator, search)
+	return
 }
 
 // Builds a glyph's shape (font units, y down, the pen at the origin);

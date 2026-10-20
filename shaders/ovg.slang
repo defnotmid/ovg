@@ -17,7 +17,6 @@
 
 static const int FILL_GRADIENT = 0;
 static const int FILL_IMAGE = 1;
-static const int STENCIL = 2;
 static const int FILL_IMAGE_GRADIENT = 3;
 static const int FILTER_IMAGE = 4;
 static const int FILL_COLOR = 5;
@@ -707,8 +706,6 @@ float4 fs_main(VS_Out i) : SV_Target {
     float4 result;
     if (type == TEXTURE_COPY_UNCLIPPED) {
         return apply_tex_type(tex.SampleLevel(i.ftcoord, 0)) * inner_col();
-    } else if (type == STENCIL) {
-        result = float4(1, 1, 1, 1);
     } else if (type == FILTER_IMAGE) {
         result = render_filtered_image(i.fpos);
     } else {
@@ -726,7 +723,7 @@ float4 fs_main(VS_Out i) : SV_Target {
             mask = float4(mask.xyz * mask.w, mask.w);
         }
         result *= mask * scissor;
-    } else if (type != STENCIL && type != FILTER_IMAGE) {
+    } else if (type != FILTER_IMAGE) {
         result *= stroke_alpha * scissor;
     }
     return result;
@@ -735,14 +732,15 @@ float4 fs_main(VS_Out i) : SV_Target {
 // ---- shapes (ovg shape.odin) ------------------------------------------------
 //
 // A shape instance is a quad over the shape's bounds, grown by a pixel,
-// whose fragments compute coverage from the shape's curves (Slug's
-// algorithm; `shape_coverage` in shape.odin is the same steps). The
+// whose fragments compute coverage from the shape's curves
+// (`shape_coverage` in shape.odin is the same steps). The
 // instances and the shapes come from storage buffers: no vertex input.
 
 // Shape units to drawing coordinates (m: a b c d; t.xy: translation),
 // the shape units one pixel spans per axis (t.zw), the shape's bounds, the
 // pixel's sides in shape units (uv: u.xy, v.xy: its footprint), and its
-// word offset in `shapes`, paint row and flags (bit 0: even-odd).
+// word offset in `shapes`, paint row and flags (bit 0: even-odd; bit 1:
+// aliased, the pixel center's winding).
 struct Shape_Instance {
     float4 m;
     float4 t;
@@ -796,26 +794,40 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     return o;
 }
 
+// The paint through the pixel's coverage, as the edge coverage of a path's
+// vertices (so a feathered paint's smooth edge applies). Below half an
+// 8-bit step the pixel is left alone: rounding leaves such slivers where
+// the shape is absent, and a blend like Copy would clear them.
+float4 shape_fill(VS_Shape_Out i, float coverage) {
+    if (coverage < 1.0 / 510.0) {
+        discard;
+    }
+    float4 result = fill_color(shader_type(), i.fpos);
+    return result * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
+}
+
+// The pixel center's winding, for an aliased instance.
+float shape_aliased(VS_Shape_Out i) {
+    int w = curves_winding(shapes, i.data.x, i.rc);
+    return ((i.data.z & 1u) != 0u ? (w & 1) != 0 : w != 0) ? 1.0 : 0.0;
+}
+
 // Instances without rotation or skew (the pixel's footprint a box): a
 // leaner shader than the parallelogram one, so it runs with more waves.
 [shader("fragment")]
 float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
     paint_index = i.data.y;
-    float coverage = curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), (i.data.z & 1u) != 0u);
-    if (coverage <= 0.0) {
-        discard;
+    if ((i.data.z & 2u) != 0u) {
+        return shape_fill(i, shape_aliased(i));
     }
-    float4 result = fill_color(shader_type(), i.fpos);
-    return result * (stroke_mask(float2(0.5, 1.0)) * scissor_mask(i.fpos) * coverage);
+    return shape_fill(i, curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), (i.data.z & 1u) != 0u));
 }
 
 [shader("fragment")]
 float4 fs_shape(VS_Shape_Out i) : SV_Target {
     paint_index = i.data.y;
-    float coverage = curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u);
-    if (coverage <= 0.0) {
-        discard;
+    if ((i.data.z & 2u) != 0u) {
+        return shape_fill(i, shape_aliased(i));
     }
-    float4 result = fill_color(shader_type(), i.fpos);
-    return result * (stroke_mask(float2(0.5, 1.0)) * scissor_mask(i.fpos) * coverage);
+    return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u));
 }

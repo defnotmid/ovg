@@ -466,7 +466,7 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	}
 	if f.has_clip {
 		// Plus the clip's antialiased edge.
-		clip := tessellate(c, &ls.clips[depth], f.clip_xform).bounds
+		clip := path_device_bounds(c, &ls.clips[depth], f.clip_xform)
 		area = bounds_intersect(area, bounds_grow(clip, reach + 2))
 	}
 	if f.masked && !f.mask_invert {
@@ -523,12 +523,10 @@ command_bounds :: proc(c: ^Canvas, cmd: ^Command) -> (b: Bounds, ok: bool) {
 		}
 		b = {f32(v.x), f32(v.y), f32(v.x + v.w), f32(v.y + v.h)}
 	case Cmd_Draw:
-		for piece in c.pieces[cmd.pieces.start:][:cmd.pieces.count] {
-			b = verts_bounds(b, c.verts[piece.verts.start:][:piece.verts.count])
-		}
+		b = verts_bounds(b, c.verts[cmd.verts.start:][:cmd.verts.count])
 	case Cmd_Draw_Shapes:
 		for inst in c.shapes[v.instances.start:][:v.instances.count] {
-			b = bounds_union(b, shape_device_bounds(inst.shape, inst.transform))
+			b = bounds_union(b, instance_bounds(inst, c.shape_words[:]))
 		}
 	case:
 		return

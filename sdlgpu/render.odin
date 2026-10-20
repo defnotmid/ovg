@@ -10,16 +10,12 @@ import vg ".."
 // into rows (one GPU operation each), adding the quads and paints of
 // clears, filters and programs after the frame's. The upload writes each
 // stream once, in place in its mapped transfer buffer: the canvas's
-// vertices (each naming its paint), the triangle indices of its pieces
-// (lists and strips alike) and the packed paints. Recording merges
-// neighbouring rows that share a pipeline, textures, scissor and target
-// into one draw call. The stencil
-// modes (femtovg's GL backend) are baked into pipelines since SDL_GPU has
-// no dynamic stencil ops.
+// vertices (each naming its paint), the packed paints and the shape
+// instances; shapes new to the store go up first. Recording merges neighbouring rows that
+// share a pipeline, textures, scissor and target into one draw call.
 
 Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
-	stencil: vg.Stencil_Mode,
 	format:  sdl.GPUTextureFormat,
 	// The shape pipeline (shapes.odin) instead of the triangle one, and
 	// its box variant (instances without rotation or skew).
@@ -53,10 +49,9 @@ Row :: struct {
 	key:      Pipeline_Key,
 	textures: [2]sdl.GPUTextureSamplerBinding,
 	scissor:  sdl.Rect,
-	// Indices (`indexed`: the canvas's pieces) or vertices (the planner's
-	// own quads).
+	// Vertices (the canvas's, then the planner's own quads after them), or
+	// for Shapes instances.
 	verts:    vg.Range,
-	indexed:  bool,
 	// Filter passes run in a render pass of their own.
 	own_pass: bool,
 	program:  ^vg.Program_Run,
@@ -80,8 +75,6 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	o := (^Output)(uintptr(out))
 	b.frame += 1
 	b.stats = {shape_instances = len(frame.shapes)}
-	store_begin_frame(b)
-	evict_textures(b, &b.stencils)
 	evict_textures(b, &b.scratch)
 
 	screen: Image
@@ -101,19 +94,17 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	}
 	b.last_screen = screen
 
-	// Every texture the frame needs (stencils, filter intermediates, the
+	// Every texture the frame needs (filter intermediates, mask pages, the
 	// streams) is created while planning, before the command buffer is
 	// recorded: SDL_GPU submits when it creates a texture, and a submit may
 	// move textures a recording frame had already bound.
 	plan_frame(b, images, frame, screen)
 	vert_count := len(frame.verts) + len(b.verts)
-	index_count := int(b.piece_index[len(frame.pieces)])
 	paint_count := len(frame.paints) + len(b.paints)
 	instance_count := len(frame.shapes)
 	// A frame whose buffers the device can't provide (out of memory, a lost
 	// device) is dropped, not drawn from nil buffers.
 	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX}) ||
-	   !stream_reserve(b, &b.index_stream, index_count * size_of(u32), {.INDEX}) ||
 	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) ||
 	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) {
 		return
@@ -149,14 +140,6 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 			uploaded = false
 		}
 	}
-	if index_count > 0 {
-		if indices := ([^]u32)(stream_map(b, &b.index_stream, index_count)); indices != nil {
-			write_indices(indices[:index_count], frame.pieces)
-			stream_commit(b, &b.index_stream, copy_pass, index_count * size_of(u32))
-		} else {
-			uploaded = false
-		}
-	}
 	if paint_count > 0 {
 		if paints := ([^]Paint)(stream_map(b, &b.paint_stream, paint_count)); paints != nil {
 			for params, i in frame.paints {
@@ -172,7 +155,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		// Written once, straight into the mapped transfer buffer.
 		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
-				out[i] = gpu_shape_instance(inst, b.shape_offsets[i])
+				out[i] = gpu_shape_instance(inst, vg.instance_words(inst, frame.shape_words), b.shape_offsets[i])
 				out[i].t.xy += b.shape_shifts[i]
 			}
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
@@ -257,32 +240,6 @@ stream_commit :: proc(b: ^SDL_Backend, s: ^Stream, pass: ^sdl.GPUCopyPass, size:
 	sdl.UploadToGPUBuffer(pass, {transfer_buffer = s.transfer}, {buffer = s.buffer, size = u32(size)}, true)
 }
 
-// The triangle indices of `pieces`, in order: a list's vertices as they
-// are; strip triangle i as (i, i+1, i+2), odd ones swapped to keep the
-// strip's facing (the winding count reads it).
-@(private = "file")
-write_indices :: proc(out: []u32, pieces: []vg.Piece) {
-	n := 0
-	for piece in pieces {
-		first := piece.verts.start
-		if !piece.strip {
-			for i in 0 ..< piece.verts.count {
-				out[n] = first + i
-				n += 1
-			}
-			continue
-		}
-		for i in 0 ..< piece.verts.count - 2 {
-			a, c := first + i, first + i + 1
-			if i % 2 == 1 {
-				a, c = c, a
-			}
-			out[n], out[n + 1], out[n + 2] = a, c, first + i + 2
-			n += 3
-		}
-	}
-}
-
 // ---- planning -------------------------------------------------------------------------
 
 @(private = "file")
@@ -314,20 +271,10 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 		screen = screen,
 		target = screen,
 	}
-	// Where each piece's indices start (`write_indices` writes them in
-	// order); one more for the end.
-	resize(&b.piece_index, len(frame.pieces) + 1)
-	at: u32
-	for piece, i in frame.pieces {
-		b.piece_index[i] = at
-		at += vg.piece_index_count(piece)
-	}
-	b.piece_index[len(frame.pieces)] = at
-	resize(&b.shape_offsets, len(frame.shapes))
 	resize(&b.shape_shifts, len(frame.shapes))
 	slice.zero(b.shape_shifts[:])
+	placed := store_place(b, frame)
 	clear(&b.masks)
-	stencil_texture(b, screen.width, screen.height)
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
 		case vg.Cmd_Set_Render_Target:
@@ -338,24 +285,15 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 					p.target = img^
 				}
 			}
-			stencil_texture(b, p.target.width, p.target.height)
 		case vg.Cmd_Clear_Rect:
 			plan_clear(&p, cmd, c)
 		case vg.Cmd_Draw:
-			first := b.piece_index[cmd.pieces.start]
-			row := draw_row(&p, cmd, c.stencil)
-			row.indexed = true
-			row.verts = {first, b.piece_index[cmd.pieces.start + cmd.pieces.count] - first}
+			row := draw_row(&p, cmd)
+			row.verts = cmd.verts
 			if row.verts.count > 0 {
 				append(&b.rows, row)
 			}
 		case vg.Cmd_Draw_Shapes:
-			placed := true
-			for inst, i in frame.shapes[c.instances.start:][:c.instances.count] {
-				offset, ok := store_place(b, inst.shape)
-				b.shape_offsets[int(c.instances.start) + i] = offset
-				placed &&= ok
-			}
 			if !placed || c.instances.count == 0 {
 				continue
 			}
@@ -363,7 +301,7 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				plan_shape_union(&p, cmd, c)
 				continue
 			}
-			plan_shape_rows(&p, draw_row(&p, cmd, .None), c.instances, 0)
+			plan_shape_rows(&p, draw_row(&p, cmd), c.instances, 0)
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
@@ -397,7 +335,7 @@ add_paint :: proc(p: ^Planner, paint: Paint) -> u32 {
 // A row drawing `cmd` into the current target; the caller sets its
 // vertices.
 @(private = "file")
-draw_row :: proc(p: ^Planner, cmd: vg.Command, stencil: vg.Stencil_Mode) -> Row {
+draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 	glyph: ^Image
 	if cmd.glyph_texture.kind != .None {
 		glyph = lookup(p, cmd.glyph_texture.image)
@@ -410,7 +348,7 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command, stencil: vg.Stencil_Mode) -> Row 
 		kind = .Draw,
 		target = p.target,
 		origin = p.origin,
-		key = {cmd.composite_operation, stencil, p.target.format, false, false},
+		key = {cmd.composite_operation, p.target.format, false, false},
 		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, glyph)},
 		scissor = scissor,
 	}
@@ -462,7 +400,7 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 	params.stroke_mult = 1
 	params.stroke_thr = -1
 	paint := add_paint(p, vg.pack_frag_uniforms(params))
-	row := draw_row(p, cmd, .None)
+	row := draw_row(p, cmd)
 	row.scissor = area
 	row.verts = {extra_base(p), 6}
 	append(&p.b.rows, row)
@@ -507,7 +445,7 @@ plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 	instances := p.frame.shapes[c.instances.start:][:c.instances.count]
 	bounds := vg.EMPTY_BOUNDS
 	for inst in instances {
-		ib := vg.shape_device_bounds(inst.shape, inst.transform)
+		ib := vg.instance_bounds(inst, p.frame.shape_words)
 		bounds = {min(bounds.minx, ib.minx), min(bounds.miny, ib.miny), max(bounds.maxx, ib.maxx), max(bounds.maxy, ib.maxy)}
 	}
 	rect := vg.Rect{bounds.minx, bounds.miny, bounds.maxx - bounds.minx, bounds.maxy - bounds.miny}
@@ -521,7 +459,7 @@ plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 	params := p.frame.paints[instances[0].paint]
 	params.glyph_texture_type = 1
 	paint := add_paint(p, vg.pack_frag_uniforms(params))
-	row := draw_row(p, cmd, .None)
+	row := draw_row(p, cmd)
 	row.scissor = area
 	row.verts = {extra_base(p), 6}
 	// The mask's place, texture and the quad's texture coordinates are set
@@ -600,10 +538,9 @@ plan_masks :: proc(p: ^Planner) {
 			continue
 		}
 		images[pi] = scratch^
-		stencil_texture(b, w, h)
 		img := images[pi]
 		pw, ph := f32(page.w), f32(page.h)
-		append(&b.rows, Row{kind = .Draw, target = img, key = {vg.composite_state_from_op(.Copy), .None, img.format, false, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {0, 0, page.w, page.h}, verts = {extra_base(p), 6}})
+		append(&b.rows, Row{kind = .Draw, target = img, key = {vg.composite_state_from_op(.Copy), img.format, false, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {0, 0, page.w, page.h}, verts = {extra_base(p), 6}})
 		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint))
 		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint), vg.vertex(0, ph, 0.5, 1, clear_paint))
 	}
@@ -617,7 +554,7 @@ plan_masks :: proc(p: ^Planner) {
 		for i in m.instances.start ..< m.instances.start + m.instances.count {
 			b.shape_shifts[i] = shift
 		}
-		plan_shape_rows(p, Row{target = img, key = {vg.composite_state_from_op(.Source_Over), .None, img.format, true, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {m.at.x, m.at.y, m.size.x, m.size.y}}, m.instances, white + 1)
+		plan_shape_rows(p, Row{target = img, key = {vg.composite_state_from_op(.Source_Over), img.format, true, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {m.at.x, m.at.y, m.size.x, m.size.y}}, m.instances, white + 1)
 		b.rows[m.row].textures[1] = texture_binding(b, &img)
 		u0, v0 := f32(m.at.x) / f32(img.width), f32(m.at.y) / f32(img.height)
 		u1, v1 := f32(m.at.x + m.size.x) / f32(img.width), f32(m.at.y + m.size.y) / f32(img.height)
@@ -638,13 +575,10 @@ plan_filter_pass :: proc(p: ^Planner, src, backdrop, dst: ^Image, paint: Paint) 
 	if dst == nil {
 		return
 	}
-	// Its pass binds a stencil of the target's size, which must exist before
-	// recording (an image never drawn into has none yet).
-	stencil_texture(p.b, dst.width, dst.height)
 	append(&p.b.rows, Row {
 		kind     = .Draw,
 		target   = dst^,
-		key      = {vg.composite_state_from_op(.Copy), .None, dst.format, false, false},
+		key      = {vg.composite_state_from_op(.Copy), dst.format, false, false},
 		textures = {texture_binding(p.b, src), texture_binding(p.b, backdrop)},
 		scissor  = {0, 0, i32(dst.width), i32(dst.height)},
 		verts    = {extra_base(p), 6},
@@ -878,7 +812,6 @@ continues :: proc(pending, row: Row) -> bool {
 		row.kind == pending.kind &&
 		!pending.own_pass &&
 		!row.own_pass &&
-		row.indexed == pending.indexed &&
 		row.verts.start == pending.verts.start + pending.verts.count &&
 		row.target.texture == pending.target.texture &&
 		row.origin == pending.origin &&
@@ -928,8 +861,6 @@ flush :: proc(r: ^Recorder) {
 		base := [4]u32{row.verts.start, row.paint_override, 0, 0}
 		sdl.PushGPUVertexUniformData(r.cmd, 1, &base, size_of(base))
 		sdl.DrawGPUPrimitives(r.pass, 6, row.verts.count, 0, 0)
-	} else if row.indexed {
-		sdl.DrawGPUIndexedPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0, 0)
 	} else {
 		sdl.DrawGPUPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0)
 	}
@@ -938,9 +869,7 @@ flush :: proc(r: ^Recorder) {
 	}
 }
 
-// Starts a render pass on `target` if none is open. Every command leaves
-// the stencil at zero, so clearing it when a pass starts is the same as
-// keeping it across passes.
+// Starts a render pass on `target` if none is open.
 @(private = "file")
 begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 	if r.pass != nil {
@@ -951,15 +880,7 @@ begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 		load_op  = .LOAD,
 		store_op = .STORE,
 	}
-	depth := sdl.GPUDepthStencilTargetInfo {
-		texture          = stencil_texture(r.b, target.width, target.height),
-		load_op          = .DONT_CARE,
-		store_op         = .DONT_CARE,
-		stencil_load_op  = .CLEAR,
-		stencil_store_op = .DONT_CARE,
-		clear_stencil    = 0,
-	}
-	r.pass = sdl.BeginGPURenderPass(r.cmd, &color, 1, &depth)
+	r.pass = sdl.BeginGPURenderPass(r.cmd, &color, 1, nil)
 	if r.pass == nil {
 		return false
 	}
@@ -969,15 +890,11 @@ begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 		buffer = r.b.vertex_stream.buffer,
 	}
 	sdl.BindGPUVertexBuffers(r.pass, 0, &vertices, 1)
-	if r.b.index_stream.buffer != nil {
-		sdl.BindGPUIndexBuffer(r.pass, {buffer = r.b.index_stream.buffer}, ._32BIT)
-	}
 	storage := [2]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer}
 	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], 2 if storage[1] != nil else 1)
 	if instances := r.b.instance_stream.buffer; instances != nil {
 		sdl.BindGPUVertexStorageBuffers(r.pass, 0, &instances, 1)
 	}
-	sdl.SetGPUStencilReference(r.pass, 0)
 	// The vertex shader subtracts the origin (zw) before mapping to NDC.
 	view := [4]f32{f32(target.width), f32(target.height), f32(origin.x), f32(origin.y)}
 	sdl.PushGPUVertexUniformData(r.cmd, 0, &view, size_of(view))
@@ -1002,8 +919,8 @@ lookup_image :: proc(images: ^vg.Image_Store, id: vg.Image_Id) -> ^Image {
 	return (^Image)(entry.image.user) if entry != nil else nil
 }
 
-// A custom program over its whole target: a pass of its own (no stencil),
-// cleared first, one quad with Copy semantics.
+// A custom program over its whole target: a pass of its own, cleared
+// first, one quad with Copy semantics.
 @(private = "file")
 run_program :: proc(r: ^Recorder, row: Row) {
 	c := row.program
@@ -1139,34 +1056,6 @@ scratch_image :: proc(b: ^SDL_Backend, info: vg.Image_Info) -> ^Image {
 	return &b.scratch[len(b.scratch) - 1].image
 }
 
-@(private = "file")
-stencil_texture :: proc(b: ^SDL_Backend, w, h: u32) -> ^sdl.GPUTexture {
-	for &t in b.stencils {
-		if t.image.width == w && t.image.height == h {
-			t.last_used = b.frame
-			return t.image.texture
-		}
-	}
-	t := sdl.CreateGPUTexture(
-		b.device,
-		{
-			type = .D2,
-			format = b.stencil_format,
-			usage = {.DEPTH_STENCIL_TARGET},
-			width = max(w, 1),
-			height = max(h, 1),
-			layer_count_or_depth = 1,
-			num_levels = 1,
-			sample_count = ._1,
-		},
-	)
-	if t != nil {
-		// A failure is not cached: the next frame tries again.
-		append(&b.stencils, Cached_Texture{{texture = t, width = w, height = h}, b.frame})
-	}
-	return t
-}
-
 // feTurbulence's uniforms (see `turbulence` in ovg.slang): frag[0] the
 // lattice coordinate of target pixel x, y as (x + a) * b, frag[1] =
 // (octaves, fractal, stitch, 0); stitching: frag[2] the tile size in
@@ -1221,41 +1110,6 @@ blend_factor :: proc(f: vg.Blend_Factor) -> sdl.GPUBlendFactor {
 }
 
 @(private = "file")
-stencil_state :: proc(mode: vg.Stencil_Mode) -> sdl.GPUDepthStencilState {
-	op :: proc(compare: sdl.GPUCompareOp, fail, pass: sdl.GPUStencilOp) -> sdl.GPUStencilOpState {
-		return {fail_op = fail, pass_op = pass, depth_fail_op = fail, compare_op = compare}
-	}
-	s := sdl.GPUDepthStencilState {
-		compare_op          = .ALWAYS,
-		compare_mask        = 0xff,
-		write_mask          = 0xff,
-		enable_stencil_test = true,
-	}
-	switch mode {
-	case .None:
-		s.enable_stencil_test = false
-	case .Winding:
-		s.front_stencil_state = op(.ALWAYS, .KEEP, .INCREMENT_AND_WRAP)
-		s.back_stencil_state = op(.ALWAYS, .KEEP, .DECREMENT_AND_WRAP)
-	case .Outside_Non_Zero, .Outside_Even_Odd:
-		s.front_stencil_state = op(.EQUAL, .KEEP, .KEEP)
-		s.back_stencil_state = s.front_stencil_state
-		s.compare_mask = 0x01 if mode == .Outside_Even_Odd else 0xff
-	case .Cover_Non_Zero, .Cover_Even_Odd:
-		s.front_stencil_state = op(.NOT_EQUAL, .ZERO, .ZERO)
-		s.back_stencil_state = s.front_stencil_state
-		s.compare_mask = 0x01 if mode == .Cover_Even_Odd else 0xff
-	case .Once:
-		s.front_stencil_state = op(.EQUAL, .KEEP, .INCREMENT_AND_CLAMP)
-		s.back_stencil_state = s.front_stencil_state
-	case .Clear:
-		s.front_stencil_state = op(.ALWAYS, .ZERO, .ZERO)
-		s.back_stencil_state = s.front_stencil_state
-	}
-	return s
-}
-
-@(private = "file")
 get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipeline {
 	if p, ok := b.pipelines[key]; ok {
 		return p
@@ -1281,9 +1135,6 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 			src_alpha_blendfactor = blend_factor(s.src_alpha),
 			dst_alpha_blendfactor = blend_factor(s.dst_alpha),
 			alpha_blend_op = .ADD,
-			// The winding count and the stencil clear write no color.
-			color_write_mask = {} if key.stencil == .Winding || key.stencil == .Clear else {.R, .G, .B, .A},
-			enable_color_write_mask = true,
 		},
 	}
 	if key.shapes {
@@ -1294,13 +1145,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},
-			depth_stencil_state = stencil_state(.None),
-			target_info = {
-				color_target_descriptions = &color,
-				num_color_targets = 1,
-				depth_stencil_format = b.stencil_format,
-				has_depth_stencil_target = true,
-			},
+			target_info = {color_target_descriptions = &color, num_color_targets = 1},
 		}
 		p := sdl.CreateGPUGraphicsPipeline(b.device, info)
 		if p != nil {
@@ -1320,13 +1165,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = ._1},
-		depth_stencil_state = stencil_state(key.stencil),
-		target_info = {
-			color_target_descriptions = &color,
-			num_color_targets = 1,
-			depth_stencil_format = b.stencil_format,
-			has_depth_stencil_target = true,
-		},
+		target_info = {color_target_descriptions = &color, num_color_targets = 1},
 	}
 	p := sdl.CreateGPUGraphicsPipeline(b.device, info)
 	if p != nil {

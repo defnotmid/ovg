@@ -181,3 +181,89 @@ test_affine_footprints :: proc(t: ^testing.T) {
 	// 64 x 64 samples resolve area to about 1/64 along an edge.
 	testing.expectf(t, worst < 0.025, "worst %v", worst)
 }
+
+@(test)
+test_backdrops :: proc(t: ^testing.T) {
+	// Polygons in the unit square (so the cell lines are j / n exactly)
+	// with corners on the lines and a rounding either side of them: the
+	// winding from the cells must match a ray cast against the edges.
+	state: u32 = 1
+	next :: proc(s: ^u32, n: u32) -> u32 {
+		s^ = s^ * 1664525 + 1013904223
+		return (s^ >> 8) % n
+	}
+	near_line :: proc(s: ^u32) -> f32 {
+		n := 1 + next(s, MAX_CELLS)
+		v := f32(next(s, n + 1)) * (1 / f32(n))
+		switch next(s, 3) {
+		case 0:
+			v = math.nextafter(v, f32(-1))
+		case 1:
+			v = math.nextafter(v, f32(2))
+		}
+		return clamp(v, 0, 1)
+	}
+	wrong := 0
+	for _ in 0 ..< 2000 {
+		b: Builder
+		defer builder_destroy(&b)
+		corners: [dynamic]Vec2
+		defer delete(corners)
+		// A sliver from corner to corner pins the bounds to the unit square.
+		for p in ([3]Vec2{{0, 0}, {1, 1}, {0.5, 0.52}}) {
+			append(&corners, p)
+		}
+		append(&corners, Vec2{-1, -1})
+		move_to(&b, {0, 0})
+		line_to(&b, {1, 1})
+		line_to(&b, {0.5, 0.52})
+		close(&b)
+		for _ in 0 ..< 1 + next(&state, 3) {
+			for k in 0 ..< 3 + next(&state, 6) {
+				p := Vec2{f32(next(&state, 1000)) / 999, near_line(&state)}
+				if next(&state, 4) == 0 {
+					p = p.yx
+				}
+				append(&corners, p)
+				if k == 0 {
+					move_to(&b, p)
+				} else {
+					line_to(&b, p)
+				}
+			}
+			close(&b)
+			append(&corners, Vec2{-1, -1}) // contour break
+		}
+		words, origin, extent, ok := build(&b)
+		testing.expect(t, ok && origin == {} && extent == 1)
+		defer delete(words)
+		for yi in 0 ..< 32 {
+			for xi in 0 ..< 32 {
+				p := Vec2{(f32(xi) + 0.3713) / 32, (f32(yi) + 0.5927) / 32}
+				ray: i32
+				start := 0
+				near := false
+				for k in 0 ..< len(corners) {
+					if corners[k].x < 0 {
+						start = k + 1
+						continue
+					}
+					a, c := corners[k], corners[k + 1] if corners[k + 1].x >= 0 else corners[start]
+					if (a.y <= p.y) != (c.y <= p.y) {
+						x := a.x + (p.y - a.y) / (c.y - a.y) * (c.x - a.x)
+						near ||= abs(x - p.x) < 1e-4
+						if x > p.x {
+							ray += 1 if c.y > a.y else -1
+						}
+					}
+				}
+				// Rounding decides samples on an edge.
+				if !near && winding(words, p) != ray {
+					wrong += 1
+
+				}
+			}
+		}
+	}
+	testing.expect_value(t, wrong, 0)
+}

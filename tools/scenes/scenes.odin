@@ -222,7 +222,7 @@ scene_strokes :: proc(c: ^vg.Canvas, r: ^Resources) {
 	sp := vg.paint_color(vg.rgba(200, 30, 90, 160))
 	sp.stroke.line_width = 7
 	vg.stroke_path(c, p, sp)
-	// Self-overlapping translucent stroke (stencil strokes).
+	// Self-overlapping translucent stroke (each pixel once).
 	vg.path_reset(p)
 	vg.path_move_to(p, 30, 130)
 	vg.path_line_to(p, 110, 180)

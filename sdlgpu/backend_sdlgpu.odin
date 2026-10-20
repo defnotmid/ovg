@@ -70,7 +70,6 @@ SDL_Backend :: struct {
 	// For instances whose pixel footprint is a box (no rotation or skew).
 	shape_box_frag:   ^sdl.GPUShader,
 	shapes:           Shape_Store,
-	stencil_format:   sdl.GPUTextureFormat,
 	screen_width:     u32,
 	screen_height:    u32,
 	// Default screen target, rendered into when `flush` gets no output.
@@ -79,12 +78,10 @@ SDL_Backend :: struct {
 	last_screen:      Image,
 	// The frame's vertices and paints, uploaded once per frame.
 	vertex_stream:    Stream,
-	index_stream:     Stream,
 	paint_stream:     Stream,
 	instance_stream:  Stream,
-	// One stencil texture per target size, and the intermediates of image
-	// filters (`scratch_image`); unused ones are freed after a while.
-	stencils:         [dynamic]Cached_Texture,
+	// The intermediates of image filters and mask pages (`scratch_image`);
+	// unused ones are freed after a while.
 	scratch:          [dynamic]Cached_Texture,
 	// Counts `render` calls.
 	frame:            u64,
@@ -109,8 +106,6 @@ SDL_Backend :: struct {
 	verts:            [dynamic]vg.Vertex,
 	paints:           [dynamic]Paint,
 	rows:             [dynamic]Row,
-	// Where each piece's indices start in the index buffer.
-	piece_index:      [dynamic]u32,
 	// Each frame shape instance's shape, as a word offset in `shapes`, and
 	// its shift into a mask page (render.odin, plan_masks).
 	shape_offsets:    [dynamic]u32,
@@ -139,13 +134,11 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	b^ = {
 		allocator = allocator,
 		device    = device,
-		stencils  = make([dynamic]Cached_Texture, allocator),
 		scratch   = make([dynamic]Cached_Texture, allocator),
 		pipelines = make(map[Pipeline_Key]^sdl.GPUGraphicsPipeline, allocator),
 		verts     = make([dynamic]vg.Vertex, allocator),
 		paints    = make([dynamic]Paint, allocator),
 		rows      = make([dynamic]Row, allocator),
-		piece_index = make([dynamic]u32, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
 		shape_shifts = make([dynamic][2]f32, allocator),
 		masks = make([dynamic]Shape_Mask, allocator),
@@ -250,11 +243,6 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	}
 	store_init(b)
 
-	b.stencil_format = .D24_UNORM_S8_UINT
-	if !sdl.GPUTextureSupportsFormat(b.device, b.stencil_format, .D2, {.DEPTH_STENCIL_TARGET}) {
-		b.stencil_format = .D32_FLOAT_S8_UINT
-	}
-
 	for &s, i in b.samplers {
 		filter: sdl.GPUFilter = .NEAREST if i & 4 != 0 else .LINEAR
 		s = sdl.CreateGPUSampler(
@@ -286,12 +274,10 @@ destroy :: proc(b: ^SDL_Backend) {
 	if b.device == nil {
 		// init failed before having a device: only the tables to free.
 		delete(b.pipelines)
-		delete(b.stencils)
 		delete(b.scratch)
 		delete(b.verts)
 		delete(b.paints)
 		delete(b.rows)
-		delete(b.piece_index)
 		delete(b.shape_offsets)
 		delete(b.shape_shifts)
 		delete(b.masks)
@@ -306,10 +292,6 @@ destroy :: proc(b: ^SDL_Backend) {
 		sdl.ReleaseGPUGraphicsPipeline(b.device, p)
 	}
 	delete(b.pipelines)
-	for t in b.stencils {
-		sdl.ReleaseGPUTexture(b.device, t.image.texture)
-	}
-	delete(b.stencils)
 	for t in b.scratch {
 		sdl.ReleaseGPUTexture(b.device, t.image.texture)
 	}
@@ -323,10 +305,9 @@ destroy :: proc(b: ^SDL_Backend) {
 	release_image(b, b.transparent)
 	release_image(b, b.offscreen)
 	stream_release(b, &b.vertex_stream)
-	stream_release(b, &b.index_stream)
 	stream_release(b, &b.paint_stream)
 	stream_release(b, &b.instance_stream)
-	if b.shapes.ranges != nil {
+	if b.shapes.at != nil {
 		store_destroy(b)
 	}
 	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag}) {
@@ -343,7 +324,6 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.verts)
 	delete(b.paints)
 	delete(b.rows)
-	delete(b.piece_index)
 	delete(b.shape_offsets)
 	delete(b.shape_shifts)
 	delete(b.masks)

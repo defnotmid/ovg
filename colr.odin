@@ -175,7 +175,7 @@ colr_draw_glyph :: proc(c: ^Canvas, f: ^Font, g: Positioned_Glyph, em: f32, fg: 
 	if !info.colour {
 		return false
 	}
-	// The shared scratch path's tessellation buffers live on the heap.
+	// The shared scratch path's buffers live on the heap.
 	context.allocator = runtime.heap_allocator()
 	t0 := current_transform(c)
 	place := Transform2D{em, 0, 0, -em, g.x, g.y}

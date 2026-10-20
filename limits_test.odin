@@ -100,10 +100,9 @@ test_limits_svg :: proc(t: ^testing.T) {
 	strings.write_string(&b, `</defs><use href="#a7"/></svg>`)
 	testing.expect(t, strings.contains(svg_hostile(t, &s, strings.to_string(b)), "SVG elements"))
 
-	// Dashes too fine to count draw the stroke undashed.
-	s.canvas.limited = {}
-	svg_hostile(t, &s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><path d="M0 32 H64" stroke="black" stroke-width="4" stroke-dasharray="1e-7"/></svg>`)
-	testing.expect(t, .Dash_Segments in s.canvas.limited)
+	// Dashes too fine to count draw the stroke undashed (dashed when
+	// parsed).
+	testing.expect(t, strings.contains(svg_hostile(t, &s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><path d="M0 32 H64" stroke="black" stroke-width="4" stroke-dasharray="1e-7"/></svg>`), "dashes per stroke"))
 	testing.expect_value(t, s.backend.pixels[(32 * 64 + 32) * 4], 0)
 
 	octaves := `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><filter id="f"><feTurbulence baseFrequency="0.05" numOctaves="1000000000"/></filter><rect width="64" height="64" filter="url(#f)"/></svg>`

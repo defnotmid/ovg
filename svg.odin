@@ -122,6 +122,10 @@ Svg_Shape :: struct {
 	style:       Svg_Style,
 	// SVG pathLength (dash units), 0 for none.
 	path_length: f32,
+	// The path and its stroke (stroke.odin) as shapes, filled by coverage
+	// (no words when empty).
+	fill:        Shape,
+	stroke:      Shape,
 }
 
 Svg_Text :: struct {
@@ -322,6 +326,10 @@ svg_destroy :: proc(doc: ^Svg_Document) {
 	context.allocator = doc.allocator
 	for b in doc.bitmaps {
 		delete(b.pixels)
+	}
+	for &sh in doc.shapes {
+		shape_destroy(&sh.fill)
+		shape_destroy(&sh.stroke)
 	}
 	delete(doc.nodes)
 	delete(doc.shapes)
@@ -536,6 +544,7 @@ svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Sv
 		warned = warned,
 	}
 	p.by_id = make(map[string]u32, 64, tmp)
+	shape_scratch_init(&p.scratch, tmp)
 	for &d in p.defs {
 		d = make([]i32, len(x.elements), tmp)
 		slice.fill(d, SVG_DEF_UNSEEN)
@@ -630,6 +639,8 @@ Svg_Parser :: struct {
 	// Width and height that percentages refer to.
 	viewports:   [dynamic]Vec2,
 	path:        Path,
+	// Builds the shapes' fills and strokes.
+	scratch:     Shape_Scratch,
 	// Converting a clipPath's content: shapes fill white with clip-rule.
 	in_clip:     bool,
 	// Shared with nested SVG images' parsers.
@@ -1956,6 +1967,17 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 		shape.style.fill = {}
 	}
 	bbox := svg_path_bbox(path.verbs[:], path.coords[:])
+	// Built once, drawn at any scale.
+	shape.fill, _ = shape_from_path(path, doc.allocator, false, &p.scratch)
+	if s := &shape.style; s.stroke_width > 0 && s.stroke.kind != .None {
+		sp: Paint
+		svg_stroke_settings(&sp, s, doc, shape.path_length)
+		complete: bool
+		shape.stroke, _, complete = shape_from_stroke(path, sp.stroke, doc.allocator, false, p.budget.limits[.Dash_Segments], &p.scratch)
+		if !complete {
+			p.budget.hit += {.Dash_Segments}
+		}
+	}
 	append(&doc.verbs, ..path.verbs[:])
 	append(&doc.coords, ..path.coords[:])
 	n := svg_new_node(p, .Shape, parent)

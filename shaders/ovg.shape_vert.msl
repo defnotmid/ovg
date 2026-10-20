@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 766 "ovg.slang"
+#line 764 "ovg.slang"
 struct vs_shape_Result_0
 {
     float4 position_0 [[position]];
@@ -14,14 +14,14 @@ struct vs_shape_Result_0
 };
 
 
-#line 757
+#line 755
 struct Shape_Draw_0
 {
     uint4 base_0;
 };
 
 
-#line 757
+#line 755
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -32,14 +32,14 @@ struct Shape_Instance_natural_0
 };
 
 
-#line 47
+#line 46
 struct View_0
 {
     float4 size_0;
 };
 
 
-#line 56
+#line 55
 struct KernelContext_0
 {
     Shape_Draw_0 constant* shape_draw_0;
@@ -48,7 +48,7 @@ struct KernelContext_0
 };
 
 
-#line 766
+#line 764
 struct VS_Shape_Out_0
 {
     float4 position_1;
@@ -59,158 +59,158 @@ struct VS_Shape_Out_0
 };
 
 
-#line 766
+#line 764
 [[vertex]] vs_shape_Result_0 vs_shape(uint vid_0 [[vertex_id]], uint iid_0 [[instance_id]], uint base_instance_0 [[base_instance]], Shape_Draw_0 constant* shape_draw_1 [[buffer(1)]], Shape_Instance_natural_0 device* shape_instances_1 [[buffer(2)]], View_0 constant* view_1 [[buffer(0)]])
 {
 
-#line 766
+#line 764
     thread KernelContext_0 kernelContext_0;
 
-#line 766
+#line 764
     (&kernelContext_0)->shape_draw_0 = shape_draw_1;
 
-#line 766
+#line 764
     (&kernelContext_0)->shape_instances_0 = shape_instances_1;
 
-#line 766
+#line 764
     (&kernelContext_0)->view_0 = view_1;
 
-#line 778
+#line 776
     Shape_Instance_natural_0 s_0 = shape_instances_1[shape_draw_1->base_0.x + (iid_0 - base_instance_0)];
 
     uint k_0 = vid_0 % 6U;
 
-#line 780
+#line 778
     bool _S1;
     if(k_0 == 1U)
     {
 
-#line 781
+#line 779
         _S1 = true;
 
-#line 781
+#line 779
     }
     else
     {
 
-#line 781
+#line 779
         _S1 = k_0 == 2U;
 
-#line 781
+#line 779
     }
 
-#line 781
+#line 779
     if(_S1)
     {
 
-#line 781
+#line 779
         _S1 = true;
 
-#line 781
+#line 779
     }
     else
     {
 
-#line 781
+#line 779
         _S1 = k_0 == 4U;
 
-#line 781
+#line 779
     }
 
-#line 781
+#line 779
     float cx_0;
 
-#line 781
+#line 779
     if(_S1)
     {
 
-#line 781
+#line 779
         cx_0 = 1.0f;
 
-#line 781
+#line 779
     }
     else
     {
 
-#line 781
+#line 779
         cx_0 = 0.0f;
 
-#line 781
+#line 779
     }
     if(k_0 == 2U)
     {
 
-#line 782
+#line 780
         _S1 = true;
 
-#line 782
+#line 780
     }
     else
     {
 
-#line 782
+#line 780
         _S1 = k_0 == 4U;
 
-#line 782
+#line 780
     }
 
-#line 782
+#line 780
     if(_S1)
     {
 
-#line 782
+#line 780
         _S1 = true;
 
-#line 782
+#line 780
     }
     else
     {
 
-#line 782
+#line 780
         _S1 = k_0 == 5U;
 
-#line 782
+#line 780
     }
 
-#line 782
+#line 780
     float cy_0;
 
-#line 782
+#line 780
     if(_S1)
     {
 
-#line 782
+#line 780
         cy_0 = 1.0f;
 
-#line 782
+#line 780
     }
     else
     {
 
-#line 782
+#line 780
         cy_0 = 0.0f;
 
-#line 782
+#line 780
     }
 
-#line 782
+#line 780
     float4 _S2 = float4(s_0.t_0) ;
     float2 epp_0 = _S2.zw;
 
-#line 783
+#line 781
     float4 _S3 = float4(s_0.bounds_0) ;
     float _S4 = epp_0.x;
 
-#line 784
+#line 782
     float _S5 = mix(_S3.x - _S4, _S3.z + _S4, cx_0);
 
-#line 784
+#line 782
     float _S6 = epp_0.y;
 
-#line 784
+#line 782
     float _S7 = mix(_S3.y - _S6, _S3.w + _S6, cy_0);
 
-#line 784
+#line 782
     float4 _S8 = float4(s_0.m_0) ;
     float2 d_0 = float2(_S8.x * _S5 + _S8.z * _S7 + _S2.x, _S8.y * _S5 + _S8.w * _S7 + _S2.y);
     thread VS_Shape_Out_0 o_0;
@@ -221,10 +221,10 @@ struct VS_Shape_Out_0
     if((shape_draw_1->base_0.y) != 0U)
     {
 
-#line 792
+#line 790
         (&o_0)->data_2.y = shape_draw_1->base_0.y - 1U;
 
-#line 791
+#line 789
     }
 
 
@@ -232,25 +232,25 @@ struct VS_Shape_Out_0
     (&o_0)->position_1 = float4(2.0f * p_0.x / (&kernelContext_0)->view_0->size_0.x - 1.0f, 1.0f - 2.0f * p_0.y / (&kernelContext_0)->view_0->size_0.y, 0.0f, 1.0f);
     VS_Shape_Out_0 _S9 = o_0;
 
-#line 796
+#line 794
     thread vs_shape_Result_0 _S10;
 
-#line 796
+#line 794
     (&_S10)->position_0 = _S9.position_1;
 
-#line 796
+#line 794
     (&_S10)->rc_0 = _S9.rc_1;
 
-#line 796
+#line 794
     (&_S10)->fpos_0 = _S9.fpos_1;
 
-#line 796
+#line 794
     (&_S10)->uv_0 = _S9.uv_2;
 
-#line 796
+#line 794
     (&_S10)->data_0 = _S9.data_2;
 
-#line 796
+#line 794
     return _S10;
 }
 

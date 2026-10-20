@@ -315,7 +315,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	h := u32(f32(w) * doc.height / doc.width)
 	xf := vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height)
 
-	// Recording: the CPU side of drawing (tessellation, commands).
+	// Recording: the CPU side of drawing (shapes, commands).
 	rc: vg.Canvas
 	vg.canvas_init_recording(&rc)
 	defer vg.canvas_destroy(&rc)

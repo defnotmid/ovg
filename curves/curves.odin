@@ -60,7 +60,7 @@ Curve :: struct {
 
 HEADER :: 12
 // Columns or rows at most.
-MAX_CELLS :: 16
+MAX_CELLS :: 64
 
 // ---- building -------------------------------------------------------------------
 
@@ -76,6 +76,32 @@ Builder :: struct {
 	// Cubic approximation tolerance in source units; 0 picks 1/4096 of the
 	// cubic's size.
 	tol:         f32,
+	// `build`'s working arrays, kept for the next build (with `curves`'
+	// allocator).
+	scratch:     Scratch,
+}
+
+@(private)
+Scratch :: struct {
+	mono, split, pieces:            [dynamic]Curve,
+	at, places:                     [dynamic]Place,
+	counts, starts, fill, step_ats: [dynamic]int,
+	lists:                          [dynamic]u32,
+	junctions:                      [dynamic]Junction,
+	steps:                          [dynamic]Step,
+	backdrop:                       [dynamic]i32,
+}
+
+@(private)
+Step :: struct {
+	y:     f32,
+	delta: i32,
+}
+
+@(private)
+Junction :: struct {
+	cell: int,
+	step: Step,
 }
 
 // A contour's required orientation (`orient`).
@@ -88,6 +114,20 @@ Orientation :: enum u8 {
 
 builder_destroy :: proc(b: ^Builder) {
 	delete(b.curves)
+	s := &b.scratch
+	delete(s.mono)
+	delete(s.split)
+	delete(s.pieces)
+	delete(s.at)
+	delete(s.places)
+	delete(s.counts)
+	delete(s.starts)
+	delete(s.fill)
+	delete(s.step_ats)
+	delete(s.lists)
+	delete(s.junctions)
+	delete(s.steps)
+	delete(s.backdrop)
 	b^ = {}
 }
 
@@ -189,16 +229,39 @@ cubic_piece :: proc "contextless" (p0, p1, p2, p3: Vec2, t0, t1: f32) -> (a, b, 
 
 // The shape's words from the builder's curves (closing the open contour),
 // with the map back to source units: `p = origin + q * extent`. False (no
-// words) when there are no curves or they span nothing.
-build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, origin: Vec2, extent: f32, ok: bool) {
+// words) when there are no curves or they span nothing. `search` tries grid
+// sizes for the one keeping the fullest cell smallest (for shapes kept and
+// drawn often); without it the grid is sized from the piece count alone
+// (for shapes built every frame).
+build :: proc(b: ^Builder, allocator := context.allocator, search := true) -> (words: []u32, origin: Vec2, extent: f32, ok: bool) {
+	out := make([dynamic]u32, allocator)
+	origin, extent, ok = build_append(b, &out, search)
+	if !ok {
+		delete(out)
+		return
+	}
+	return out[:], origin, extent, true
+}
+
+// `build`, appending the words to `out` (reserved exactly when empty).
+build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin: Vec2, extent: f32, ok: bool) {
 	close(b)
 	if len(b.curves) == 0 {
 		return
 	}
-	mono := make([dynamic]Curve, 0, len(b.curves) * 2, context.temp_allocator)
-	for c in b.curves {
-		split_monotone(c, &mono)
+	s := &b.scratch
+	if s.mono.allocator.procedure == nil {
+		alloc := b.curves.allocator
+		s.mono.allocator, s.split.allocator, s.pieces.allocator = alloc, alloc, alloc
+		s.at.allocator, s.places.allocator = alloc, alloc
+		s.counts.allocator, s.starts.allocator, s.fill.allocator, s.step_ats.allocator = alloc, alloc, alloc, alloc
+		s.lists.allocator, s.junctions.allocator, s.steps.allocator, s.backdrop.allocator = alloc, alloc, alloc, alloc
 	}
+	clear(&s.mono)
+	for c in b.curves {
+		split_monotone(c, &s.mono)
+	}
+	mono := s.mono[:]
 	lo, hi := mono[0].p1, mono[0].p1
 	for c in mono {
 		for p in ([3]Vec2{c.p1, c.p2, c.p3}) {
@@ -221,116 +284,180 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 	// smallest, fewer cells on a tie.
 	nx, ny: int
 	cw, ch: f32
-	pieces: [dynamic]Curve
 	best := max(int)
-	for n in 1 ..= MAX_CELLS {
+	// The search stops at 16 a unit: past that a shape too dense to reach
+	// a few pieces a cell would keep a huge grid for little gain.
+	first, last := 1, 16
+	if !search {
+		// About four pieces a cell; one cell for a few.
+		first = 1 if len(mono) <= 16 else clamp(int(math.ceil(math.sqrt(f32(len(mono)) / 4))), 1, MAX_CELLS)
+		last = first
+	}
+	for n in first ..= last {
 		cx, cy := max(1, int(math.ceil(size.x * f32(n) - 1e-4))), max(1, int(math.ceil(size.y * f32(n) - 1e-4)))
 		w, h := size.x / f32(cx), size.y / f32(cy)
-		split := make([dynamic]Curve, context.temp_allocator)
-		for c in mono {
-			split_columns(c, w, cx, &split)
-		}
-		counts := make([]int, cx * cy, context.temp_allocator)
-		for c in split {
-			i, j0, j1, crosses := piece_cells(c, w, h, cx, cy)
-			if !crosses {
-				continue
-			}
-			for j in j0 ..= j1 {
-				counts[j * cx + i] += 1
+		clear(&s.split)
+		if cx == 1 {
+			append(&s.split, ..mono)
+		} else {
+			for c in mono {
+				split_columns(c, w, cx, &s.split)
 			}
 		}
-		fullest := slice.max(counts)
+		resize(&s.at, len(s.split))
+		resize(&s.counts, cx * cy)
+		slice.zero(s.counts[:])
+		for c, k in s.split {
+			s.at[k] = place(c, w, h, cx, cy)
+			for j in s.at[k].j0 ..= s.at[k].j1 {
+				s.counts[j * cx + s.at[k].i] += 1
+			}
+		}
+		fullest := slice.max(s.counts[:])
 		if fullest < best {
-			best, nx, ny, cw, ch, pieces = fullest, cx, cy, w, h, split
+			best, nx, ny, cw, ch = fullest, cx, cy, w, h
+			s.split, s.pieces = s.pieces, s.split
+			s.at, s.places = s.places, s.at
 		}
 		if fullest <= 6 {
 			break
 		}
 	}
+	pieces, places := s.pieces[:], s.places[:]
 
 	cells := nx * ny
-	lists := make([][dynamic]u32, cells, context.temp_allocator)
-	for &l in lists {
-		l = make([dynamic]u32, context.temp_allocator)
+	// Each cell's piece list: counted, then filled, in one flat array.
+	resize(&s.starts, cells + 1)
+	starts := s.starts[:]
+	slice.zero(starts)
+	for at in places {
+		for j in at.j0 ..= at.j1 {
+			starts[j * nx + at.i + 1] += 1
+		}
 	}
-	for c, k in pieces {
-		i, j0, j1, crosses := piece_cells(c, cw, ch, nx, ny)
-		if !crosses {
+	for k in 0 ..< cells {
+		starts[k + 1] += starts[k]
+	}
+	resize(&s.lists, starts[cells])
+	resize(&s.fill, cells)
+	lists, fill := s.lists[:], s.fill[:]
+	copy(fill, starts[:cells])
+	for at, p in places {
+		for j in at.j0 ..= at.j1 {
+			lists[fill[j * nx + at.i]] = u32(p)
+			fill[j * nx + at.i] += 1
+		}
+	}
+	// Backdrops: the winding right of each cell, as its value at the bottom
+	// of the row and the steps where it changes inside the row. A piece
+	// starting at height y adds 1 to the winding above y against below, one
+	// ending there -1, so a cell's step at y sums the ends there of the
+	// pieces right of it. Joined ends cancel, leaving the junctions whose
+	// two pieces are in different columns: the end in the right column
+	// steps the cells between. The pieces keep contour order, so each
+	// junction is a piece's end and the next one's start.
+	clear(&s.junctions)
+	contour := 0
+	// One column has no junctions between columns, and nothing right of it.
+	for c, k in pieces[:len(pieces) if nx > 1 else 0] {
+		next := k + 1
+		if next == len(pieces) || pieces[next].p1 != c.p3 {
+			next, contour = contour, k + 1
+		}
+		// Ends on a row line are in the next row's bottom value.
+		y := c.p3.y
+		j := row(y, ch, ny)
+		if y == f32(j) * ch {
 			continue
 		}
-		for j in j0 ..= j1 {
-			append(&lists[j * nx + i], u32(k))
+		i0, i1 := places[k].i, places[next].i
+		for i in min(i0, i1) ..< max(i0, i1) {
+			append(&s.junctions, Junction{j * nx + i, {y, 1 if i1 > i0 else -1}})
 		}
 	}
-	// Backdrops: per row, the pieces in the columns right of each cell,
-	// as a bottom value and the steps at their ends inside the row (the
-	// steps of joined ends cancel, so only edge crossings remain).
-	Step :: struct {
-		y:     f32,
-		delta: i32,
+	// Per cell, by height: ends at one height combine, the ones that cancel
+	// drop.
+	resize(&s.step_ats, cells + 1)
+	step_ats := s.step_ats[:]
+	slice.zero(step_ats)
+	for e in s.junctions {
+		step_ats[e.cell + 1] += 1
 	}
-	backdrop := make([]i32, cells, context.temp_allocator)
-	steps := make([][dynamic]Step, cells, context.temp_allocator)
-	for j in 0 ..< ny {
-		y0, y1 := f32(j) * ch, f32(j + 1) * ch
+	for k in 0 ..< cells {
+		step_ats[k + 1] += step_ats[k]
+	}
+	resize(&s.steps, len(s.junctions))
+	steps := s.steps[:]
+	copy(fill, step_ats[:cells])
+	for e in s.junctions {
+		steps[fill[e.cell]] = e.step
+		fill[e.cell] += 1
+	}
+	kept := 0
+	for k in 0 ..< cells {
+		mine := steps[step_ats[k]:step_ats[k + 1]]
+		for m in 1 ..< len(mine) {
+			for n := m; n > 0 && mine[n].y < mine[n - 1].y; n -= 1 {
+				mine[n], mine[n - 1] = mine[n - 1], mine[n]
+			}
+		}
+		step_ats[k] = kept
+		for e in mine {
+			if kept > step_ats[k] && steps[kept - 1].y == e.y {
+				steps[kept - 1].delta += e.delta
+			} else {
+				steps[kept] = e
+				kept += 1
+			}
+			if steps[kept - 1].delta == 0 {
+				kept -= 1
+			}
+		}
+	}
+	step_ats[cells] = kept
+	// The bottom values, a running sum from the right of the pieces
+	// crossing the row's bottom line.
+	resize(&s.backdrop, cells)
+	backdrop := s.backdrop[:]
+	slice.zero(backdrop)
+	for j in 0 ..< (ny if nx > 1 else 0) {
+		y0 := f32(j) * ch
 		bottom: i32
-		ends := make([dynamic]Step, context.temp_allocator)
 		for i := nx - 1; i >= 0; i -= 1 {
 			k := j * nx + i
 			backdrop[k] = bottom
-			slice.sort_by(ends[:], proc(a, b: Step) -> bool {return a.y < b.y})
-			steps[k] = make([dynamic]Step, context.temp_allocator)
-			for e in ends {
-				if n := len(steps[k]); n > 0 && steps[k][n - 1].y == e.y {
-					steps[k][n - 1].delta += e.delta
-				} else {
-					append(&steps[k], e)
-				}
-			}
-			for n := 0; n < len(steps[k]); {
-				if steps[k][n].delta == 0 {
-					ordered_remove(&steps[k], n)
-				} else {
-					n += 1
-				}
-			}
-			// Then this column's pieces join the ones right of the next cell.
-			for p in lists[k] {
+			for p in lists[starts[k]:starts[k + 1]] {
 				c := pieces[p]
-				clo, chi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
-				dir: i32 = 1 if c.p3.y > c.p1.y else -1
-				if clo <= y0 && y0 < chi {
-					bottom += dir
-				}
-				if clo > y0 && clo < y1 {
-					append(&ends, Step{clo, dir})
-				}
-				if chi > y0 && chi < y1 {
-					append(&ends, Step{chi, -dir})
+				if min(c.p1.y, c.p3.y) <= y0 && y0 < max(c.p1.y, c.p3.y) {
+					bottom += 1 if c.p3.y > c.p1.y else -1
 				}
 			}
 		}
 	}
 
-	n := HEADER + 4 * cells + 6 * len(pieces)
-	for k in 0 ..< cells {
-		n += len(lists[k]) + 2 * len(steps[k])
+	n := HEADER + 4 * cells + len(lists) + 2 * kept + 6 * len(pieces)
+	base := len(out)
+	if base == 0 {
+		reserve(out, n)
 	}
-	d := make([]u32, n, allocator)
+	resize(out, base + n)
+	d := out[base:]
 	d[0], d[1] = u32(nx), u32(ny)
 	d[2], d[3] = transmute(u32)cw, transmute(u32)ch
+	d[4], d[5] = 0, 0
 	d[8], d[9], d[10], d[11] = 0, 0, transmute(u32)size.x, transmute(u32)size.y
 	at := HEADER + 4 * cells
 	for k in 0 ..< cells {
 		cell := d[HEADER + 4 * k:][:4]
+		list := lists[starts[k]:starts[k + 1]]
 		cell[0] = u32(at)
-		cell[1] = u32(len(lists[k])) | u32(len(steps[k])) << 16
+		mine := steps[step_ats[k]:step_ats[k + 1]]
+		cell[1] = u32(len(list)) | u32(len(mine)) << 16
 		cell[2] = u32(backdrop[k])
-		copy(d[at:], lists[k][:])
-		at += len(lists[k])
+		copy(d[at:], list)
+		at += len(list)
 		cell[3] = u32(at)
-		for e in steps[k] {
+		for e in mine {
 			d[at], d[at + 1] = transmute(u32)e.y, u32(e.delta)
 			at += 2
 		}
@@ -341,9 +468,15 @@ build :: proc(b: ^Builder, allocator := context.allocator) -> (words: []u32, ori
 		copy(d[at:][:6], w[:])
 		at += 6
 	}
-	// The whole bounds as one footprint: the fraction the shape fills.
-	d[7] = transmute(u32)coverage(d, size * 0.5, size, false)
-	return d, origin, extent, true
+	// The fraction of the bounds the shape fills: its signed area (Green's
+	// theorem over each quadratic in closed form) over the bounds'.
+	area: f32
+	for c in mono {
+		cross :: proc "contextless" (a, b: Vec2) -> f32 {return a.x * b.y - a.y * b.x}
+		area += 2 * cross(c.p1, c.p2) + 2 * cross(c.p2, c.p3) + cross(c.p1, c.p3)
+	}
+	d[7] = transmute(u32)min(abs(area) / 6 / (size.x * size.y), 1)
+	return origin, extent, true
 }
 
 // Appends `c` split at its x and y extrema into pieces monotone in both,
@@ -387,7 +520,7 @@ split_columns :: proc(c: Curve, w: f32, nx: int, out: ^[dynamic]Curve) {
 	q := quadratic(c.p1, c.p2, c.p3)
 	rest := c
 	done: f32 = 0
-	k0, k1 := int(math.floor(lo / w)) + 1, min(int(math.ceil(hi / w)) - 1, nx - 1)
+	k0, k1 := int(lo / w) + 1, min(ceil(hi / w) - 1, nx - 1)
 	for m in 0 ..= k1 - k0 {
 		k := k0 + m if forward else k1 - m
 		xv := f32(k) * w
@@ -426,18 +559,44 @@ pin :: #force_inline proc "contextless" (c: Curve) -> Curve {
 	return c
 }
 
-// A piece's column and the rows it crosses; false for a horizontal piece
-// (it crosses no row).
+// A piece's column and the rows it crosses (none for a horizontal piece).
+@(private)
+Place :: struct {
+	i, j0, j1: int,
+}
+
+// Coordinates are non-negative here, so truncation floors.
 @(private = "file")
-piece_cells :: proc "contextless" (c: Curve, w, h: f32, nx, ny: int) -> (i, j0, j1: int, crosses: bool) {
+place :: proc "contextless" (c: Curve, w, h: f32, nx, ny: int) -> Place {
+	i := min(int(0.5 * (c.p1.x + c.p3.x) / w), nx - 1)
 	lo, hi := min(c.p1.y, c.p3.y), max(c.p1.y, c.p3.y)
 	if lo == hi {
-		return
+		return {i, 1, 0}
 	}
-	i = clamp(int(math.floor(0.5 * (c.p1.x + c.p3.x) / w)), 0, nx - 1)
-	j0 = clamp(int(math.floor(lo / h)), 0, ny - 1)
-	j1 = clamp(int(math.ceil(hi / h)) - 1, j0, ny - 1)
-	return i, j0, j1, true
+	j0, j1 := row(lo, h, ny), row(hi, h, ny)
+	if hi == f32(j1) * h {
+		j1 -= 1
+	}
+	return {i, j0, max(j0, j1)}
+}
+
+// The row whose lines `j h <= y < (j + 1) h` hold `y` (clamped): exact
+// against the lines the backdrops use, where `y / h` may round across one.
+@(private = "file")
+row :: proc "contextless" (y, h: f32, ny: int) -> int {
+	j := min(int(y / h), ny - 1)
+	if j > 0 && y < f32(j) * h {
+		j -= 1
+	} else if j < ny - 1 && y >= f32(j + 1) * h {
+		j += 1
+	}
+	return j
+}
+
+@(private = "file")
+ceil :: #force_inline proc "contextless" (x: f32) -> int {
+	i := int(x)
+	return i + 1 if f32(i) < x else i
 }
 
 // ---- reading (mirrored by shaders/curves.slang) ------------------------------------

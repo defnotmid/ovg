@@ -5,19 +5,18 @@ import "core:mem"
 import "core:sync"
 import "core:thread"
 
+import cv "curves"
+
 // CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
-// as the GPU fragment shader (shaders/ovg.slang) and replays the GPU
-// backend's stencil passes, so its output is a pixel reference for GPU
-// backends: one sample at each pixel center, top-left fill rule, blending
-// in [0, 1] with rounding to 8 bits.
+// as the GPU fragment shader (shaders/ovg.slang) and the same shape
+// coverage, so its output is a pixel reference for GPU backends: one
+// sample at each pixel center, top-left fill rule (atlas glyph quads),
+// blending in [0, 1] with rounding to 8 bits.
 Software_Backend :: struct {
 	allocator: mem.Allocator,
 	pixels:    []u8,
 	width:     u32,
 	height:    u32,
-	// 8-bit stencil, wrapping like GPU INCR_WRAP / DECR_WRAP ops. Every
-	// command leaves it zeroed.
-	stencil:   []u8,
 	target:    Image_Id,
 	// The target's `Cmd_Set_Render_Target.origin`.
 	origin:    [2]i32,
@@ -36,7 +35,6 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 
 software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.pixels, b.allocator)
-	delete(b.stencil, b.allocator)
 	delete(b.blur_tmp, b.allocator)
 	delete(b.mask, b.allocator)
 	b^ = {}
@@ -182,29 +180,8 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 		if !ok {
 			continue
 		}
-		need := int(target.width * target.height)
-		if len(b.stencil) < need {
-			delete(b.stencil, b.allocator)
-			b.stencil = make([]u8, need, b.allocator)
-		}
 		sw_run_command(b, images, frame, cmd, target)
 	}
-}
-
-@(private = "file")
-Stencil_Op :: enum u8 {
-	// Paint, stencil untouched.
-	None,
-	// No color; stencil += 1 for one winding direction, -= 1 for the other.
-	Winding,
-	// Paint where `stencil & mask == 0`.
-	Paint_If_Zero,
-	// Paint where `stencil & mask != 0`; zero the stencil everywhere.
-	Cover,
-	// Paint where stencil == 0, then increment it (unless discarded).
-	Paint_Once,
-	// No color; zero the stencil.
-	Clear,
 }
 
 // Pixels are addressed in drawing coordinates: (x, y) is target pixel
@@ -212,12 +189,9 @@ Stencil_Op :: enum u8 {
 @(private = "file")
 Raster :: struct {
 	target:  Sw_Target,
-	stencil: []u8,
 	ox, oy:  i32,
 	x0, y0:  i32,
 	x1, y1:  i32,
-	op:      Stencil_Op,
-	mask:    u8,
 	frag:    ^Frag,
 	blend:   Composite_Operation_State,
 }
@@ -226,7 +200,6 @@ Raster :: struct {
 sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cmd: Command, target: Sw_Target) {
 	r := Raster {
 		target  = target,
-		stencil = b.stencil,
 		blend   = cmd.composite_operation,
 		ox      = b.origin.x,
 		oy      = b.origin.y,
@@ -247,32 +220,9 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 	case Cmd_Draw:
 		frag := make_frag(images, cmd, frame.paints[c.paint])
 		r.frag = &frag
-		switch c.stencil {
-		case .None:
-			r.op = .None
-		case .Winding:
-			r.op = .Winding
-		case .Outside_Non_Zero, .Outside_Even_Odd:
-			r.op = .Paint_If_Zero
-		case .Cover_Non_Zero, .Cover_Even_Odd:
-			r.op = .Cover
-		case .Once:
-			r.op = .Paint_Once
-		case .Clear:
-			r.op = .Clear
-		}
-		r.mask = 0x01 if c.stencil == .Outside_Even_Odd || c.stencil == .Cover_Even_Odd else 0xff
-		for piece in frame_pieces(frame, cmd) {
-			verts := frame.verts[piece.verts.start:][:piece.verts.count]
-			if piece.strip {
-				for i in 0 ..< len(verts) - 2 {
-					raster_triangle(&r, verts[i], verts[i + 1], verts[i + 2])
-				}
-			} else {
-				for i := 0; i + 3 <= len(verts); i += 3 {
-					raster_triangle(&r, verts[i], verts[i + 1], verts[i + 2])
-				}
-			}
+		verts := frame.verts[cmd.verts.start:][:cmd.verts.count]
+		for i := 0; i + 3 <= len(verts); i += 3 {
+			raster_triangle(&r, verts[i], verts[i + 1], verts[i + 2])
 		}
 	case Cmd_Draw_Shapes:
 		if c.union_coverage {
@@ -287,7 +237,7 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 				row = inst.paint
 			}
 			r.frag = &frag
-			raster_shape(&r, inst)
+			raster_shape(&r, inst, frame.shape_words)
 		}
 	}
 }
@@ -303,7 +253,7 @@ raster_shape_union :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Stor
 	}
 	area := EMPTY_BOUNDS
 	for inst in instances {
-		ib := shape_device_bounds(inst.shape, inst.transform)
+		ib := instance_bounds(inst, frame.shape_words)
 		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
 	}
 	x0 := max(r.x0, i32(math.floor(area.minx)))
@@ -321,14 +271,15 @@ raster_shape_union :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Stor
 	mask := b.mask[:w * h]
 	mem.zero_slice(mask)
 	for inst in instances {
-		ib := shape_device_bounds(inst.shape, inst.transform)
+		ib := instance_bounds(inst, frame.shape_words)
 		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
 		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
 		inv := transform_inverse(inst.transform)
-		u, v := shape_footprint(inst.transform)
+		u, v := instance_footprint(inst)
+		words := instance_words(inst, frame.shape_words)
 		for y in iy0 ..< iy1 {
 			for x in ix0 ..< ix1 {
-				cov := shape_coverage(inst.shape.data, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), u, v, inst.even_odd)
+				cov := instance_coverage(inst, words, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), u, v)
 				if cov <= 0 {
 					continue
 				}
@@ -358,34 +309,46 @@ raster_shape_union :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Stor
 }
 
 // Every pixel center of the instance's bounds: its coverage (shape.odin)
-// times the paint, as the shader does.
+// as the paint's edge coverage, as the shader does.
 @(private = "file")
-raster_shape :: proc(r: ^Raster, inst: Shape_Instance) {
-	b := shape_device_bounds(inst.shape, inst.transform)
+raster_shape :: proc(r: ^Raster, inst: Shape_Instance, frame_words: []u32) {
+	b := instance_bounds(inst, frame_words)
 	x0 := max(r.x0, i32(math.floor(b.minx)))
 	y0 := max(r.y0, i32(math.floor(b.miny)))
 	x1 := min(r.x1, i32(math.ceil(b.maxx)))
 	y1 := min(r.y1, i32(math.ceil(b.maxy)))
 	inv := transform_inverse(inst.transform)
-	u, v := shape_footprint(inst.transform)
-	data := inst.shape.data
+	u, v := instance_footprint(inst)
+	words := instance_words(inst, frame_words)
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
 			px := f32(x) + 0.5
-			cov := shape_coverage(data, transform_point(inv, px, py), u, v, inst.even_odd)
-			if cov <= 0 {
+			cov := instance_coverage(inst, words, transform_point(inv, px, py), u, v)
+			// Rounding's slivers where the shape is absent (as the shader).
+			if cov < 1.0 / 510 {
 				continue
 			}
-			src, keep := shade(r.frag, px, py, 0.5, 1)
+			src, keep := shade(r.frag, px, py, 0.5, cov)
 			if !keep {
 				continue
 			}
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
 			dst := load_texel(r.target, tx, ty)
-			store_texel(r.target, tx, ty, apply_blend(r.blend, src * cov, dst))
+			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
 		}
 	}
+}
+
+// The coverage of the instance's pixel centered at `rc` (shape units) with
+// sides `u` and `v` (instance_footprint): the shape shader's.
+@(private = "file")
+instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc, u, v: Vec2) -> f32 {
+	if inst.aliased {
+		w := cv.winding(words, rc)
+		return 1 if (w & 1 != 0 if inst.even_odd else w != 0) else 0
+	}
+	return shape_coverage(words, rc, u, v, inst.even_odd)
 }
 
 @(private = "file")
@@ -427,11 +390,9 @@ raster_triangle :: proc(r: ^Raster, v0, v1, v2: Vertex) {
 	if abs(area) < 1e-9 {
 		return
 	}
-	winding: u8 = 1
 	if area < 0 {
 		v1, v2 = v2, v1
 		area = -area
-		winding = 0xff
 	}
 
 	uv0, uv1, uv2 := vertex_uv(v0), vertex_uv(v1), vertex_uv(v2)
@@ -452,7 +413,6 @@ raster_triangle :: proc(r: ^Raster, v0, v1, v2: Vertex) {
 	tl1 := is_top_left(v2, v0)
 	tl2 := is_top_left(v0, v1)
 	inv_area := 1 / area
-	width := r.target.width
 
 	for y in y0 ..= y1 {
 		py := f32(y) + 0.5
@@ -468,30 +428,6 @@ raster_triangle :: proc(r: ^Raster, v0, v1, v2: Vertex) {
 				continue
 			}
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			sidx := int(ty * width + tx)
-			switch r.op {
-			case .Winding:
-				r.stencil[sidx] += winding
-				continue
-			case .Clear:
-				r.stencil[sidx] = 0
-				continue
-			case .Paint_If_Zero:
-				if r.stencil[sidx] & r.mask != 0 {
-					continue
-				}
-			case .Cover:
-				s := r.stencil[sidx]
-				r.stencil[sidx] = 0
-				if s & r.mask == 0 {
-					continue
-				}
-			case .Paint_Once:
-				if r.stencil[sidx] != 0 {
-					continue
-				}
-			case .None:
-			}
 			b0 := w0 * inv_area
 			b1 := w1 * inv_area
 			b2 := w2 * inv_area
@@ -500,9 +436,6 @@ raster_triangle :: proc(r: ^Raster, v0, v1, v2: Vertex) {
 			src, keep := shade(r.frag, px, py, u, v)
 			if !keep {
 				continue
-			}
-			if r.op == .Paint_Once {
-				r.stencil[sidx] += 1
 			}
 			dst := load_texel(r.target, tx, ty)
 			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
@@ -622,8 +555,6 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 	case .Texture_Copy_Unclipped:
 		result = apply_tex_type(sample(f.tex, u, v), p.tex_type) * p.inner_col if f.has_tex else p.inner_col
 		return result, true
-	case .Stencil:
-		result = {1, 1, 1, 1}
 	case .Fill_Color, .Fill_Color_Unclipped, .Filter_Image, .Filter_Color_Matrix, .Filter_Blend, .Filter_Composite, .Filter_Color_Space, .Filter_Component_Transfer, .Filter_Morphology, .Filter_Lighting, .Filter_Tile, .Filter_Displacement, .Filter_Convolve, .Filter_Turbulence:
 		result = p.inner_col
 	}
@@ -645,7 +576,7 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 			mask = {mask[0] * mask[3], mask[1] * mask[3], mask[2] * mask[3], mask[3]}
 		}
 		result *= mask * scissor
-	} else if p.shader_type != .Stencil && p.shader_type != .Filter_Image {
+	} else if p.shader_type != .Filter_Image {
 		result *= stroke_alpha * scissor
 	}
 	return result, true
