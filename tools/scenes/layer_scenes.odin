@@ -340,3 +340,43 @@ scene_layer_blend :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_pop(ls, c)
 	vg.layer_stack_end(ls, c)
 }
+
+// Opacity groups (layers of shapes alone, drawn as one group of shapes):
+// overlapping fills, a gradient, a rotated rect, a stroke and an aliased
+// fill fading as one, and one with many members.
+scene_layer_groups :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	p := &r.path
+	vg.layer_stack_begin(ls, c, W, H)
+	background(c, r)
+	vg.layer_push(ls, c, {opacity = 0.6})
+	circle(c, r, 60, 60, 40, vg.rgb(255, 120, 40))
+	rect(c, r, 40, 40, 90, 50, vg.rgb(40, 120, 220))
+	vg.path_reset(p)
+	vg.path_rect(p, 20, 90, 120, 40)
+	vg.fill_path(c, p, vg.paint_linear_gradient(20, 0, 140, 0, vg.rgb(250, 200, 30), vg.rgba(20, 200, 90, 160)))
+	vg.save(c)
+	vg.translate(c, 100, 70)
+	vg.rotate(c, 0.5)
+	rect(c, r, -30, -10, 60, 20, vg.rgb(200, 40, 160))
+	vg.restore(c)
+	vg.path_reset(p)
+	vg.path_move_to(p, 10, 150)
+	vg.path_bezier_to(p, 60, 100, 100, 200, 150, 140)
+	stroke := vg.paint_color(vg.rgb(30, 30, 30))
+	stroke.stroke.line_width = 6
+	vg.stroke_path(c, p, stroke)
+	vg.path_reset(p)
+	vg.path_rect(p, 30.25, 160.5, 50, 20)
+	aliased := vg.paint_color(vg.rgb(250, 250, 250))
+	aliased.anti_alias = false
+	vg.fill_path(c, p, aliased)
+	vg.layer_pop(ls, c)
+	vg.layer_push(ls, c, {opacity = 0.75})
+	for k in 0 ..< 60 {
+		x, y := 160 + f32(k % 10) * 9, 20 + f32(k / 10) * 25
+		circle(c, r, x, y, 8 + f32(k % 3) * 3, vg.rgb(u8(k * 4), 160, u8(255 - k * 4)))
+	}
+	vg.layer_pop(ls, c)
+	vg.layer_stack_end(ls, c)
+}

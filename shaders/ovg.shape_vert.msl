@@ -14,14 +14,14 @@ struct vs_shape_Result_0
 };
 
 
-#line 755
+#line 753
 struct Shape_Draw_0
 {
     uint4 base_0;
 };
 
 
-#line 755
+#line 753
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -218,39 +218,29 @@ struct VS_Shape_Out_0
     (&o_0)->fpos_1 = d_0;
     (&o_0)->uv_2 = float4(s_0.uv_1) ;
     (&o_0)->data_2 = uint4(s_0.data_1) ;
-    if((shape_draw_1->base_0.y) != 0U)
-    {
-
-#line 790
-        (&o_0)->data_2.y = shape_draw_1->base_0.y - 1U;
-
-#line 789
-    }
-
-
     float2 p_0 = d_0 - (&kernelContext_0)->view_0->size_0.zw;
     (&o_0)->position_1 = float4(2.0f * p_0.x / (&kernelContext_0)->view_0->size_0.x - 1.0f, 1.0f - 2.0f * p_0.y / (&kernelContext_0)->view_0->size_0.y, 0.0f, 1.0f);
     VS_Shape_Out_0 _S9 = o_0;
 
-#line 794
+#line 791
     thread vs_shape_Result_0 _S10;
 
-#line 794
+#line 791
     (&_S10)->position_0 = _S9.position_1;
 
-#line 794
+#line 791
     (&_S10)->rc_0 = _S9.rc_1;
 
-#line 794
+#line 791
     (&_S10)->fpos_0 = _S9.fpos_1;
 
-#line 794
+#line 791
     (&_S10)->uv_0 = _S9.uv_2;
 
-#line 794
+#line 791
     (&_S10)->data_0 = _S9.data_2;
 
-#line 794
+#line 791
     return _S10;
 }
 

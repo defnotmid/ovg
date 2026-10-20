@@ -21,6 +21,8 @@ SHAPE_VERT_MSL :: #load("../shaders/ovg.shape_vert.msl")
 SHAPE_FRAG_MSL :: #load("../shaders/ovg.shape_frag.msl")
 SHAPE_BOX_FRAG_SPV :: #load("../shaders/ovg.shape_box_frag.spv")
 SHAPE_BOX_FRAG_MSL :: #load("../shaders/ovg.shape_box_frag.msl")
+SHAPE_GROUP_FRAG_SPV :: #load("../shaders/ovg.shape_group_frag.spv")
+SHAPE_GROUP_FRAG_MSL :: #load("../shaders/ovg.shape_group_frag.msl")
 
 MAX_FRAMES_IN_FLIGHT :: 4
 
@@ -69,6 +71,9 @@ SDL_Backend :: struct {
 	shape_frag:       ^sdl.GPUShader,
 	// For instances whose pixel footprint is a box (no rotation or skew).
 	shape_box_frag:   ^sdl.GPUShader,
+	// For groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
+	// the instances.
+	shape_group_frag: ^sdl.GPUShader,
 	shapes:           Shape_Store,
 	screen_width:     u32,
 	screen_height:    u32,
@@ -80,7 +85,7 @@ SDL_Backend :: struct {
 	vertex_stream:    Stream,
 	paint_stream:     Stream,
 	instance_stream:  Stream,
-	// The intermediates of image filters and mask pages (`scratch_image`);
+	// The intermediates of image filters (`scratch_image`);
 	// unused ones are freed after a while.
 	scratch:          [dynamic]Cached_Texture,
 	// Counts `render` calls.
@@ -106,12 +111,12 @@ SDL_Backend :: struct {
 	verts:            [dynamic]vg.Vertex,
 	paints:           [dynamic]Paint,
 	rows:             [dynamic]Row,
-	// Each frame shape instance's shape, as a word offset in `shapes`, and
-	// its shift into a mask page (render.odin, plan_masks).
+	// Each frame shape instance's shape, as a word offset in `shapes`.
 	shape_offsets:    [dynamic]u32,
-	shape_shifts:     [dynamic][2]f32,
-	// The frame's translucent shape runs' masks.
-	masks:            [dynamic]Shape_Mask,
+	// The frame's group records, after its instances, and their grids
+	// (render.odin, plan_group).
+	groups:           [dynamic]Gpu_Shape_Instance,
+	group_words:      [dynamic]u32,
 	// What the last `render` recorded.
 	stats:            Frame_Stats,
 }
@@ -140,8 +145,8 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		paints    = make([dynamic]Paint, allocator),
 		rows      = make([dynamic]Row, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
-		shape_shifts = make([dynamic][2]f32, allocator),
-		masks = make([dynamic]Shape_Mask, allocator),
+		groups = make([dynamic]Gpu_Shape_Instance, allocator),
+		group_words = make([dynamic]u32, allocator),
 	}
 	defer if err != nil {
 		destroy(b)
@@ -163,82 +168,32 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	// slangc names the SPIR-V entry points "main" and keeps the function
 	// names for Metal.
 	formats := sdl.GetGPUShaderFormats(b.device)
-	vert_code, frag_code, shape_vert_code, shape_frag_code, shape_box_code: []u8
-	format: sdl.GPUShaderFormat
-	vs_entry, fs_entry, svs_entry, sfs_entry, sbox_entry: cstring
-	switch {
-	case .SPIRV in formats:
-		vert_code, frag_code, format, vs_entry, fs_entry = VERT_SPV, FRAG_SPV, {.SPIRV}, "main", "main"
-		shape_vert_code, shape_frag_code, svs_entry, sfs_entry = SHAPE_VERT_SPV, SHAPE_FRAG_SPV, "main", "main"
-		shape_box_code, sbox_entry = SHAPE_BOX_FRAG_SPV, "main"
-	case .MSL in formats:
-		vert_code, frag_code, format, vs_entry, fs_entry = VERT_MSL, FRAG_MSL, {.MSL}, "vs_main", "fs_main"
-		shape_vert_code, shape_frag_code, svs_entry, sfs_entry = SHAPE_VERT_MSL, SHAPE_FRAG_MSL, "vs_shape", "fs_shape"
-		shape_box_code, sbox_entry = SHAPE_BOX_FRAG_MSL, "fs_shape_box"
-	case:
+	spirv := .SPIRV in formats
+	if !spirv && .MSL not_in formats {
 		return .Unsupported_Operation
 	}
-	b.shader_format = format
-	b.vert = sdl.CreateGPUShader(
-		b.device,
-		{
-			code_size = len(vert_code),
-			code = raw_data(vert_code),
-			entrypoint = vs_entry,
-			format = format,
-			stage = .VERTEX,
-			num_uniform_buffers = 1,
-		},
-	)
-	b.frag = sdl.CreateGPUShader(
-		b.device,
-		{
-			code_size = len(frag_code),
-			code = raw_data(frag_code),
-			entrypoint = fs_entry,
-			format = format,
-			stage = .FRAGMENT,
-			num_samplers = 2,
-			num_storage_buffers = 1,
-		},
-	)
-	b.shape_vert = sdl.CreateGPUShader(
-		b.device,
-		{
-			code_size = len(shape_vert_code),
-			code = raw_data(shape_vert_code),
-			entrypoint = svs_entry,
-			format = format,
-			stage = .VERTEX,
-			num_storage_buffers = 1,
-			num_uniform_buffers = 2,
-		},
-	)
-	b.shape_frag = sdl.CreateGPUShader(
-		b.device,
-		{
-			code_size = len(shape_frag_code),
-			code = raw_data(shape_frag_code),
-			entrypoint = sfs_entry,
-			format = format,
-			stage = .FRAGMENT,
-			num_samplers = 2,
-			num_storage_buffers = 2,
-		},
-	)
-	b.shape_box_frag = sdl.CreateGPUShader(
-		b.device,
-		{
-			code_size = len(shape_box_code),
-			code = raw_data(shape_box_code),
-			entrypoint = sbox_entry,
-			format = format,
-			stage = .FRAGMENT,
-			num_samplers = 2,
-			num_storage_buffers = 2,
-		},
-	)
-	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil {
+	b.shader_format = {.SPIRV} if spirv else {.MSL}
+	shader :: proc(b: ^SDL_Backend, spv, msl: []u8, entry: cstring, stage: sdl.GPUShaderStage, samplers, storage, uniforms: u32) -> ^sdl.GPUShader {
+		spirv := b.shader_format == {.SPIRV}
+		code := spv if spirv else msl
+		return sdl.CreateGPUShader(b.device, {
+			code_size = len(code),
+			code = raw_data(code),
+			entrypoint = "main" if spirv else entry,
+			format = b.shader_format,
+			stage = stage,
+			num_samplers = samplers,
+			num_storage_buffers = storage,
+			num_uniform_buffers = uniforms,
+		})
+	}
+	b.vert = shader(b, VERT_SPV, VERT_MSL, "vs_main", .VERTEX, 0, 0, 1)
+	b.frag = shader(b, FRAG_SPV, FRAG_MSL, "fs_main", .FRAGMENT, 2, 1, 0)
+	b.shape_vert = shader(b, SHAPE_VERT_SPV, SHAPE_VERT_MSL, "vs_shape", .VERTEX, 0, 1, 2)
+	b.shape_frag = shader(b, SHAPE_FRAG_SPV, SHAPE_FRAG_MSL, "fs_shape", .FRAGMENT, 2, 2, 0)
+	b.shape_box_frag = shader(b, SHAPE_BOX_FRAG_SPV, SHAPE_BOX_FRAG_MSL, "fs_shape_box", .FRAGMENT, 2, 2, 0)
+	b.shape_group_frag = shader(b, SHAPE_GROUP_FRAG_SPV, SHAPE_GROUP_FRAG_MSL, "fs_shape_group", .FRAGMENT, 2, 3, 0)
+	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil || b.shape_group_frag == nil {
 		return .Shader_Compile
 	}
 	store_init(b)
@@ -279,8 +234,8 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.paints)
 		delete(b.rows)
 		delete(b.shape_offsets)
-		delete(b.shape_shifts)
-		delete(b.masks)
+		delete(b.groups)
+		delete(b.group_words)
 		b^ = {}
 		return
 	}
@@ -310,7 +265,7 @@ destroy :: proc(b: ^SDL_Backend) {
 	if b.shapes.at != nil {
 		store_destroy(b)
 	}
-	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag}) {
+	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag, b.shape_group_frag}) {
 		if s != nil {
 			sdl.ReleaseGPUShader(b.device, s)
 		}
@@ -325,8 +280,8 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.paints)
 	delete(b.rows)
 	delete(b.shape_offsets)
-	delete(b.shape_shifts)
-	delete(b.masks)
+	delete(b.groups)
+	delete(b.group_words)
 
 	if b.owns_device {
 		sdl.DestroyGPUDevice(b.device)

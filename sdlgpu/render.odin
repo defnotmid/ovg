@@ -1,7 +1,6 @@
 package ovg_sdlgpu
 
 import "core:math"
-import "core:slice"
 import sdl "vendor:sdl3"
 
 import vg ".."
@@ -17,10 +16,11 @@ import vg ".."
 Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
 	format:  sdl.GPUTextureFormat,
-	// The shape pipeline (shapes.odin) instead of the triangle one, and
-	// its box variant (instances without rotation or skew).
+	// The shape pipeline (shapes.odin) instead of the triangle one, its
+	// box variant (instances without rotation or skew) and its group one.
 	shapes:  bool,
 	box:     bool,
+	group:   bool,
 }
 
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
@@ -56,9 +56,6 @@ Row :: struct {
 	own_pass: bool,
 	program:  ^vg.Program_Run,
 	external: ^vg.Cmd_Run_External,
-	// Shapes: when not 0, one more than the paint row all the instances
-	// take instead of their own.
-	paint_override: u32,
 }
 
 // A GPU buffer and the transfer buffer that fills it, grown to the largest
@@ -94,14 +91,15 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	}
 	b.last_screen = screen
 
-	// Every texture the frame needs (filter intermediates, mask pages, the
-	// streams) is created while planning, before the command buffer is
+	// Every texture the frame needs (filter intermediates, the streams) is created while planning, before the command buffer is
 	// recorded: SDL_GPU submits when it creates a texture, and a submit may
 	// move textures a recording frame had already bound.
-	plan_frame(b, images, frame, screen)
+	if !plan_frame(b, images, frame, screen) {
+		return
+	}
 	vert_count := len(frame.verts) + len(b.verts)
 	paint_count := len(frame.paints) + len(b.paints)
-	instance_count := len(frame.shapes)
+	instance_count := len(frame.shapes) + len(b.groups)
 	// A frame whose buffers the device can't provide (out of memory, a lost
 	// device) is dropped, not drawn from nil buffers.
 	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX}) ||
@@ -156,8 +154,8 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
 				out[i] = gpu_shape_instance(inst, vg.instance_words(inst, frame.shape_words), b.shape_offsets[i])
-				out[i].t.xy += b.shape_shifts[i]
 			}
+			copy(out[len(frame.shapes):instance_count], b.groups[:])
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
 		} else {
 			uploaded = false
@@ -259,8 +257,9 @@ extra_base :: proc(p: ^Planner) -> u32 {
 	return u32(len(p.frame.verts) + len(p.b.verts))
 }
 
+// False when the frame's shapes don't fit the store.
 @(private = "file")
-plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, screen: Image) {
+plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, screen: Image) -> bool {
 	clear(&b.verts)
 	clear(&b.paints)
 	clear(&b.rows)
@@ -271,10 +270,8 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 		screen = screen,
 		target = screen,
 	}
-	resize(&b.shape_shifts, len(frame.shapes))
-	slice.zero(b.shape_shifts[:])
-	placed := store_place(b, frame)
-	clear(&b.masks)
+	clear(&b.groups)
+	clear(&b.group_words)
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
 		case vg.Cmd_Set_Render_Target:
@@ -294,14 +291,14 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				append(&b.rows, row)
 			}
 		case vg.Cmd_Draw_Shapes:
-			if !placed || c.instances.count == 0 {
+			if c.instances.count == 0 {
 				continue
 			}
-			if c.union_coverage {
-				plan_shape_union(&p, cmd, c)
+			if c.group != 0 {
+				plan_group(&p, cmd, c)
 				continue
 			}
-			plan_shape_rows(&p, draw_row(&p, cmd), c.instances, 0)
+			plan_shape_rows(&p, draw_row(&p, cmd), c.instances)
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
@@ -317,7 +314,11 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			append(&b.rows, Row{kind = .External, external = &c})
 		}
 	}
-	plan_masks(&p)
+	grids, placed := store_place(b, frame)
+	for &g in b.groups {
+		g.data.x += grids
+	}
+	return placed
 }
 
 @(private = "file")
@@ -348,7 +349,7 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 		kind = .Draw,
 		target = p.target,
 		origin = p.origin,
-		key = {cmd.composite_operation, p.target.format, false, false},
+		key = {blend = cmd.composite_operation, format = p.target.format},
 		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, glyph)},
 		scissor = scissor,
 	}
@@ -414,11 +415,10 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 // instances that are all boxes (no rotation or skew: the box shader) or
 // all not.
 @(private = "file")
-plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range, paint_override: u32) {
+plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 	row := base
 	row.kind = .Shapes
 	row.key.shapes = true
-	row.paint_override = paint_override
 	start := instances.start
 	for i in instances.start ..< instances.start + instances.count {
 		t := p.frame.shapes[i].transform
@@ -434,139 +434,103 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range, paint_overr
 	append(&p.b.rows, row)
 }
 
-// A shape run filling as one (`union_coverage`): one quad of its paint
-// through an 8-bit mask of its coverage (the glyph alpha-mask path) into
-// the target. The masks of all the frame's runs are packed into shared
-// pages and drawn first, each page in one pass (`plan_masks`): the
-// coverages in white, source-over, as the software backend does.
+// A group (`Cmd_Draw_Shapes.group`): records after the frame's instances
+// whose pixels composite the instances (the group shader). Their bounds
+// are a grid of cells about one instance in size, each listing the
+// instances whose bounds meet it, in order, so a pixel looks at the few
+// near it; a record covers a row's run of cells that list any. Records map
+// cell units to drawing coordinates and share the grid (`group_words`,
+// placed in the store): each cell's first list entry, one more for the
+// end, then the lists (instances from the first).
 @(private = "file")
-plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
+plan_group :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 	b := p.b
-	instances := p.frame.shapes[c.instances.start:][:c.instances.count]
-	bounds := vg.EMPTY_BOUNDS
-	for inst in instances {
-		ib := vg.instance_bounds(inst, p.frame.shape_words)
-		bounds = {min(bounds.minx, ib.minx), min(bounds.miny, ib.miny), max(bounds.maxx, ib.maxx), max(bounds.maxy, ib.maxy)}
+	n := int(c.instances.count)
+	bounds := make([]vg.Bounds, n, context.temp_allocator)
+	area := vg.EMPTY_BOUNDS
+	for inst, k in p.frame.shapes[c.instances.start:][:n] {
+		bounds[k] = vg.instance_bounds(inst, p.frame.shape_words)
+		area = {min(area.minx, bounds[k].minx), min(area.miny, bounds[k].miny), max(area.maxx, bounds[k].maxx), max(area.maxy, bounds[k].maxy)}
 	}
-	rect := vg.Rect{bounds.minx, bounds.miny, bounds.maxx - bounds.minx, bounds.maxy - bounds.miny}
-	if sr, ok := cmd.scissor_rect.?; ok {
-		rect = vg.rect_intersect(rect, sr)
+	w, h := max(area.maxx - area.minx, 1), max(area.maxy - area.miny, 1)
+	side: f32
+	for ib in bounds {
+		side += (ib.maxx - ib.minx) + (ib.maxy - ib.miny)
 	}
-	area := target_rect(p.target, p.origin, rect)
-	if area.w <= 0 || area.h <= 0 {
+	side = max(side / f32(2 * n), 1)
+	nx := clamp(int(math.ceil(w / side)), 1, GROUP_MAX_CELLS)
+	ny := clamp(int(math.ceil(h / side)), 1, GROUP_MAX_CELLS)
+	cw, ch := w / f32(nx), h / f32(ny)
+	cells :: proc(b: vg.Bounds, area: vg.Bounds, cw, ch: f32, nx, ny: int) -> (i0, j0, i1, j1: int) {
+		i0 = clamp(int((b.minx - area.minx) / cw), 0, nx - 1)
+		j0 = clamp(int((b.miny - area.miny) / ch), 0, ny - 1)
+		i1 = clamp(int((b.maxx - area.minx) / cw), 0, nx - 1)
+		j1 = clamp(int((b.maxy - area.miny) / ch), 0, ny - 1)
 		return
 	}
-	params := p.frame.paints[instances[0].paint]
-	params.glyph_texture_type = 1
-	paint := add_paint(p, vg.pack_frag_uniforms(params))
+	// Indices into `group_words` (it grows below): its starts, then lists.
+	at := len(b.group_words)
+	lists := at + nx * ny + 1
+	resize(&b.group_words, lists)
+	words := &b.group_words
+	for k in at ..< lists {
+		words[k] = 0
+	}
+	for ib in bounds {
+		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
+		for j in j0 ..= j1 {
+			for i in i0 ..= i1 {
+				words[at + j * nx + i + 1] += 1
+			}
+		}
+	}
+	for k in at ..< lists - 1 {
+		words[k + 1] += words[k]
+	}
+	resize(words, lists + int(words[lists - 1]))
+	fill := make([]u32, nx * ny, context.temp_allocator)
+	copy(fill, words[at:lists - 1])
+	for ib, k in bounds {
+		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
+		for j in j0 ..= j1 {
+			for i in i0 ..= i1 {
+				words[lists + int(fill[j * nx + i])] = u32(k)
+				fill[j * nx + i] += 1
+			}
+		}
+	}
 	row := draw_row(p, cmd)
-	row.scissor = area
-	row.verts = {extra_base(p), 6}
-	// The mask's place, texture and the quad's texture coordinates are set
-	// once the masks are packed.
-	append(&b.masks, Shape_Mask{instances = c.instances, corner = {area.x + p.origin.x, area.y + p.origin.y}, size = {area.w, area.h}, row = len(b.rows), vert = len(b.verts)})
+	row.kind = .Shapes
+	row.key.shapes, row.key.group = true, true
+	first := len(b.groups)
+	listed :: proc(words: ^[dynamic]u32, cell: int) -> bool {
+		return words[cell] != words[cell + 1]
+	}
+	for j in 0 ..< ny {
+		for i := 0; i < nx; {
+			if !listed(words, at + j * nx + i) {
+				i += 1
+				continue
+			}
+			i0 := i
+			for i < nx && listed(words, at + j * nx + i) {
+				i += 1
+			}
+			append(&b.groups, Gpu_Shape_Instance {
+				m = {cw, 0, 0, ch},
+				t = {area.minx, area.miny, 0, 0},
+				bounds = {f32(i0), f32(j), f32(i), f32(j + 1)},
+				data = {u32(at), c.group - 1, c.instances.start, u32(nx) | u32(ny) << 16},
+			})
+		}
+	}
+	row.verts = {u32(len(p.frame.shapes) + first), u32(len(b.groups) - first)}
 	append(&b.rows, row)
-	x0, y0 := f32(area.x + p.origin.x), f32(area.y + p.origin.y)
-	x1, y1 := x0 + f32(area.w), y0 + f32(area.h)
-	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y0, 0, 0, paint), vg.vertex(x1, y1, 0, 0, paint))
-	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y1, 0, 0, paint), vg.vertex(x0, y1, 0, 0, paint))
 }
 
-// A run's mask: its instances, its area in drawing coordinates, its page
-// and place there, and its composite row and quad.
-Shape_Mask :: struct {
-	instances: vg.Range,
-	corner:    [2]i32,
-	size:      [2]i32,
-	page:      int,
-	at:        [2]i32,
-	row:       int,
-	vert:      int,
-}
-
-// Mask pages are this size unless one mask needs more.
+// A group's grid is at most this many cells a side.
 @(private = "file")
-MASK_PAGE :: 4096
-
-// Packs the frame's masks into pages (shelves, in order), puts each page's
-// clear and mask rows before all others, and points the composite rows at
-// them.
-@(private = "file")
-plan_masks :: proc(p: ^Planner) {
-	b := p.b
-	if len(b.masks) == 0 {
-		return
-	}
-	Page :: struct {
-		w, h:  i32,
-		first: int,
-	}
-	pages := make([dynamic]Page, context.temp_allocator)
-	x, y, shelf: i32
-	for &m, i in b.masks {
-		if len(pages) == 0 || x + m.size.x > MASK_PAGE {
-			x, y, shelf = 0, y + shelf, 0
-		}
-		if len(pages) == 0 || y + m.size.y > MASK_PAGE {
-			append(&pages, Page{first = i})
-			x, y, shelf = 0, 0, 0
-		}
-		m.page, m.at = len(pages) - 1, {x, y}
-		page := &pages[len(pages) - 1]
-		page.w, page.h = max(page.w, x + m.size.x), max(page.h, y + m.size.y)
-		x += m.size.x
-		shelf = max(shelf, m.size.y)
-	}
-	main := len(b.rows)
-	solid :: proc(p: ^Planner, color: [4]f32) -> u32 {
-		params := vg.default_params()
-		params.shader_type = .Fill_Color
-		params.inner_col = color
-		params.outer_col = color
-		params.stroke_mult = 1
-		params.stroke_thr = -1
-		return add_paint(p, vg.pack_frag_uniforms(params))
-	}
-	clear_paint := solid(p, {0, 0, 0, 0})
-	white := solid(p, {1, 1, 1, 1})
-	images := make([]Image, len(pages), context.temp_allocator)
-	for page, pi in pages {
-		w := u32(math.next_power_of_two(int(max(page.w, 64))))
-		h := u32(math.next_power_of_two(int(max(page.h, 64))))
-		scratch := scratch_image(b, {width = w, height = h, format = .Gray8, flags = {.Nearest}})
-		if scratch == nil {
-			continue
-		}
-		images[pi] = scratch^
-		img := images[pi]
-		pw, ph := f32(page.w), f32(page.h)
-		append(&b.rows, Row{kind = .Draw, target = img, key = {vg.composite_state_from_op(.Copy), img.format, false, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {0, 0, page.w, page.h}, verts = {extra_base(p), 6}})
-		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint))
-		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint), vg.vertex(0, ph, 0.5, 1, clear_paint))
-	}
-	for &m in b.masks {
-		img := images[m.page]
-		if img.texture == nil {
-			continue
-		}
-		// The instances draw shifted from the area's corner to the place.
-		shift := [2]f32{f32(m.at.x - m.corner.x), f32(m.at.y - m.corner.y)}
-		for i in m.instances.start ..< m.instances.start + m.instances.count {
-			b.shape_shifts[i] = shift
-		}
-		plan_shape_rows(p, Row{target = img, key = {vg.composite_state_from_op(.Source_Over), img.format, true, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {m.at.x, m.at.y, m.size.x, m.size.y}}, m.instances, white + 1)
-		b.rows[m.row].textures[1] = texture_binding(b, &img)
-		u0, v0 := f32(m.at.x) / f32(img.width), f32(m.at.y) / f32(img.height)
-		u1, v1 := f32(m.at.x + m.size.x) / f32(img.width), f32(m.at.y + m.size.y) / f32(img.height)
-		uv := [6][2]f32{{u0, v0}, {u1, v0}, {u1, v1}, {u0, v0}, {u1, v1}, {u0, v1}}
-		for k in 0 ..< 6 {
-			vert := &b.verts[m.vert + k]
-			vert^ = vg.vertex(vert.x, vert.y, uv[k].x, uv[k].y, vert.paint)
-		}
-	}
-	// The pages' rows go first: they read nothing the frame draws.
-	slice.rotate_left(b.rows[:], main)
-}
+GROUP_MAX_CELLS :: 64
 
 // One filter quad from `src` (and `backdrop`) into `dst`, a pass of its own
 // with Copy blend.
@@ -578,7 +542,7 @@ plan_filter_pass :: proc(p: ^Planner, src, backdrop, dst: ^Image, paint: Paint) 
 	append(&p.b.rows, Row {
 		kind     = .Draw,
 		target   = dst^,
-		key      = {vg.composite_state_from_op(.Copy), dst.format, false, false},
+		key      = {blend = vg.composite_state_from_op(.Copy), format = dst.format},
 		textures = {texture_binding(p.b, src), texture_binding(p.b, backdrop)},
 		scissor  = {0, 0, i32(dst.width), i32(dst.height)},
 		verts    = {extra_base(p), 6},
@@ -817,7 +781,6 @@ continues :: proc(pending, row: Row) -> bool {
 		row.origin == pending.origin &&
 		row.key == pending.key &&
 		row.textures == pending.textures &&
-		row.paint_override == pending.paint_override &&
 		row.scissor == pending.scissor \
 	)
 }
@@ -858,7 +821,7 @@ flush :: proc(r: ^Recorder) {
 	if row.kind == .Shapes {
 		// The instances index from the draw's first (SV_InstanceID counts
 		// from 0 in every draw).
-		base := [4]u32{row.verts.start, row.paint_override, 0, 0}
+		base := [4]u32{row.verts.start, 0, 0, 0}
 		sdl.PushGPUVertexUniformData(r.cmd, 1, &base, size_of(base))
 		sdl.DrawGPUPrimitives(r.pass, 6, row.verts.count, 0, 0)
 	} else {
@@ -890,8 +853,9 @@ begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
 		buffer = r.b.vertex_stream.buffer,
 	}
 	sdl.BindGPUVertexBuffers(r.pass, 0, &vertices, 1)
-	storage := [2]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer}
-	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], 2 if storage[1] != nil else 1)
+	// The group shader reads the instances too.
+	storage := [3]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer, r.b.instance_stream.buffer}
+	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], 3 if storage[1] != nil && storage[2] != nil else 1)
 	if instances := r.b.instance_stream.buffer; instances != nil {
 		sdl.BindGPUVertexStorageBuffers(r.pass, 0, &instances, 1)
 	}
@@ -1141,7 +1105,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		// No vertex input: the shader pulls its instances.
 		info := sdl.GPUGraphicsPipelineCreateInfo {
 			vertex_shader = b.shape_vert,
-			fragment_shader = b.shape_box_frag if key.box else b.shape_frag,
+			fragment_shader = b.shape_group_frag if key.group else (b.shape_box_frag if key.box else b.shape_frag),
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},

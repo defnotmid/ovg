@@ -749,15 +749,15 @@ struct Shape_Instance {
     uint4 data;
 };
 
-// Vertex uniform slot 1: the draw's first instance (x) and, when not 0,
-// one more than the paint row every instance takes instead of its own (y:
-// a run's coverage mask is drawn in white).
+// Vertex uniform slot 1: the draw's first instance (x).
 struct Shape_Draw {
     uint4 base;
 };
 
 // Metal: after the two vertex uniform buffers, [[buffer(2)]].
 [[vk::binding(0, 0)]] StructuredBuffer<Shape_Instance> shape_instances : register(t2, space0);
+// The same instances, read by the group shader's fragments.
+[[vk::binding(4, 2)]] StructuredBuffer<Shape_Instance> members : register(t2, space2);
 [[vk::binding(1, 1)]] ConstantBuffer<Shape_Draw> shape_draw : register(b1, space1);
 [[vk::binding(3, 2)]] StructuredBuffer<uint> shapes : register(t1, space2);
 
@@ -786,9 +786,6 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.fpos = d;
     o.uv = s.uv;
     o.data = s.data;
-    if (shape_draw.base.y != 0u) {
-        o.data.y = shape_draw.base.y - 1u;
-    }
     float2 p = d - view.size.zw;
     o.position = float4(2.0 * p.x / view.size.x - 1.0, 1.0 - 2.0 * p.y / view.size.y, 0, 1);
     return o;
@@ -833,4 +830,50 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
         return shape_fill(i, shape_aliased(i));
     }
     return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u));
+}
+
+// A group (ovg Cmd_Draw_Shapes.group): a record over its instances'
+// bounds, in cells (rc: cell units; data: its grid's word offset in
+// `shapes`, the tint's paint row, the first instance, and the grid's
+// columns and rows). Each pixel composites the instances its cell lists, in
+// order, each shaded as `shape_fill` would, source-over, then takes the
+// tint.
+[shader("fragment")]
+float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
+    uint nx = i.data.w & 0xffffu;
+    uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, i.data.w >> 16) - 1u);
+    uint at = i.data.x + cell.y * nx + cell.x;
+    uint lists = i.data.x + nx * (i.data.w >> 16) + 1u;
+    float4 acc = float4(0, 0, 0, 0);
+    for (uint k = shapes[at]; k < shapes[at + 1u]; k++) {
+        Shape_Instance s = members[i.data.z + shapes[lists + k]];
+        // Drawing coordinates to the instance's shape units.
+        float2 d = i.fpos - s.t.xy;
+        float2 rc = float2(s.m.w * d.x - s.m.z * d.y, s.m.x * d.y - s.m.y * d.x) / (s.m.x * s.m.w - s.m.z * s.m.y);
+        float2 epp = s.t.zw;
+        if (any(rc < s.bounds.xy - epp) || any(rc > s.bounds.zw + epp)) {
+            continue;
+        }
+        bool even_odd = (s.data.z & 1u) != 0u;
+        float coverage;
+        if ((s.data.z & 2u) != 0u) {
+            int w = curves_winding(shapes, s.data.x, rc + (s.uv.xy + s.uv.zw) / 64.0);
+            coverage = (even_odd ? (w & 1) != 0 : w != 0) ? 1.0 : 0.0;
+        } else if (s.m.y == 0.0 && s.m.z == 0.0) {
+            coverage = curves_coverage(shapes, s.data.x, rc, float2(abs(s.uv.x), abs(s.uv.w)), even_odd);
+        } else {
+            coverage = curves_coverage_affine(shapes, s.data.x, rc, s.uv.xy, s.uv.zw, even_odd);
+        }
+        if (coverage < 1.0 / 510.0) {
+            continue;
+        }
+        paint_index = s.data.y;
+        float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
+        acc = c + acc * (1.0 - c.a);
+    }
+    if (acc.a < 1.0 / 510.0) {
+        discard;
+    }
+    paint_index = i.data.y;
+    return acc * (fill_color(shader_type(), i.fpos) * scissor_mask(i.fpos));
 }

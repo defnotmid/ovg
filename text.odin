@@ -462,9 +462,14 @@ fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, sc
 	if paint.feather == 0 && paint.anti_alias {
 		nz := paint
 		nz.fill_rule = .Non_Zero
-		// Translucent text fills as one, as one outline path did.
-		union_coverage := !paint_opaque(c, paint)
 		cmd, row := shape_paint(c, nz)
+		// Translucent text fills as one, as one outline path did: glyphs
+		// in white, tinted by the paint.
+		group: u32
+		if !paint_opaque(c, paint) {
+			group = row + 1
+			row = solid_paint(c, {1, 1, 1, 1})
+		}
 		if f.colr != nil {
 			sync.mutex_lock(&f.colr.lock)
 		}
@@ -473,7 +478,7 @@ fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, sc
 				continue
 			}
 			if s := font_glyph_shape(f, g.glyph); s != nil {
-				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, false, union_coverage)
+				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, false, group)
 			}
 		}
 		if f.colr != nil {

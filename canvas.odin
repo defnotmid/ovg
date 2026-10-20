@@ -402,7 +402,7 @@ fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
 	}
 	cmd: Command
 	cmd, inst.paint = shape_paint(c, paint)
-	push_shape(c, cmd, inst, false)
+	push_shape(c, cmd, inst)
 }
 
 // An instance filling with `paint` drawn under `t` (path units to drawing
@@ -438,13 +438,13 @@ fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENT
 	inst.shape = s
 	cmd: Command
 	cmd, inst.paint = shape_paint(c, paint)
-	push_shape(c, cmd, inst, false)
+	push_shape(c, cmd, inst)
 }
 
 
 // Whether shapes filled with `paint` under the current state can overlap
 // without showing it: opaque colours blended source-over with no global
-// alpha. Otherwise a run fills as one (`Cmd_Draw_Shapes.union_coverage`).
+// alpha. Otherwise a run fills as one (a group, `Cmd_Draw_Shapes.group`).
 @(private)
 paint_opaque :: proc(c: ^Canvas, paint: Paint) -> bool {
 	st := state(c)
@@ -505,12 +505,12 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 
 // `fill_shape` with a paint row from `shape_paint`.
 @(private)
-push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd, union_coverage: bool) {
+push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd: bool, group: u32 = 0) {
 	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
 	if outside_target(c, shape_device_bounds(s, t)) {
 		return
 	}
-	push_shape(c, cmd, {shape = s, transform = t, paint = row, even_odd = even_odd}, union_coverage)
+	push_shape(c, cmd, {shape = s, transform = t, paint = row, even_odd = even_odd}, group)
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),
@@ -532,21 +532,20 @@ device_bounds :: proc "contextless" (words: []u32, t: Transform2D, grow: f32) ->
 }
 
 // Appends a shape instance, extending the frame's last command when it is
-// a shape draw with the same image, blend and scissor (and, filling as one,
-// the same paint).
+// a shape draw with the same image, blend, scissor and group.
 @(private)
-push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, union_coverage: bool) {
+push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 = 0) {
 	append(&c.shapes, inst)
 	at := u32(len(c.shapes) - 1)
 	if n := len(c.commands); n > 0 {
 		last := &c.commands[n - 1]
-		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.union_coverage == union_coverage && (!union_coverage || c.shapes[at - 1].paint == inst.paint) && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
 			d.instances.count += 1
 			return
 		}
 	}
 	cmd := base
-	cmd.type = Cmd_Draw_Shapes{{at, 1}, union_coverage}
+	cmd.type = Cmd_Draw_Shapes{{at, 1}, group}
 	append(&c.commands, cmd)
 }
 
@@ -575,6 +574,19 @@ stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 add_paint :: proc(c: ^Canvas, params: Params) -> u32 {
 	append(&c.paints, params)
 	return u32(len(c.paints) - 1)
+}
+
+// A paint row of one premultiplied colour, unscissored: a group's white
+// instances or its opacity.
+@(private)
+solid_paint :: proc(c: ^Canvas, color: [4]f32) -> u32 {
+	params := default_params()
+	params.shader_type = .Fill_Color
+	params.inner_col = color
+	params.outer_col = color
+	params.stroke_mult = 1
+	params.stroke_thr = -1
+	return add_paint(c, params)
 }
 
 // A draw of the vertices from `start` to the end of the frame's; none when

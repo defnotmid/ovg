@@ -59,7 +59,7 @@ scene_curves :: proc(c: ^vg.Canvas, r: ^Resources) {
 	}
 }
 
-// Translucent text whose glyphs overlap fills as one (union coverage):
+// Translucent text whose glyphs overlap fills as one (a group):
 // global alpha, a translucent colour, a translucent gradient, under a
 // rotation and a scissor.
 scene_curves_alpha :: proc(c: ^vg.Canvas, r: ^Resources) {

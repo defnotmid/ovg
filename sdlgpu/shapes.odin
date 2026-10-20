@@ -8,15 +8,18 @@ import cv "../curves"
 
 // The backend's copies of the shapes it draws, in one storage buffer the
 // shape shader reads, found by shape id: a shape is uploaded the first time
-// it is drawn, and a frame's own shapes (filled paths) are appended each
-// frame. Nothing is freed one by one: when a frame doesn't fit, the store
-// starts over in a fresh buffer holding what that frame draws (the old one
-// is released once the frames reading it finish), so destroyed shapes and
-// past frames' words cost nothing beyond it.
+// it is drawn, after the shapes kept so far, and a frame's own words (paths
+// filled this frame, group grids) follow them, in the space the last
+// frame's took. Nothing is freed one by one: when a frame doesn't fit, the
+// store starts over in a fresh buffer holding what that frame draws (the
+// old one is released once the frames reading it finish), so destroyed
+// shapes cost nothing beyond it.
 Shape_Store :: struct {
 	buffer:            ^sdl.GPUBuffer,
-	// In 32-bit words.
+	// In 32-bit words: the store's, the end of the shapes kept, and the end
+	// of the frame's words after them.
 	capacity:          u32,
+	kept:              u32,
 	top:               u32,
 	// Shape id to its place.
 	at:                map[u64]u32,
@@ -65,17 +68,21 @@ store_destroy :: proc(b: ^SDL_Backend) {
 
 // Places the frame's shapes: each instance's word offset in the store
 // (`b.shape_offsets`), placing the shapes new to it and the frame's own
-// words to upload this frame; false when the store can't be that large.
+// words to upload this frame. Returns where the group grids
+// (`b.group_words`) go; false when the store can't be that large.
 @(private)
-store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> bool {
+store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) {
 	st := &b.shapes
 	resize(&b.shape_offsets, len(frame.shapes))
+	restart :: proc(st: ^Shape_Store) {
+		clear(&st.at)
+		clear(&st.pending)
+		st.kept, st.top, st.capacity = 0, 0, 0
+	}
 	if len(st.pending) > 0 {
 		// The last frame was dropped before its upload: what it placed may
 		// be gone, so start over.
-		clear(&st.at)
-		clear(&st.pending)
-		st.top, st.capacity = 0, 0
+		restart(st)
 	}
 	place :: proc(st: ^Shape_Store, data: []u32) -> u32 {
 		offset := st.top
@@ -86,30 +93,35 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> bool {
 		return offset
 	}
 	for again in ([2]bool{false, true}) {
-		own := place(st, frame.shape_words)
+		st.top = st.kept
 		for inst, i in frame.shapes {
 			if inst.shape == nil {
-				b.shape_offsets[i] = own + inst.words.start
 				continue
 			}
-			offset, ok := st.at[inst.shape.id]
-			if !ok {
+			offset, found := st.at[inst.shape.id]
+			if !found {
 				offset = place(st, inst.shape.data)
 				st.at[inst.shape.id] = offset
 			}
 			b.shape_offsets[i] = offset
+		}
+		st.kept = st.top
+		own := place(st, frame.shape_words)
+		grids = place(st, b.group_words[:])
+		for inst, i in frame.shapes {
+			if inst.shape == nil {
+				b.shape_offsets[i] = own + inst.words.start
+			}
 		}
 		if st.top <= st.capacity || again {
 			break
 		}
 		// It doesn't fit: start over with only this frame's shapes, in a
 		// buffer twice their size (store_upload makes it).
-		clear(&st.at)
-		clear(&st.pending)
-		st.top, st.capacity = 0, 0
+		restart(st)
 	}
 	// Sizes in bytes are 32-bit.
-	return st.top <= 1 << 28
+	return grids, st.top <= 1 << 28
 }
 
 // Uploads the words placed since the last upload, into a fresh buffer when

@@ -711,6 +711,40 @@ test_sw_layer_global_alpha :: proc(t: ^testing.T) {
 	near(t, px(&s, 24, 8), {0, 0, 255, 255})
 }
 
+// A layer with only an opacity over shapes draws as one group: the shapes
+// composite, then fade once (the blue hides the red where they overlap).
+@(test)
+test_layer_opacity_group :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 32, 32)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	clear_rect(c, 0, 0, 32, 32, WHITE)
+	layer_stack_begin(&ls, c, 32, 32)
+	layer_push(&ls, c, {opacity = 0.5})
+	path_rect(&p, 0, 0, 20, 32)
+	fill_path(c, &p, paint_color(rgb(255, 0, 0)))
+	path_reset(&p)
+	path_rect(&p, 12, 0, 20, 32)
+	fill_path(c, &p, paint_color(rgb(0, 0, 255)))
+	layer_pop(&ls, c)
+	layer_stack_end(&ls, c)
+	d, ok := c.commands[len(c.commands) - 1].type.(Cmd_Draw_Shapes)
+	testing.expect(t, ok && d.group != 0 && d.instances.count == 2)
+	flush(c)
+	for x in ([2]u32{4, 16}) {
+		want := [4]u8{255, 128, 128, 255} if x == 4 else {128, 128, 255, 255}
+		got := px(&s, x, 8)
+		for i in 0 ..< 4 {
+			testing.expectf(t, abs(int(got[i]) - int(want[i])) <= 1, "x %d: got %v, want %v", x, got, want)
+		}
+	}
+}
+
 @(test)
 test_sw_screenshot :: proc(t: ^testing.T) {
 	s: Sw

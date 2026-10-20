@@ -110,7 +110,7 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   `gpu.frames_in_flight` (at most 3) lets that many frames keep running while
   the next is recorded; reading a frame back waits for its own copy. Image
   uploads use their own command buffers, submitted before the frame's.
-  Filter intermediates, mask pages and the buffers a frame needs are
+  Filter intermediates and the buffers a frame needs are
   created before its command buffer is recorded: SDL_GPU submits a command
   buffer when it creates a texture, a submit may defragment memory (moving
   textures), and a texture the frame had already bound then lost the draws
@@ -606,7 +606,15 @@ every part follows:
   can sit at an origin (`set_render_target(c, img, origin)`), so the layer is
   still drawn in canvas coordinates and pixels match a full-frame layer.
   Layers with nothing to show drop their commands; a layer a child blends
-  with covers the whole canvas.
+  with covers the whole canvas. A layer with only an opacity over shapes
+  (one image and scissor, source-over) needs no image: it becomes a group
+  (`Cmd_Draw_Shapes.group`), whose pixels composite its shapes in order and
+  take the opacity once, as the layer would. On the GPU a group is a grid
+  of cells about one shape in size, each listing the shapes that meet it,
+  drawn as quads over the cells that list any, so a pixel looks at the few
+  shapes near it. Each layer was a render pass, a few microseconds of GPU
+  time however small: a Lottie repeater's 49 fading copies (720p, RADV) took
+  1.09 ms, now 0.14 ms (M4 8.4 -> 0.6 ms).
 - **Images are top-down on both backends**, including images rendered into
   (SDL_GPU puts y = 0 at the top of every target), so a render target can be
   used as an image paint without `Flip_Y`.
@@ -647,11 +655,8 @@ every part follows:
   under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
   outline work, and draws in one call. Opaque runs draw
   each glyph as it is; a run with global alpha, a translucent paint or
-  another blend fills as one (its coverages united in an 8-bit mask, the
-  paint blended once through it), so overlapping glyphs never darken where
-  they meet. On the GPU all of a frame's masks share packed pages drawn
-  first, one pass per page, so each translucent run costs one quad in the
-  frame's pass (24 runs at 4K: 0.96 ms before, 0.26 ms). Feathered and aliased paints fill the outlines as one
+  another blend fills as one, a group of its glyphs in white tinted by the
+  paint (see Layers), so overlapping glyphs never darken where they meet. Feathered and aliased paints fill the outlines as one
   shape (a feather widens each pixel's footprint; aliased takes each pixel
   center's winding). `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
   (baked at one scale). Both take glyph ids, so shaped runs draw as is.

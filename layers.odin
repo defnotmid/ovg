@@ -85,6 +85,8 @@ Layer_Stand_In :: struct {
 Layer_Frame :: struct {
 	// The canvas before the push: what was recorded since is the layer's.
 	mark:       Canvas_Mark,
+	// The first command drawn into the layer (after its target switch).
+	content:    int,
 	// `Layer_Stack.releases` at the push. Images released since were drawn
 	// in the layer's commands, so they can't hold the layer itself.
 	releases:   u32,
@@ -335,6 +337,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	}
 	append(&ls.frames, f)
 	layer_target_begin(ls, c, ls.stand_ins[depth].content)
+	ls.frames[depth].content = len(c.commands)
 }
 
 // Starts drawing the top layer's mask: until `layer_mask_end`, drawing
@@ -355,11 +358,15 @@ layer_mask_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	depth := len(ls.frames) - 1
 	f := pop(&ls.frames)
+	drawn := len(c.commands)
 	layer_target_end(ls, c)
 	si := ls.stand_ins[depth]
 	win, visible := layer_window(ls, c, &f, si, depth)
 	if !visible {
 		canvas_truncate(c, f.mark)
+		return
+	}
+	if layer_group(c, &f, c.commands[f.content:drawn]) {
 		return
 	}
 	// The global alpha applied to the draws recorded into the layer; the
@@ -432,6 +439,28 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		layer_blit(ls, c, content, x, y, w, h, f.opacity)
 	}
 	layer_release(ls, content)
+}
+
+// Draws the layer `f` as a group of its shapes (`Cmd_Draw_Shapes.group`)
+// when it has only an opacity and drew (`drawn`) one shape draw,
+// source-over: shapes sharing an image, blend and scissor record as one
+// (`push_shape`), so that is every layer of plain shapes.
+@(private = "file")
+layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command) -> bool {
+	if f.filter != nil || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
+		return false
+	}
+	cmd := drawn[0]
+	d, ok := cmd.type.(Cmd_Draw_Shapes)
+	if !ok || d.group != 0 || cmd.composite_operation != composite_state_from_op(.Source_Over) {
+		return false
+	}
+	resize(&c.commands, f.mark.commands)
+	o := f.opacity
+	cmd.composite_operation = state(c).composite_operation
+	cmd.type = Cmd_Draw_Shapes{d.instances, solid_paint(c, {o, o, o, o}) + 1}
+	append(&c.commands, cmd)
+	return true
 }
 
 // The window of the layer `f` ending at `depth`, false when nothing of it

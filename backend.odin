@@ -269,14 +269,15 @@ Cmd_Draw :: struct {
 }
 // Shape instances `Frame.shapes[instances]`, each filled by coverage
 // (shape.odin) with its own paint row; one command covers a run of them
-// that share the command's image, blend and scissor. With
-// `union_coverage` the instances share one paint and fill as one: their
-// coverages unite (`a + b - a b`, as source-over of white) in an 8-bit
-// mask, and the paint is blended once through it, so translucent glyphs
-// that overlap do not darken where they meet.
+// that share the command's image, blend and scissor. When `group` is not
+// 0 the instances draw as one: each pixel composites them in order
+// (source-over), times paint row `group - 1` (the tint), and is blended
+// once. A group opacity is a tint of (o, o, o, o); a translucent run
+// filling as one (glyphs that overlap without darkening) is instances
+// painted white tinted by the run's paint.
 Cmd_Draw_Shapes :: struct {
-	instances:      Range,
-	union_coverage: bool,
+	instances: Range,
+	group:     u32,
 }
 // A shape drawn under `transform` (shape units to drawing coordinates):
 // `shape` (kept by its owner; GPU backends upload it once), or when nil

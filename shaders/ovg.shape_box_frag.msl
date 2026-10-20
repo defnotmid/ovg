@@ -433,54 +433,54 @@ struct KernelContext_0
 };
 
 
-#line 813
+#line 810
 float shape_aliased_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 814
+#line 811
     int w_2 = curves_winding_0(kernelContext_0->shapes_0, i_2->data_0.x, i_2->rc_2 + (i_2->uv_0.xy + i_2->uv_0.zw) / float2(64.0f) );
 
-#line 814
+#line 811
     bool _S25;
     if(((i_2->data_0.z) & 1U) != 0U)
     {
 
-#line 815
+#line 812
         _S25 = (w_2 & int(1)) != int(0);
 
-#line 815
+#line 812
     }
     else
     {
 
-#line 815
+#line 812
         _S25 = w_2 != int(0);
 
-#line 815
+#line 812
     }
 
-#line 815
+#line 812
     float _S26;
 
-#line 815
+#line 812
     if(_S25)
     {
 
-#line 815
+#line 812
         _S26 = 1.0f;
 
-#line 815
+#line 812
     }
     else
     {
 
-#line 815
+#line 812
         _S26 = 0.0f;
 
-#line 815
+#line 812
     }
 
-#line 815
+#line 812
     return _S26;
 }
 
@@ -1106,33 +1106,33 @@ float scissor_mask_0(float2 p_3, KernelContext_0 thread* kernelContext_23)
 }
 
 
-#line 801
+#line 798
 float4 shape_fill_0(const VS_Shape_Out_0 thread* i_4, float coverage_0, KernelContext_0 thread* kernelContext_24)
 {
 
-#line 802
+#line 799
     if(coverage_0 < 0.00196078442968428f)
     {
 
-#line 803
+#line 800
         discard_fragment();
 
-#line 802
+#line 799
     }
 
-#line 802
+#line 799
     int _S95 = shader_type_0(kernelContext_24);
 
-#line 802
+#line 799
     float2 _S96 = i_4->fpos_0;
 
-#line 802
+#line 799
     float4 _S97 = fill_color_0(_S95, i_4->fpos_0, kernelContext_24);
 
-#line 802
+#line 799
     float _S98 = stroke_mask_0(float2(0.5f, coverage_0), kernelContext_24);
 
-#line 802
+#line 799
     float _S99 = scissor_mask_0(_S96, kernelContext_24);
 
 
@@ -1948,104 +1948,104 @@ struct pixelInput_0
 };
 
 
-#line 821 "ovg.slang"
+#line 818 "ovg.slang"
 [[fragment]] pixelOutput_0 fs_shape_box(pixelInput_0 _S147 [[stage_in]], float4 position_1 [[position]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 821
+#line 818
     thread KernelContext_0 kernelContext_25;
 
-#line 821
+#line 818
     (&kernelContext_25)->shapes_0 = shapes_1;
 
-#line 821
+#line 818
     (&kernelContext_25)->paints_0 = paints_1;
 
-#line 821
+#line 818
     (&kernelContext_25)->tex_texture_0 = tex_texture_1;
 
-#line 821
+#line 818
     (&kernelContext_25)->tex_sampler_0 = tex_sampler_1;
     (&kernelContext_25)->paint_index_0 = _S147.data_2.y;
     uint _S148 = _S147.data_2.z;
 
-#line 823
+#line 820
     if((_S148 & 2U) != 0U)
     {
 
-#line 823
+#line 820
         thread VS_Shape_Out_0 _S149;
 
-#line 823
+#line 820
         (&_S149)->position_0 = position_1;
 
-#line 823
+#line 820
         (&_S149)->rc_2 = _S147.rc_5;
 
-#line 823
+#line 820
         (&_S149)->fpos_0 = _S147.fpos_4;
 
-#line 823
+#line 820
         (&_S149)->uv_0 = _S147.uv_1;
 
-#line 823
+#line 820
         (&_S149)->data_0 = _S147.data_2;
 
-#line 823
+#line 820
         float _S150 = shape_aliased_0(&_S149, &kernelContext_25);
 
-#line 823
+#line 820
         thread VS_Shape_Out_0 _S151;
 
-#line 823
+#line 820
         (&_S151)->position_0 = position_1;
 
-#line 823
+#line 820
         (&_S151)->rc_2 = _S147.rc_5;
 
-#line 823
+#line 820
         (&_S151)->fpos_0 = _S147.fpos_4;
 
-#line 823
+#line 820
         (&_S151)->uv_0 = _S147.uv_1;
 
-#line 823
+#line 820
         (&_S151)->data_0 = _S147.data_2;
 
-#line 823
+#line 820
         float4 _S152 = shape_fill_0(&_S151, _S150, &kernelContext_25);
 
-#line 823
+#line 820
         pixelOutput_0 _S153 = { _S152 };
         return _S153;
     }
     float _S154 = curves_coverage_0((&kernelContext_25)->shapes_0, _S147.data_2.x, _S147.rc_5, float2(abs(_S147.uv_1.x), abs(_S147.uv_1.w)), (_S148 & 1U) != 0U);
 
-#line 826
+#line 823
     thread VS_Shape_Out_0 _S155;
 
-#line 826
+#line 823
     (&_S155)->position_0 = position_1;
 
-#line 826
+#line 823
     (&_S155)->rc_2 = _S147.rc_5;
 
-#line 826
+#line 823
     (&_S155)->fpos_0 = _S147.fpos_4;
 
-#line 826
+#line 823
     (&_S155)->uv_0 = _S147.uv_1;
 
-#line 826
+#line 823
     (&_S155)->data_0 = _S147.data_2;
 
-#line 826
+#line 823
     float4 _S156 = shape_fill_0(&_S155, _S154, &kernelContext_25);
 
-#line 826
+#line 823
     pixelOutput_0 _S157 = { _S156 };
 
-#line 826
+#line 823
     return _S157;
 }
 
