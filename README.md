@@ -611,7 +611,8 @@ every part follows:
   it only has to live for the draw call.
 - **Shapes** (`shape.odin`, over the core-only `ovg/curves` package and its
   GPU twin `shaders/curves.slang`, which other renderers can use alone: the
-  word layout, `coverage` from a per-axis footprint or a Jacobian,
+  word layout, `coverage` of a box footprint, `coverage_affine` of any
+  parallelogram (`coverage_jacobian` from a 3D footprint's Jacobian),
   `winding` at a point for sample masks, a mean coverage to `fade` to when
   minified) are filled by exact per-pixel coverage instead of
   tessellation: a `Shape` is quadratic curves, each monotone in x and y,
@@ -619,16 +620,20 @@ every part follows:
   shaders MIT, patent dedicated to the public domain), built once from a
   path or a glyph (`shape_from_path`, `shape_from_glyph`); `fill_shape`
   draws it under any transform for the cost of its bounds. A pixel's
-  coverage is the area of its box inside the shape, integrated in closed
-  form over the curves crossing its rows (Green's theorem): exact for
-  pixels under scales and translations, the enclosing box's under rotation.
-  Against 8x8-supersampled small italic text the mean error is 0.0005
-  (Slug's two-ray estimate, which ovg used before: 0.008); on the GPU it
-  costs about a quarter more than Slug did on dense upright text, the same
-  on rotated text. On the GPU a run of shapes is one instanced draw, its
-  instances pulled from a storage buffer; each shape is uploaded the first
-  frame it is drawn and freed with it. The software backend evaluates the
-  same coverage function (parity: max diff 1 in the `curves` scene).
+  coverage is the area of its footprint inside the shape, integrated in
+  closed form over the curves crossing its rows (Green's theorem): exact
+  under any transform (the footprint is a parallelogram, a box without
+  rotation or skew). Against 8x8-supersampled small italic text the mean
+  error is 0.0005 (Slug's two-ray estimate, which ovg used before: 0.008);
+  rotated pixels are about 20 times closer than Slug's. On the GPU a run of
+  shapes is one instanced draw, its instances pulled from a storage buffer
+  (the box shader for upright instances, the parallelogram one for the
+  rest); a pixel scans its band and integrates the few curves crossing it
+  after the scan, so pixels running together integrate together. Each shape
+  is uploaded the first frame it is drawn and freed with it. Against Slug
+  (4K, Linux / M4): dense upright text costs 17% / 18% more, rotated text
+  50% / 26% more. The software backend evaluates the same coverage function
+  (parity: max diff 1 in the `curves` scene).
 - **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
   font's shape (`font_glyph_shape`: built on first use with the font's
   allocator, the context's at `font_load`, whatever the drawing code runs
@@ -637,7 +642,9 @@ every part follows:
   each glyph as it is; a run with global alpha, a translucent paint or
   another blend fills as one (its coverages united in an 8-bit mask, the
   paint blended once through it), so overlapping glyphs never darken where
-  they meet. Feathered and aliased paints fill the outlines as one
+  they meet. On the GPU all of a frame's masks share packed pages drawn
+  first, one pass per page, so each translucent run costs one quad in the
+  frame's pass (24 runs at 4K: 0.96 ms before, 0.26 ms). Feathered and aliased paints fill the outlines as one
   path. `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
   (baked at one scale). Both take glyph ids, so shaped runs draw as is.
   The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its

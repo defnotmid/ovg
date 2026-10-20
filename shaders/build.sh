@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 FLAGS=(-matrix-layout-column-major -O2)
-for unit in vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape; do
+for unit in vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape shape_box_frag:fs_shape_box; do
 	IFS=: read -r suffix entry <<<"$unit"
 	slangc ovg.slang "${FLAGS[@]}" -entry "$entry" -target spirv -o "ovg.$suffix.spv"
 	slangc ovg.slang "${FLAGS[@]}" -entry "$entry" -target metal -o "ovg.$suffix.msl"
@@ -17,6 +17,6 @@ for unit in vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape; d
 	fi
 	echo "  ovg.slang:$entry -> ovg.$suffix.{spv,msl}"
 done
-for blob in vert frag shape_vert shape_frag; do
+for blob in vert frag shape_vert shape_frag shape_box_frag; do
 	spirv-val --target-env vulkan1.2 "ovg.$blob.spv"
 done

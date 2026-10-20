@@ -9,7 +9,8 @@ import cv "curves"
 @(private = "file")
 coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {
 	full := transform_multiply(shape_local(s), t)
-	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), shape_ems_per_pixel(full), even_odd)
+	u, v := shape_footprint(full)
+	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), u, v, even_odd)
 }
 
 // Area of the pixel at (x, y) the shape covers, from 32x32 winding samples.
@@ -83,9 +84,8 @@ test_shape_quadratics_kept :: proc(t: ^testing.T) {
 @(test)
 test_shape_curves_match_area :: proc(t: ^testing.T) {
 	// A circle (cubics, split into quadratics), upright and rotated glyphs:
-	// each edge pixel's coverage against the area the curves cover. Exact up
-	// to the samples' resolution, except that a rotated pixel's coverage is
-	// that of the box enclosing it.
+	// each edge pixel's coverage against the area the curves cover, exact up
+	// to the samples' resolution.
 	check :: proc(t: ^testing.T, s: ^Shape, tr: Transform2D, x0, y0, x1, y1: int, mean_max, max_max: f32) {
 		sum, worst: f32
 		n := 0
@@ -124,7 +124,7 @@ test_shape_curves_match_area :: proc(t: ^testing.T) {
 		upright := transform_multiply(transform_scaling(sc, sc), transform_translation(20, 20))
 		check(t, &g, upright, 0, 0, 40, 40, 0.01, 0.04)
 		rotated := transform_multiply(transform_multiply(transform_scaling(sc, sc), transform_rotation(0.3)), transform_translation(20, 20))
-		check(t, &g, rotated, 0, 0, 40, 40, 0.06, 0.3)
+		check(t, &g, rotated, 0, 0, 40, 40, 0.01, 0.04)
 	}
 	_, ok := shape_from_glyph(&font, font_glyph_index(&font, ' '))
 	testing.expect(t, !ok)

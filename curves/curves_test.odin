@@ -135,3 +135,49 @@ test_exact_area :: proc(t: ^testing.T) {
 	testing.expect(t, near(at(words, origin, extent, 15.5, 15.5), 1))
 	testing.expect(t, near(at(words, origin, extent, 9.5, 15.5), 0))
 }
+
+@(test)
+test_affine_footprints :: proc(t: ^testing.T) {
+	// A disc and an S of quadratics under rotated, skewed and stretched
+	// footprints (and one with a horizontal side): coverage against the area
+	// 64 x 64 winding samples of the parallelogram find.
+	b: Builder
+	defer builder_destroy(&b)
+	k :: 0.5522848
+	r: f32 = 10
+	move_to(&b, {r, 0})
+	cubic_to(&b, {r, r * k}, {r * k, r}, {0, r})
+	cubic_to(&b, {-r * k, r}, {-r, r * k}, {-r, 0})
+	cubic_to(&b, {-r, -r * k}, {-r * k, -r}, {0, -r})
+	cubic_to(&b, {r * k, -r}, {r, -r * k}, {r, 0})
+	move_to(&b, {14, -10})
+	quad_to(&b, {30, -14}, {22, 0})
+	quad_to(&b, {14, 14}, {30, 10})
+	line_to(&b, {30, 12})
+	quad_to(&b, {10, 16}, {18, 0})
+	quad_to(&b, {26, -12}, {14, -8})
+	words, _, extent := built(t, &b)
+	defer delete(words)
+	feet := [?][2]Vec2{{{1, 0}, {0, 1}}, {{0.96, 0.28}, {-0.28, 0.96}}, {{0.7, 0.7}, {-0.7, 0.7}}, {{1.2, 0.3}, {0.1, 0.8}}, {{3, 0.5}, {-0.2, 0.4}}, {{1, 0}, {0.6, 1}}, {{0.3, -1.4}, {0.9, 0.2}}}
+	worst: f32
+	for foot in feet {
+		u, v := foot[0] * 0.6 / extent, foot[1] * 0.6 / extent
+		for gy in 0 ..< 40 {
+			for gx in 0 ..< 60 {
+				rc := Vec2{(f32(gx) + 0.37) / 60 * 1.05 - 0.02, (f32(gy) + 0.61) / 40 * 0.75 - 0.02}
+				got := coverage_affine(words, rc, u, v, false)
+				inside := 0
+				N :: 64
+				for sy in 0 ..< N {
+					for sx in 0 ..< N {
+						a, bb := (f32(sx) + 0.5) / N - 0.5, (f32(sy) + 0.5) / N - 0.5
+						inside += int(winding(words, rc + a * u + bb * v) != 0)
+					}
+				}
+				worst = max(worst, abs(got - f32(inside) / (N * N)))
+			}
+		}
+	}
+	// 64 x 64 samples resolve area to about 1/64 along an edge.
+	testing.expectf(t, worst < 0.025, "worst %v", worst)
+}

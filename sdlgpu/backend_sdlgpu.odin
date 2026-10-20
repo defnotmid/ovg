@@ -19,6 +19,8 @@ SHAPE_VERT_SPV :: #load("../shaders/ovg.shape_vert.spv")
 SHAPE_FRAG_SPV :: #load("../shaders/ovg.shape_frag.spv")
 SHAPE_VERT_MSL :: #load("../shaders/ovg.shape_vert.msl")
 SHAPE_FRAG_MSL :: #load("../shaders/ovg.shape_frag.msl")
+SHAPE_BOX_FRAG_SPV :: #load("../shaders/ovg.shape_box_frag.spv")
+SHAPE_BOX_FRAG_MSL :: #load("../shaders/ovg.shape_box_frag.msl")
 
 MAX_FRAMES_IN_FLIGHT :: 4
 
@@ -65,6 +67,8 @@ SDL_Backend :: struct {
 	// coverage from the shapes in `shapes`.
 	shape_vert:       ^sdl.GPUShader,
 	shape_frag:       ^sdl.GPUShader,
+	// For instances whose pixel footprint is a box (no rotation or skew).
+	shape_box_frag:   ^sdl.GPUShader,
 	shapes:           Shape_Store,
 	stencil_format:   sdl.GPUTextureFormat,
 	screen_width:     u32,
@@ -107,8 +111,12 @@ SDL_Backend :: struct {
 	rows:             [dynamic]Row,
 	// Where each piece's indices start in the index buffer.
 	piece_index:      [dynamic]u32,
-	// Each frame shape instance's shape, as a word offset in `shapes`.
+	// Each frame shape instance's shape, as a word offset in `shapes`, and
+	// its shift into a mask page (render.odin, plan_masks).
 	shape_offsets:    [dynamic]u32,
+	shape_shifts:     [dynamic][2]f32,
+	// The frame's translucent shape runs' masks.
+	masks:            [dynamic]Shape_Mask,
 	// What the last `render` recorded.
 	stats:            Frame_Stats,
 }
@@ -139,6 +147,8 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		rows      = make([dynamic]Row, allocator),
 		piece_index = make([dynamic]u32, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
+		shape_shifts = make([dynamic][2]f32, allocator),
+		masks = make([dynamic]Shape_Mask, allocator),
 	}
 	defer if err != nil {
 		destroy(b)
@@ -160,16 +170,18 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	// slangc names the SPIR-V entry points "main" and keeps the function
 	// names for Metal.
 	formats := sdl.GetGPUShaderFormats(b.device)
-	vert_code, frag_code, shape_vert_code, shape_frag_code: []u8
+	vert_code, frag_code, shape_vert_code, shape_frag_code, shape_box_code: []u8
 	format: sdl.GPUShaderFormat
-	vs_entry, fs_entry, svs_entry, sfs_entry: cstring
+	vs_entry, fs_entry, svs_entry, sfs_entry, sbox_entry: cstring
 	switch {
 	case .SPIRV in formats:
 		vert_code, frag_code, format, vs_entry, fs_entry = VERT_SPV, FRAG_SPV, {.SPIRV}, "main", "main"
 		shape_vert_code, shape_frag_code, svs_entry, sfs_entry = SHAPE_VERT_SPV, SHAPE_FRAG_SPV, "main", "main"
+		shape_box_code, sbox_entry = SHAPE_BOX_FRAG_SPV, "main"
 	case .MSL in formats:
 		vert_code, frag_code, format, vs_entry, fs_entry = VERT_MSL, FRAG_MSL, {.MSL}, "vs_main", "fs_main"
 		shape_vert_code, shape_frag_code, svs_entry, sfs_entry = SHAPE_VERT_MSL, SHAPE_FRAG_MSL, "vs_shape", "fs_shape"
+		shape_box_code, sbox_entry = SHAPE_BOX_FRAG_MSL, "fs_shape_box"
 	case:
 		return .Unsupported_Operation
 	}
@@ -221,7 +233,19 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 			num_storage_buffers = 2,
 		},
 	)
-	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil {
+	b.shape_box_frag = sdl.CreateGPUShader(
+		b.device,
+		{
+			code_size = len(shape_box_code),
+			code = raw_data(shape_box_code),
+			entrypoint = sbox_entry,
+			format = format,
+			stage = .FRAGMENT,
+			num_samplers = 2,
+			num_storage_buffers = 2,
+		},
+	)
+	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil {
 		return .Shader_Compile
 	}
 	store_init(b)
@@ -269,6 +293,8 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.rows)
 		delete(b.piece_index)
 		delete(b.shape_offsets)
+		delete(b.shape_shifts)
+		delete(b.masks)
 		b^ = {}
 		return
 	}
@@ -303,7 +329,7 @@ destroy :: proc(b: ^SDL_Backend) {
 	if b.shapes.ranges != nil {
 		store_destroy(b)
 	}
-	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag}) {
+	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag}) {
 		if s != nil {
 			sdl.ReleaseGPUShader(b.device, s)
 		}
@@ -319,6 +345,8 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.rows)
 	delete(b.piece_index)
 	delete(b.shape_offsets)
+	delete(b.shape_shifts)
+	delete(b.masks)
 
 	if b.owns_device {
 		sdl.DestroyGPUDevice(b.device)

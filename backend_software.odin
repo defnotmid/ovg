@@ -325,10 +325,10 @@ raster_shape_union :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Stor
 		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
 		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
 		inv := transform_inverse(inst.transform)
-		epp := shape_ems_per_pixel(inst.transform)
+		u, v := shape_footprint(inst.transform)
 		for y in iy0 ..< iy1 {
 			for x in ix0 ..< ix1 {
-				cov := shape_coverage(inst.shape.data, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), epp, inst.even_odd)
+				cov := shape_coverage(inst.shape.data, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), u, v, inst.even_odd)
 				if cov <= 0 {
 					continue
 				}
@@ -367,13 +367,13 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance) {
 	x1 := min(r.x1, i32(math.ceil(b.maxx)))
 	y1 := min(r.y1, i32(math.ceil(b.maxy)))
 	inv := transform_inverse(inst.transform)
-	epp := shape_ems_per_pixel(inst.transform)
+	u, v := shape_footprint(inst.transform)
 	data := inst.shape.data
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
 			px := f32(x) + 0.5
-			cov := shape_coverage(data, transform_point(inv, px, py), epp, inst.even_odd)
+			cov := shape_coverage(data, transform_point(inv, px, py), u, v, inst.even_odd)
 			if cov <= 0 {
 				continue
 			}

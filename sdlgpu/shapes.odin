@@ -56,6 +56,7 @@ Gpu_Shape_Instance :: struct {
 	m:      [4]f32,
 	t:      [4]f32,
 	bounds: [4]f32,
+	uv:     [4]f32,
 	data:   [4]u32,
 }
 
@@ -245,11 +246,13 @@ store_begin_frame :: proc(b: ^SDL_Backend) {
 gpu_shape_instance :: proc(inst: vg.Shape_Instance, offset: u32) -> Gpu_Shape_Instance {
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t)
+	u, v := vg.shape_footprint(t)
 	x0, y0, x1, y1 := vg.shape_bounds(inst.shape)
 	return {
 		m = {t[0], t[1], t[2], t[3]},
 		t = {t[4], t[5], epp.x, epp.y},
 		bounds = {x0, y0, x1, y1},
+		uv = {u.x, u.y, v.x, v.y},
 		data = {offset, inst.paint, 1 if inst.even_odd else 0, 0},
 	}
 }

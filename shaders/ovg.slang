@@ -740,12 +740,14 @@ float4 fs_main(VS_Out i) : SV_Target {
 // instances and the shapes come from storage buffers: no vertex input.
 
 // Shape units to drawing coordinates (m: a b c d; t.xy: translation),
-// the shape units one pixel spans (t.zw), the shape's bounds, and its word
-// offset in `shapes`, paint row and flags (bit 0: even-odd).
+// the shape units one pixel spans per axis (t.zw), the shape's bounds, the
+// pixel's sides in shape units (uv: u.xy, v.xy: its footprint), and its
+// word offset in `shapes`, paint row and flags (bit 0: even-odd).
 struct Shape_Instance {
     float4 m;
     float4 t;
     float4 bounds;
+    float4 uv;
     uint4 data;
 };
 
@@ -767,7 +769,7 @@ struct VS_Shape_Out {
     float2 rc : TEXCOORD0;
     // Drawing coordinates.
     float2 fpos : TEXCOORD1;
-    nointerpolation float2 epp : TEXCOORD2;
+    nointerpolation float4 uv : TEXCOORD2;
     nointerpolation uint4 data : TEXCOORD3;
 };
 
@@ -784,7 +786,7 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     VS_Shape_Out o;
     o.rc = rc;
     o.fpos = d;
-    o.epp = epp;
+    o.uv = s.uv;
     o.data = s.data;
     if (shape_draw.base.y != 0u) {
         o.data.y = shape_draw.base.y - 1u;
@@ -794,10 +796,23 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     return o;
 }
 
+// Instances without rotation or skew (the pixel's footprint a box): a
+// leaner shader than the parallelogram one, so it runs with more waves.
+[shader("fragment")]
+float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
+    paint_index = i.data.y;
+    float coverage = curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), (i.data.z & 1u) != 0u);
+    if (coverage <= 0.0) {
+        discard;
+    }
+    float4 result = fill_color(shader_type(), i.fpos);
+    return result * (stroke_mask(float2(0.5, 1.0)) * scissor_mask(i.fpos) * coverage);
+}
+
 [shader("fragment")]
 float4 fs_shape(VS_Shape_Out i) : SV_Target {
     paint_index = i.data.y;
-    float coverage = curves_coverage(shapes, i.data.x, i.rc, i.epp, (i.data.z & 1u) != 0u);
+    float coverage = curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u);
     if (coverage <= 0.0) {
         discard;
     }

@@ -6,15 +6,16 @@
 // in y, listed in horizontal bands (Eric Lengyel's Slug: JCGT 2017,
 // reference shaders MIT, patent dedicated to the public domain). A pixel's
 // coverage is the area of its footprint inside the shape, integrated in
-// closed form: the footprint is the axis-aligned box the pixel spans in
-// shape units (the pixel itself under scales and translations; the box
-// enclosing it under rotation or skew, see `footprint_of`), and by Green's
-// theorem that area is the sum, over the curves crossing the box's rows, of
-// the length of each row left of the crossing. A curve wholly right of the
-// box adds its rows' full width (no root finding); only the few curves
-// through the box need solving, and the integral over each piece is a
-// polynomial. Exact up to the non-zero rule where contours overlap within
-// the pixel: the signed area counts an overlap twice.
+// closed form: the footprint is the parallelogram the pixel's sides map to
+// in shape units (an axis-aligned box under scales and translations, the
+// fast case: `coverage`; `coverage_affine` for the rest), and by Green's
+// theorem that area is the sum, over the curves crossing the footprint's
+// rows, of the length of each row left of the crossing. A curve wholly
+// right of the footprint adds its rows' full width (no root finding); only
+// the few curves through it need solving, and the integral over each piece
+// is a polynomial. Exact for any affine footprint (rotation, skew, the
+// anisotropic footprints of 3D), up to the non-zero rule where contours
+// overlap within the pixel: the signed area counts an overlap twice.
 //
 // A built shape is one block of 32-bit words, read as is from a storage
 // buffer (std430: an array of uint; coordinates are float32 bit patterns);
@@ -397,8 +398,8 @@ fill :: #force_inline proc "contextless" (area: f32, even_odd: bool) -> f32 {
 }
 
 // Exact coverage of the axis-aligned box `footprint` (shape units) centered
-// at `rc`: the pixel itself under a transform without rotation or skew, the
-// box enclosing it otherwise (`footprint_of`).
+// at `rc`: a pixel under a transform without rotation or skew
+// (`coverage_affine` for the others).
 coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: bool) -> f32 {
 	fx, fy := footprint.x, footprint.y
 	if fx <= 0 || fy <= 0 {
@@ -492,19 +493,245 @@ box_piece :: #force_inline proc "contextless" (q: Quadratic, x0, x1, t0, t1: f32
 	return area_term(q.A, q.B, q.C - x0, q.D, q.E, t0, t1)
 }
 
+// Exact coverage of the parallelogram `rc + a u + b v`, a, b in [-1/2, 1/2]:
+// a pixel whose sides map to `u` and `v` in shape units (the shape
+// coordinate's derivatives along the pixel's x and y), under any affine
+// transform or a 3D one's local Jacobian.
+coverage_affine :: proc "contextless" (s: []u32, rc: Vec2, u, v: Vec2, even_odd: bool) -> f32 {
+	if u.y == 0 && v.x == 0 {
+		return coverage(s, rc, {abs(u.x), abs(v.y)}, even_odd)
+	}
+	fp, ok := footprint_parallelogram(u, v)
+	if !ok {
+		return 0
+	}
+	curves := s[6]
+	area: f32
+	for band in band_of(s, rc.y - fp.h0) ..= band_of(s, rc.y + fp.h0) {
+		blo, bhi := band_rows(s, band, rc.y, -fp.h0, fp.h0)
+		if blo >= bhi {
+			continue
+		}
+		hb := HEADER + 2 * u32(band)
+		list := s[hb + 1]
+		for k in 0 ..< s[hb] {
+			c := curves + 6 * s[list + k]
+			p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
+			p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
+			p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
+			cxmax := max(p1.x, p3.x)
+			if cxmax <= fp.xmin {
+				break
+			}
+			ca, cb := max(blo, min(p1.y, p3.y)), min(bhi, max(p1.y, p3.y))
+			if ca >= cb {
+				continue
+			}
+			if min(p1.x, p3.x) >= fp.xmax {
+				// Wholly right of the footprint: its rows' full width.
+				area += (1 if p3.y > p1.y else -1) * (width_below(fp, cb) - width_below(fp, ca))
+				continue
+			}
+			// The curve's parameters at its rows' ends and where they cross
+			// the pieces' boundaries (no solve where those coincide).
+			q := quadratic(p1, p2, p3)
+			ta := solve_monotone(q.D, q.E, q.F, ca)
+			tb := solve_monotone(q.D, q.E, q.F, cb)
+			y1, y2 := clamp(-fp.h1, ca, cb), clamp(fp.h1, ca, cb)
+			t1 := ta if y1 == ca else (tb if y1 == cb else solve_monotone(q.D, q.E, q.F, y1))
+			t2 := ta if y2 == ca else (tb if y2 == cb else solve_monotone(q.D, q.E, q.F, y2))
+			area += footprint_piece(fp, 0, q, ta, t1)
+			area += footprint_piece(fp, 1, q, t1, t2)
+			area += footprint_piece(fp, 2, q, t2, tb)
+		}
+	}
+	return fill(area / (fp.width * (fp.h0 + fp.h1)), even_odd)
+}
+
+// A pixel's parallelogram footprint, centered on the origin. Its lowest
+// corner B is at -h0, the next P at -h1, then Q = -P at h1 and T = -B at
+// h0. The long sides BQ and PT have slope s1 (dx / dy), the short sides BP
+// and QT slope s2; as lines x = c + s y their intercepts are c1 (BQ), c2
+// (PT), c3 (BP) and c4 (QT). Cut at -h1 and h1 it is three pieces: a
+// triangle between BQ and BP, a band of constant `width` between BQ and PT,
+// and a triangle between PT and QT.
+@(private)
+Footprint :: struct {
+	h0, h1, s1, s2:     f32,
+	c1, c2, c3, c4:     f32,
+	width, xmin, xmax: f32,
+}
+
+@(private)
+footprint_parallelogram :: proc "contextless" (u, v: Vec2) -> (fp: Footprint, ok: bool) {
+	// The corner pairs are +-(u + v) / 2 and +-(u - v) / 2.
+	d1, d2 := 0.5 * (u + v), 0.5 * (u - v)
+	if abs(d1.y) < abs(d2.y) {
+		d1, d2 = d2, d1
+	}
+	b := d1 if d1.y <= 0 else -d1
+	p := d2 if d2.y <= 0 else -d2
+	fp.h0, fp.h1 = -b.y, -p.y
+	if fp.h0 <= 0 {
+		return
+	}
+	fp.s1 = (-p.x - b.x) / (fp.h1 + fp.h0)
+	if fp.h0 > fp.h1 {
+		fp.s2 = (p.x - b.x) / (fp.h0 - fp.h1)
+	}
+	fp.c1 = b.x + fp.h0 * fp.s1
+	fp.c2 = p.x + fp.h1 * fp.s1
+	fp.c3 = b.x + fp.h0 * fp.s2
+	fp.c4 = -p.x - fp.h1 * fp.s2
+	fp.width = abs(fp.c2 - fp.c1)
+	fp.xmin = min(b.x, p.x, -b.x, -p.x)
+	fp.xmax = max(b.x, p.x, -b.x, -p.x)
+	return fp, fp.width > 0
+}
+
+// The footprint's area below row y.
+@(private)
+width_below :: #force_inline proc "contextless" (fp: Footprint, y: f32) -> f32 {
+	if y <= -fp.h0 {
+		return 0
+	}
+	total := fp.width * (fp.h0 + fp.h1)
+	if y >= fp.h0 {
+		return total
+	}
+	if y < -fp.h1 {
+		d := y + fp.h0
+		return 0.5 * fp.width * d * d / (fp.h0 - fp.h1)
+	}
+	if y <= fp.h1 {
+		return 0.5 * fp.width * (fp.h0 - fp.h1) + fp.width * (y + fp.h1)
+	}
+	d := fp.h0 - y
+	return total - 0.5 * fp.width * d * d / (fp.h0 - fp.h1)
+}
+
+// The area the curve's stretch [ta, tb] adds within piece `k` (0 bottom,
+// 1 middle, 2 top) of the footprint: the slice's full width where the
+// curve is right of it, the part left of the curve where it crosses it,
+// split where it crosses the slice's ends.
+@(private)
+footprint_piece :: #force_inline proc "contextless" (fp: Footprint, k: int, q: Quadratic, ta, tb: f32) -> f32 {
+	t0, t1 := min(ta, tb), max(ta, tb)
+	if t1 <= t0 {
+		return 0
+	}
+	// The piece's ends as lines x = c + s y, whichever is left.
+	ac, as, bc, bs: f32
+	switch k {
+	case 0:
+		ac, as, bc, bs = fp.c1, fp.s1, fp.c3, fp.s2
+	case 1:
+		ac, as, bc, bs = fp.c1, fp.s1, fp.c2, fp.s1
+	case:
+		ac, as, bc, bs = fp.c2, fp.s1, fp.c4, fp.s2
+	}
+	y0 := (q.D * t0 + q.E) * t0 + q.F
+	y1 := (q.D * t1 + q.E) * t1 + q.F
+	ym := 0.5 * (y0 + y1)
+	if ac + as * ym > bc + bs * ym {
+		ac, as, bc, bs = bc, bs, ac, as
+	}
+	xa := (q.A * t0 + q.B) * t0 + q.C
+	xb := (q.A * t1 + q.B) * t1 + q.C
+	if max(xa, xb) <= min(ac + as * y0, ac + as * y1) {
+		return 0
+	}
+	if min(xa, xb) >= max(bc + bs * y0, bc + bs * y1) {
+		return width_below(fp, y1) - width_below(fp, y0)
+	}
+	// x - l(y) and x - r(y) are quadratics in t.
+	l1, l2 := roots_between(q.A - as * q.D, q.B - as * q.E, q.C - ac - as * q.F, t0, t1)
+	r1, r2 := roots_between(q.A - bs * q.D, q.B - bs * q.E, q.C - bc - bs * q.F, t0, t1)
+	s0, s1, s2, s3 := sort4(l1, l2, r1, r2)
+	area := footprint_span(fp, q, ac, as, bc, bs, t0, s0)
+	area += footprint_span(fp, q, ac, as, bc, bs, s0, s1)
+	area += footprint_span(fp, q, ac, as, bc, bs, s1, s2)
+	area += footprint_span(fp, q, ac, as, bc, bs, s2, s3)
+	area += footprint_span(fp, q, ac, as, bc, bs, s3, t1)
+	return area
+}
+
+@(private)
+footprint_span :: #force_inline proc "contextless" (fp: Footprint, q: Quadratic, ac, as, bc, bs, t0, t1: f32) -> f32 {
+	if t1 <= t0 {
+		return 0
+	}
+	tm := (t0 + t1) * 0.5
+	xm := (q.A * tm + q.B) * tm + q.C
+	ym := (q.D * tm + q.E) * tm + q.F
+	if xm <= ac + as * ym {
+		return 0
+	}
+	if xm >= bc + bs * ym {
+		return width_below(fp, (q.D * t1 + q.E) * t1 + q.F) - width_below(fp, (q.D * t0 + q.E) * t0 + q.F)
+	}
+	return area_term(q.A - as * q.D, q.B - as * q.E, q.C - ac - as * q.F, q.D, q.E, t0, t1)
+}
+
+// Four values in ascending order (a sorting network).
+@(private = "file")
+sort4 :: #force_inline proc "contextless" (w, x, y, z: f32) -> (f32, f32, f32, f32) {
+	a, b := min(w, x), max(w, x)
+	c, d := min(y, z), max(y, z)
+	a, c = min(a, c), max(a, c)
+	b, d = min(b, d), max(b, d)
+	b, c = min(b, c), max(b, c)
+	return a, b, c, d
+}
+
+// The real roots of a t^2 + b t + c in (lo, hi); `hi` stands for each one
+// missing.
+@(private)
+roots_between :: proc "contextless" (a, b, c, lo, hi: f32) -> (r1, r2: f32) {
+	r1, r2 = hi, hi
+	// No sign change between the ends and no turn between them: no root.
+	glo := (a * lo + b) * lo + c
+	ghi := (a * hi + b) * hi + c
+	vertex := -b / (2 * a) if a != 0 else lo
+	if (glo > 0) == (ghi > 0) && !(vertex > lo && vertex < hi) {
+		return
+	}
+	if abs(a) <= 1e-9 * (abs(b) + abs(c)) {
+		if b != 0 {
+			if t := -c / b; t > lo && t < hi {
+				r1 = t
+			}
+		}
+		return
+	}
+	disc := b * b - 4 * a * c
+	if disc < 0 {
+		return
+	}
+	d := math.sqrt(disc)
+	q := -0.5 * (b + (d if b >= 0 else -d))
+	if t := q / a; t > lo && t < hi {
+		r1 = t
+	}
+	if q != 0 {
+		if t := c / q; t > lo && t < hi {
+			r2 = t
+		}
+	}
+	return
+}
+
 // The per-axis extent of a pixel's footprint from `j`, the Jacobian of
-// shape units by pixel coordinates (`j[0, 1]` = d shape.x / d pixel.y): the
-// box enclosing its parallelogram, as `fwidth` gives. Coverage is exact for
-// that box, so exact for pixels under scales and translations; under a
-// rotation or skew the box is larger than the pixel (up to 2x its area at
-// 45 degrees), which softens edges slightly.
+// shape units by pixel coordinates: the box enclosing its parallelogram, as
+// `fwidth` gives (for bounds, `coverage` of that box, and `fade`).
 footprint_of :: proc "contextless" (j: matrix[2, 2]f32) -> Vec2 {
 	return {abs(j[0, 0]) + abs(j[0, 1]), abs(j[1, 0]) + abs(j[1, 1])}
 }
 
-// `coverage` of the box enclosing the footprint whose Jacobian is `j`.
+// `coverage_affine` with the footprint from `j`, the Jacobian of shape units
+// by pixel coordinates (`j[0, 1]` = d shape.x / d pixel.y).
 coverage_jacobian :: proc "contextless" (s: []u32, rc: Vec2, j: matrix[2, 2]f32, even_odd: bool) -> f32 {
-	return coverage(s, rc, footprint_of(j), even_odd)
+	return coverage_affine(s, rc, {j[0, 0], j[1, 0]}, {j[0, 1], j[1, 1]}, even_odd)
 }
 
 // `cov` blended toward the shape's mean coverage as the footprint grows

@@ -1,6 +1,7 @@
 package ovg_sdlgpu
 
 import "core:math"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 import vg ".."
@@ -20,8 +21,10 @@ Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
 	stencil: vg.Stencil_Mode,
 	format:  sdl.GPUTextureFormat,
-	// The shape pipeline (shapes.odin) instead of the triangle one.
+	// The shape pipeline (shapes.odin) instead of the triangle one, and
+	// its box variant (instances without rotation or skew).
 	shapes:  bool,
+	box:     bool,
 }
 
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
@@ -170,6 +173,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
 				out[i] = gpu_shape_instance(inst, b.shape_offsets[i])
+				out[i].t.xy += b.shape_shifts[i]
 			}
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
 		} else {
@@ -320,6 +324,9 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 	}
 	b.piece_index[len(frame.pieces)] = at
 	resize(&b.shape_offsets, len(frame.shapes))
+	resize(&b.shape_shifts, len(frame.shapes))
+	slice.zero(b.shape_shifts[:])
+	clear(&b.masks)
 	stencil_texture(b, screen.width, screen.height)
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
@@ -356,11 +363,7 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				plan_shape_union(&p, cmd, c)
 				continue
 			}
-			row := draw_row(&p, cmd, .None)
-			row.kind = .Shapes
-			row.key.shapes = true
-			row.verts = c.instances
-			append(&b.rows, row)
+			plan_shape_rows(&p, draw_row(&p, cmd, .None), c.instances, 0)
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
@@ -376,6 +379,7 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			append(&b.rows, Row{kind = .External, external = &c})
 		}
 	}
+	plan_masks(&p)
 }
 
 @(private = "file")
@@ -406,7 +410,7 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command, stencil: vg.Stencil_Mode) -> Row 
 		kind = .Draw,
 		target = p.target,
 		origin = p.origin,
-		key = {cmd.composite_operation, stencil, p.target.format, false},
+		key = {cmd.composite_operation, stencil, p.target.format, false, false},
 		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, glyph)},
 		scissor = scissor,
 	}
@@ -468,11 +472,35 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 	append(&p.b.verts, vg.vertex(x0, y0, 0.5, 1, paint), vg.vertex(x1, y1, 0.5, 1, paint), vg.vertex(x0, y1, 0.5, 1, paint))
 }
 
-// A shape run filling as one (`union_coverage`): its coverages drawn in
-// white, source-over, into a cleared 8-bit mask over the run's bounds (a
-// scratch texture, sized in powers of two), then one quad of the run's
-// paint through the mask (the glyph alpha-mask path) into the target. The
-// software backend does the same steps.
+// Rows drawing `instances` with `base`'s state: one per stretch of
+// instances that are all boxes (no rotation or skew: the box shader) or
+// all not.
+@(private = "file")
+plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range, paint_override: u32) {
+	row := base
+	row.kind = .Shapes
+	row.key.shapes = true
+	row.paint_override = paint_override
+	start := instances.start
+	for i in instances.start ..< instances.start + instances.count {
+		t := p.frame.shapes[i].transform
+		box := t[1] == 0 && t[2] == 0
+		if i > start && box != row.key.box {
+			row.verts = {start, i - start}
+			append(&p.b.rows, row)
+			start = i
+		}
+		row.key.box = box
+	}
+	row.verts = {start, instances.start + instances.count - start}
+	append(&p.b.rows, row)
+}
+
+// A shape run filling as one (`union_coverage`): one quad of its paint
+// through an 8-bit mask of its coverage (the glyph alpha-mask path) into
+// the target. The masks of all the frame's runs are packed into shared
+// pages and drawn first, each page in one pass (`plan_masks`): the
+// coverages in white, source-over, as the software backend does.
 @(private = "file")
 plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 	b := p.b
@@ -490,20 +518,68 @@ plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 	if area.w <= 0 || area.h <= 0 {
 		return
 	}
-	mw := u32(math.next_power_of_two(int(max(area.w, 64))))
-	mh := u32(math.next_power_of_two(int(max(area.h, 64))))
-	scratch := scratch_image(b, {width = mw, height = mh, format = .Gray8})
-	if scratch == nil {
+	params := p.frame.paints[instances[0].paint]
+	params.glyph_texture_type = 1
+	paint := add_paint(p, vg.pack_frag_uniforms(params))
+	row := draw_row(p, cmd, .None)
+	row.scissor = area
+	row.verts = {extra_base(p), 6}
+	// The mask's place, texture and the quad's texture coordinates are set
+	// once the masks are packed.
+	append(&b.masks, Shape_Mask{instances = c.instances, corner = {area.x + p.origin.x, area.y + p.origin.y}, size = {area.w, area.h}, row = len(b.rows), vert = len(b.verts)})
+	append(&b.rows, row)
+	x0, y0 := f32(area.x + p.origin.x), f32(area.y + p.origin.y)
+	x1, y1 := x0 + f32(area.w), y0 + f32(area.h)
+	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y0, 0, 0, paint), vg.vertex(x1, y1, 0, 0, paint))
+	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y1, 0, 0, paint), vg.vertex(x0, y1, 0, 0, paint))
+}
+
+// A run's mask: its instances, its area in drawing coordinates, its page
+// and place there, and its composite row and quad.
+Shape_Mask :: struct {
+	instances: vg.Range,
+	corner:    [2]i32,
+	size:      [2]i32,
+	page:      int,
+	at:        [2]i32,
+	row:       int,
+	vert:      int,
+}
+
+// Mask pages are this size unless one mask needs more.
+@(private = "file")
+MASK_PAGE :: 4096
+
+// Packs the frame's masks into pages (shelves, in order), puts each page's
+// clear and mask rows before all others, and points the composite rows at
+// them.
+@(private = "file")
+plan_masks :: proc(p: ^Planner) {
+	b := p.b
+	if len(b.masks) == 0 {
 		return
 	}
-	mask := scratch^
-	stencil_texture(b, mw, mh)
-	// The mask's pixel (0, 0) is the area's corner, in drawing coordinates.
-	corner := [2]i32{area.x + p.origin.x, area.y + p.origin.y}
-	x0, y0 := f32(corner.x), f32(corner.y)
-	x1, y1 := x0 + f32(area.w), y0 + f32(area.h)
-	inside := sdl.Rect{0, 0, area.w, area.h}
-
+	Page :: struct {
+		w, h:  i32,
+		first: int,
+	}
+	pages := make([dynamic]Page, context.temp_allocator)
+	x, y, shelf: i32
+	for &m, i in b.masks {
+		if len(pages) == 0 || x + m.size.x > MASK_PAGE {
+			x, y, shelf = 0, y + shelf, 0
+		}
+		if len(pages) == 0 || y + m.size.y > MASK_PAGE {
+			append(&pages, Page{first = i})
+			x, y, shelf = 0, 0, 0
+		}
+		m.page, m.at = len(pages) - 1, {x, y}
+		page := &pages[len(pages) - 1]
+		page.w, page.h = max(page.w, x + m.size.x), max(page.h, y + m.size.y)
+		x += m.size.x
+		shelf = max(shelf, m.size.y)
+	}
+	main := len(b.rows)
 	solid :: proc(p: ^Planner, color: [4]f32) -> u32 {
 		params := vg.default_params()
 		params.shader_type = .Fill_Color
@@ -514,24 +590,45 @@ plan_shape_union :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 		return add_paint(p, vg.pack_frag_uniforms(params))
 	}
 	clear_paint := solid(p, {0, 0, 0, 0})
-	append(&b.rows, Row{kind = .Draw, target = mask, origin = corner, key = {vg.composite_state_from_op(.Copy), .None, mask.format, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = inside, verts = {extra_base(p), 6}})
-	append(&b.verts, vg.vertex(x0, y0, 0.5, 1, clear_paint), vg.vertex(x1, y0, 0.5, 1, clear_paint), vg.vertex(x1, y1, 0.5, 1, clear_paint))
-	append(&b.verts, vg.vertex(x0, y0, 0.5, 1, clear_paint), vg.vertex(x1, y1, 0.5, 1, clear_paint), vg.vertex(x0, y1, 0.5, 1, clear_paint))
-
 	white := solid(p, {1, 1, 1, 1})
-	append(&b.rows, Row{kind = .Shapes, target = mask, origin = corner, key = {vg.composite_state_from_op(.Source_Over), .None, mask.format, true}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = inside, verts = c.instances, paint_override = white + 1})
-
-	params := p.frame.paints[instances[0].paint]
-	params.glyph_texture_type = 1
-	paint := add_paint(p, vg.pack_frag_uniforms(params))
-	row := draw_row(p, cmd, .None)
-	row.textures[1] = texture_binding(b, &mask)
-	row.scissor = area
-	row.verts = {extra_base(p), 6}
-	append(&b.rows, row)
-	u1, v1 := f32(area.w) / f32(mw), f32(area.h) / f32(mh)
-	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y0, u1, 0, paint), vg.vertex(x1, y1, u1, v1, paint))
-	append(&b.verts, vg.vertex(x0, y0, 0, 0, paint), vg.vertex(x1, y1, u1, v1, paint), vg.vertex(x0, y1, 0, v1, paint))
+	images := make([]Image, len(pages), context.temp_allocator)
+	for page, pi in pages {
+		w := u32(math.next_power_of_two(int(max(page.w, 64))))
+		h := u32(math.next_power_of_two(int(max(page.h, 64))))
+		scratch := scratch_image(b, {width = w, height = h, format = .Gray8, flags = {.Nearest}})
+		if scratch == nil {
+			continue
+		}
+		images[pi] = scratch^
+		stencil_texture(b, w, h)
+		img := images[pi]
+		pw, ph := f32(page.w), f32(page.h)
+		append(&b.rows, Row{kind = .Draw, target = img, key = {vg.composite_state_from_op(.Copy), .None, img.format, false, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {0, 0, page.w, page.h}, verts = {extra_base(p), 6}})
+		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint))
+		append(&b.verts, vg.vertex(0, 0, 0.5, 1, clear_paint), vg.vertex(pw, ph, 0.5, 1, clear_paint), vg.vertex(0, ph, 0.5, 1, clear_paint))
+	}
+	for &m in b.masks {
+		img := images[m.page]
+		if img.texture == nil {
+			continue
+		}
+		// The instances draw shifted from the area's corner to the place.
+		shift := [2]f32{f32(m.at.x - m.corner.x), f32(m.at.y - m.corner.y)}
+		for i in m.instances.start ..< m.instances.start + m.instances.count {
+			b.shape_shifts[i] = shift
+		}
+		plan_shape_rows(p, Row{target = img, key = {vg.composite_state_from_op(.Source_Over), .None, img.format, true, false}, textures = {texture_binding(b, nil), texture_binding(b, nil)}, scissor = {m.at.x, m.at.y, m.size.x, m.size.y}}, m.instances, white + 1)
+		b.rows[m.row].textures[1] = texture_binding(b, &img)
+		u0, v0 := f32(m.at.x) / f32(img.width), f32(m.at.y) / f32(img.height)
+		u1, v1 := f32(m.at.x + m.size.x) / f32(img.width), f32(m.at.y + m.size.y) / f32(img.height)
+		uv := [6][2]f32{{u0, v0}, {u1, v0}, {u1, v1}, {u0, v0}, {u1, v1}, {u0, v1}}
+		for k in 0 ..< 6 {
+			vert := &b.verts[m.vert + k]
+			vert^ = vg.vertex(vert.x, vert.y, uv[k].x, uv[k].y, vert.paint)
+		}
+	}
+	// The pages' rows go first: they read nothing the frame draws.
+	slice.rotate_left(b.rows[:], main)
 }
 
 // One filter quad from `src` (and `backdrop`) into `dst`, a pass of its own
@@ -547,7 +644,7 @@ plan_filter_pass :: proc(p: ^Planner, src, backdrop, dst: ^Image, paint: Paint) 
 	append(&p.b.rows, Row {
 		kind     = .Draw,
 		target   = dst^,
-		key      = {vg.composite_state_from_op(.Copy), .None, dst.format, false},
+		key      = {vg.composite_state_from_op(.Copy), .None, dst.format, false, false},
 		textures = {texture_binding(p.b, src), texture_binding(p.b, backdrop)},
 		scissor  = {0, 0, i32(dst.width), i32(dst.height)},
 		verts    = {extra_base(p), 6},
@@ -1193,7 +1290,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		// No vertex input: the shader pulls its instances.
 		info := sdl.GPUGraphicsPipelineCreateInfo {
 			vertex_shader = b.shape_vert,
-			fragment_shader = b.shape_frag,
+			fragment_shader = b.shape_box_frag if key.box else b.shape_frag,
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},

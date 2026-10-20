@@ -190,10 +190,17 @@ shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, allocator := context.allocato
 
 // ---- coverage ----------------------------------------------------------------------
 
-// Coverage of the pixel centered at `rc` (shape units), the pixel spanning
-// `ems_per_pixel` shape units along each axis (`shape_ems_per_pixel`); `s`
-// is a shape's words. See cv.coverage.
-shape_coverage :: cv.coverage
+// Exact coverage of the pixel centered at `rc` (shape units) whose sides
+// are `u` and `v` in shape units (`shape_footprint`); `s` is a shape's
+// words. See cv.coverage_affine.
+shape_coverage :: cv.coverage_affine
+
+// A pixel's sides in shape units under `t` (shape units to device pixels):
+// its footprint, a parallelogram (cv.coverage_affine).
+shape_footprint :: proc "contextless" (t: Transform2D) -> (u, v: Vec2) {
+	inv := transform_inverse(t)
+	return {inv[0], inv[1]}, {inv[2], inv[3]}
+}
 
 // Shape units spanned by one pixel along each axis under `t` (shape units
 // to device pixels): what `fwidth` of the shape coordinate gives a shader
