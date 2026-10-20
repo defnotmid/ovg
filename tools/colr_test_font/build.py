@@ -29,7 +29,9 @@ glyphs[".notdef"] = rect(100, 0, 900, 800)
 glyphs["full"] = rect(100, 0, 900, 800)
 glyphs["inner"] = rect(300, 200, 700, 600)
 fb.setupGlyf(glyphs)
-fb.setupHorizontalMetrics({g: (1000, 0) for g in order})
+# Each side bearing is the glyph's xMin, as glyf and hmtx must agree.
+glyf = fb.font["glyf"]
+fb.setupHorizontalMetrics({g: (1000, getattr(glyf[g], "xMin", 0)) for g in order})
 fb.setupHorizontalHeader(ascent=800, descent=-200)
 fb.setupNameTable({"familyName": "ColrTest", "styleName": "Regular"})
 fb.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)

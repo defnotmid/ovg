@@ -7,7 +7,7 @@ separate file in [LICENSES/](LICENSES).
 | --- | --- | --- |
 | femtovg | ovg is a port of it (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/femtovg-MIT.txt` |
 | nanovg | femtovg's origin: the canvas API, paint and shader design ovg inherits through it | `LICENSES/nanovg-Zlib.txt` |
-| stb_truetype, stb_image | linked (used under MIT) | `LICENSES/stb-MIT.txt` |
+| stb_image | linked (used under MIT) | `LICENSES/stb-MIT.txt` |
 | kb_text_shape | linked (text shaping) | `LICENSES/kb_text_shape-Zlib.txt` |
 | resvg test suite | `tools/svg_suite/tests` (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/resvg-MIT.txt` |
 | Skia skottie resources | `tools/lottie_suite/tests` | `LICENSES/Skia-BSD-3-Clause.txt` |

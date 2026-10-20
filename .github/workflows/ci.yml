@@ -72,6 +72,7 @@ jobs:
           mkdir -p build
           odin test . -vet -strict-style -out:build/ovg_test
           odin test curves -vet -strict-style -out:build/curves_test
+          odin test font -vet -strict-style -out:build/font_test
 
       - name: SVG and Lottie suites (Linux)
         # Renders vs resvg and lottie-web references; run.sh uses GNU timeout.

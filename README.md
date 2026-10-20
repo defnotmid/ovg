@@ -46,7 +46,7 @@ D3D12 on Windows). The only dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `vendor:stb/truetype`, `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg` (core + software backend) | `vendor:stb/image`, `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
@@ -384,9 +384,13 @@ warning in `doc.warnings`, `Lottie_Renderer.limited` after a draw,
 the canvas's; a new limit is a row in the table and one `budget_take` (a
 running total) or `budget_cap` (one value) where the work happens.
 
-**Fonts must be trusted.** stb_truetype does not validate font data, and
-malformed fonts can crash it; load only fonts you ship or have validated
-(e.g. with [OTS](https://github.com/khaledhosny/ots)).
+**Fonts are read safely, shaped unsafely.** `ovg/font` checks every read
+(a corrupt or truncated font gives wrong glyphs or a load error, never a
+read out of bounds), but kb_text_shape, which shapes text, parses GSUB
+and GPOS itself without such checks: `font_layout_tables_ok` rejects the
+malformed tables known to break it, and fonts from untrusted sources
+should still be validated (e.g. with [OTS](https://github.com/khaledhosny/ots))
+until shaping reads through `ovg/font` too.
 
 ## Lottie import
 
@@ -649,7 +653,10 @@ every part follows:
   two-ray estimate (4K, Linux / M4): dense upright text costs 17% / 18%
   more, rotated text 50% / 26% more. The software backend evaluates the
   same coverage function (parity: max diff 1 in the `curves` scene).
-- **Text** uses stb_truetype. `fill_glyph_outlines` fills each glyph as the
+- **Text** reads fonts with `ovg/font` (core only: the table directory,
+  cmap, hmtx, kern and GPOS pair kerning, glyf with composites, CFF Type 2
+  charstrings; bounds-checked; outlines placed by hmtx's side bearing as
+  HarfBuzz places them, and checked glyph by glyph against fontTools). `fill_glyph_outlines` fills each glyph as the
   font's shape (`font_glyph_shape`: built on first use with the font's
   allocator, the context's at `font_load`, whatever the drawing code runs
   under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
@@ -660,8 +667,8 @@ every part follows:
   shape (a feather widens each pixel's footprint; aliased takes each pixel
   center's winding). `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
   (baked at one scale). Both take glyph ids, so shaped runs draw as is.
-  The atlas itself needs no canvas: `glyph_atlas_get` rasterizes into its
-  Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
+  The atlas itself needs no canvas: `glyph_atlas_get` writes each pixel's
+  exact coverage of the glyph's shape into its Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
   the last take, so a renderer of its own can upload them into its own
   texture once a frame (an atlas made with a canvas keeps that canvas's
   image, which `fill_glyph_run` updates). Glyphs are keyed by face data and
@@ -712,8 +719,7 @@ every part follows:
 - Paths are plain data, read-only while drawn: `fill_path` builds the
   path's shape into the frame. Scratch and frame buffers reuse their
   allocations;
-  paints never allocate. Font variations were dropped (stb_truetype has no
-  variable-font support).
+  paints never allocate. Font variations are not read yet.
 
 ## Test
 

@@ -4,6 +4,8 @@ import "base:runtime"
 import "core:math"
 import "core:sync"
 
+import ft "font"
+
 // Colour glyphs from the COLR (v0 layers, v1 paint graphs) and CPAL tables,
 // drawn as vector fills at the output resolution like plain outlines.
 // Palette 0; palette index 0xFFFF is the text's own paint.
@@ -99,34 +101,30 @@ COLR_MAX_STOPS :: 256
 @(private)
 colr_open :: proc(f: ^Font) -> ^Colr {
 	d := f.data
-	base := int(f.info.fontstart)
-	colr, colr_len, ok := find_table_range(d, base, "COLR")
-	if !ok || colr_len < 14 {
+	colr_span, cpal_span := f.face.tables[.COLR], f.face.tables[.CPAL]
+	if colr_span.size < 14 || cpal_span.size < 14 {
 		return nil
 	}
-	cpal, cpal_len, ok2 := find_table_range(d, base, "CPAL")
-	if !ok2 || cpal_len < 14 {
-		return nil
-	}
+	colr, cpal := colr_span.at, cpal_span.at
 	cl := new(Colr, runtime.heap_allocator())
 	cl.data = d
-	cl.version = int(rd16(d, colr))
-	cl.v0_base_count = int(rd16(d, colr + 2))
-	cl.v0_base = colr + int(rd32(d, colr + 4))
-	cl.v0_layers = colr + int(rd32(d, colr + 8))
-	if cl.version >= 1 && colr_len >= 34 {
+	cl.version = int(ft.read_u16(d, colr))
+	cl.v0_base_count = int(ft.read_u16(d, colr + 2))
+	cl.v0_base = colr + int(ft.read_u32(d, colr + 4))
+	cl.v0_layers = colr + int(ft.read_u32(d, colr + 8))
+	if cl.version >= 1 && colr_span.size >= 34 {
 		at :: proc(d: []u8, colr, field: int) -> int {
-			off := int(rd32(d, colr + field))
+			off := int(ft.read_u32(d, colr + field))
 			return colr + off if off != 0 else 0
 		}
 		cl.base_list = at(d, colr, 14)
 		cl.layer_list = at(d, colr, 18)
 		cl.clip_list = at(d, colr, 22)
 	}
-	cl.palette_entries = int(rd16(d, cpal + 2))
-	if rd16(d, cpal + 4) > 0 {
-		records := cpal + int(rd32(d, cpal + 8))
-		cl.palette = records + int(rd16(d, cpal + 12)) * 4
+	cl.palette_entries = int(ft.read_u16(d, cpal + 2))
+	if ft.read_u16(d, cpal + 4) > 0 {
+		records := cpal + int(ft.read_u32(d, cpal + 8))
+		cl.palette = records + int(ft.read_u16(d, cpal + 12)) * 4
 	}
 	heap := runtime.heap_allocator()
 	cl.glyphs.allocator = heap
@@ -354,7 +352,7 @@ colr_glyph :: proc(cl: ^Colr, g: Glyph_Index) -> Colr_Glyph {
 		out.colour = true
 		for i in first ..< first + count {
 			rec := cl.v0_layers + i * 4
-			append(&cl.fills, Colr_Fill{glyph = i32(rd16(cl.data, rec)), shape = TRANSFORM_IDENTITY, paint = TRANSFORM_IDENTITY, palette = rd16(cl.data, rec + 2), alpha = 1})
+			append(&cl.fills, Colr_Fill{glyph = i32(ft.read_u16(cl.data, rec)), shape = TRANSFORM_IDENTITY, paint = TRANSFORM_IDENTITY, palette = ft.read_u16(cl.data, rec + 2), alpha = 1})
 		}
 	}
 	out.count = i32(len(cl.fills)) - out.first
@@ -364,41 +362,19 @@ colr_glyph :: proc(cl: ^Colr, g: Glyph_Index) -> Colr_Glyph {
 
 // ---- table reading ------------------------------------------------------------------
 
-// Bounds-checked big-endian reads (0 past the end).
-@(private)
-rd16 :: #force_inline proc "contextless" (d: []u8, at: int) -> u16 {
-	if at < 0 || at + 2 > len(d) {
-		return 0
-	}
-	return u16(d[at]) << 8 | u16(d[at + 1])
-}
-
-@(private)
-rd24 :: #force_inline proc "contextless" (d: []u8, at: int) -> int {
-	if at < 0 || at + 3 > len(d) {
-		return 0
-	}
-	return int(d[at]) << 16 | int(d[at + 1]) << 8 | int(d[at + 2])
-}
-
-@(private)
-rd32 :: #force_inline proc "contextless" (d: []u8, at: int) -> u32 {
-	return u32(rd16(d, at)) << 16 | u32(rd16(d, at + 2))
-}
-
 @(private = "file")
 fword :: #force_inline proc "contextless" (d: []u8, at: int) -> f32 {
-	return f32(i16(rd16(d, at)))
+	return f32(i16(ft.read_u16(d, at)))
 }
 
 @(private = "file")
 f2dot14 :: #force_inline proc "contextless" (d: []u8, at: int) -> f32 {
-	return f32(i16(rd16(d, at))) / 16384
+	return f32(i16(ft.read_u16(d, at))) / 16384
 }
 
 @(private = "file")
 fixed :: #force_inline proc "contextless" (d: []u8, at: int) -> f32 {
-	return f32(i32(rd32(d, at))) / 65536
+	return f32(i32(ft.read_u32(d, at))) / 65536
 }
 
 // The v1 root paint of a base glyph (absolute offset), or 0.
@@ -408,18 +384,18 @@ colr_base_paint :: proc(cl: ^Colr, g: Glyph_Index) -> int {
 		return 0
 	}
 	d := cl.data
-	lo, hi := 0, int(rd32(d, cl.base_list)) - 1
+	lo, hi := 0, int(ft.read_u32(d, cl.base_list)) - 1
 	for lo <= hi {
 		mid := (lo + hi) / 2
 		rec := cl.base_list + 4 + mid * 6
-		id := Glyph_Index(rd16(d, rec))
+		id := Glyph_Index(ft.read_u16(d, rec))
 		switch {
 		case id < g:
 			lo = mid + 1
 		case id > g:
 			hi = mid - 1
 		case:
-			off := int(rd32(d, rec + 2))
+			off := int(ft.read_u32(d, rec + 2))
 			return cl.base_list + off if off != 0 else 0
 		}
 	}
@@ -433,14 +409,14 @@ colr_v0_layers :: proc(cl: ^Colr, g: Glyph_Index) -> (first, count: int, ok: boo
 	for lo <= hi {
 		mid := (lo + hi) / 2
 		rec := cl.v0_base + mid * 6
-		id := Glyph_Index(rd16(d, rec))
+		id := Glyph_Index(ft.read_u16(d, rec))
 		switch {
 		case id < g:
 			lo = mid + 1
 		case id > g:
 			hi = mid - 1
 		case:
-			return int(rd16(d, rec + 2)), int(rd16(d, rec + 4)), true
+			return int(ft.read_u16(d, rec + 2)), int(ft.read_u16(d, rec + 4)), true
 		}
 	}
 	return
@@ -452,19 +428,19 @@ colr_clip_box :: proc(cl: ^Colr, g: Glyph_Index) -> (box: [4]f32, ok: bool) {
 		return
 	}
 	d := cl.data
-	n := int(rd32(d, cl.clip_list + 1))
+	n := int(ft.read_u32(d, cl.clip_list + 1))
 	lo, hi := 0, n - 1
 	for lo <= hi {
 		mid := (lo + hi) / 2
 		rec := cl.clip_list + 5 + mid * 7
-		start, end := Glyph_Index(rd16(d, rec)), Glyph_Index(rd16(d, rec + 2))
+		start, end := Glyph_Index(ft.read_u16(d, rec)), Glyph_Index(ft.read_u16(d, rec + 2))
 		switch {
 		case end < g:
 			lo = mid + 1
 		case start > g:
 			hi = mid - 1
 		case:
-			at := cl.clip_list + rd24(d, rec + 4)
+			at := cl.clip_list + int(ft.read_u24(d, rec + 4))
 			return {fword(d, at + 1), fword(d, at + 3), fword(d, at + 5), fword(d, at + 7)}, true
 		}
 	}
@@ -496,7 +472,7 @@ colr_transform :: proc(d: []u8, p: int, format: u8) -> Transform2D {
 	}
 	switch format {
 	case 12, 13:
-		x := p + rd24(d, p + 4)
+		x := p + int(ft.read_u24(d, p + 4))
 		return {fixed(d, x), fixed(d, x + 4), fixed(d, x + 8), fixed(d, x + 12), fixed(d, x + 16), fixed(d, x + 20)}
 	case 14, 15:
 		return transform_translation(fword(d, p + 4), fword(d, p + 6))
@@ -537,11 +513,11 @@ colr_leaf :: proc(cl: ^Colr, p: int, m: Transform2D, depth: int) -> (Colr_Leaf, 
 	case 2 ..= 9:
 		return {p, m}, true
 	case 11:
-		if q := colr_base_paint(cl, Glyph_Index(rd16(d, p + 1))); q != 0 {
+		if q := colr_base_paint(cl, Glyph_Index(ft.read_u16(d, p + 1))); q != 0 {
 			return colr_leaf(cl, q, m, depth + 1)
 		}
 	case 12 ..= 31:
-		return colr_leaf(cl, p + rd24(d, p + 1), transform_multiply(colr_transform(d, p, format), m), depth + 1)
+		return colr_leaf(cl, p + int(ft.read_u24(d, p + 1)), transform_multiply(colr_transform(d, p, format), m), depth + 1)
 	}
 	return {}, false
 }
@@ -561,22 +537,22 @@ colr_walk :: proc(cl: ^Colr, p: int, m: Transform2D, shape: Colr_Shape, over: ^C
 		if cl.layer_list == 0 {
 			return
 		}
-		n, first := int(d[p + 1]) if p + 1 < len(d) else 0, int(rd32(d, p + 2))
+		n, first := int(d[p + 1]) if p + 1 < len(d) else 0, int(ft.read_u32(d, p + 2))
 		for i in first ..< first + n {
-			colr_walk(cl, cl.layer_list + int(rd32(d, cl.layer_list + 4 + i * 4)), m, shape, over, depth + 1)
+			colr_walk(cl, cl.layer_list + int(ft.read_u32(d, cl.layer_list + 4 + i * 4)), m, shape, over, depth + 1)
 		}
 	case 2 ..= 9:
 		colr_emit(cl, over^ if over != nil else Colr_Leaf{p, m}, shape)
 	case 10:
-		colr_walk(cl, p + rd24(d, p + 1), m, {i32(rd16(d, p + 4)), m}, over, depth + 1)
+		colr_walk(cl, p + int(ft.read_u24(d, p + 1)), m, {i32(ft.read_u16(d, p + 4)), m}, over, depth + 1)
 	case 11:
-		if q := colr_base_paint(cl, Glyph_Index(rd16(d, p + 1))); q != 0 {
+		if q := colr_base_paint(cl, Glyph_Index(ft.read_u16(d, p + 1))); q != 0 {
 			colr_walk(cl, q, m, shape, over, depth + 1)
 		}
 	case 12 ..= 31:
-		colr_walk(cl, p + rd24(d, p + 1), transform_multiply(colr_transform(d, p, format), m), shape, over, depth + 1)
+		colr_walk(cl, p + int(ft.read_u24(d, p + 1)), transform_multiply(colr_transform(d, p, format), m), shape, over, depth + 1)
 	case 32:
-		src, mode, bd := p + rd24(d, p + 1), d[p + 4] if p + 4 < len(d) else 0, p + rd24(d, p + 5)
+		src, mode, bd := p + int(ft.read_u24(d, p + 1)), ft.read_u8(d, p + 4), p + int(ft.read_u24(d, p + 5))
 		switch mode {
 		case 0: // clear
 		case 1: // src
@@ -630,7 +606,7 @@ colr_emit :: proc(cl: ^Colr, leaf: Colr_Leaf, shape: Colr_Shape) {
 	switch format {
 	case 2, 3:
 		fill.kind = .Solid
-		fill.palette = rd16(d, p + 1)
+		fill.palette = ft.read_u16(d, p + 1)
 		fill.alpha = f2dot14(d, p + 3)
 		append(&cl.fills, fill)
 		return
@@ -644,15 +620,15 @@ colr_emit :: proc(cl: ^Colr, leaf: Colr_Leaf, shape: Colr_Shape) {
 		return
 	}
 	// Colour line: extend, then stops (VarColorStop rows carry a VarIndex).
-	line := p + rd24(d, p + 1)
+	line := p + int(ft.read_u24(d, p + 1))
 	fill.extend = Gradient_Spread(min(d[line] if line < len(d) else 0, 2))
 	stride := 10 if format & 1 == 1 else 6
-	n := min(int(rd16(d, line + 1)), COLR_MAX_STOPS)
+	n := min(int(ft.read_u16(d, line + 1)), COLR_MAX_STOPS)
 	first := len(cl.stops)
 	lo, hi := f32(1e9), f32(-1e9)
 	for i in 0 ..< n {
 		s := line + 3 + i * stride
-		st := Colr_Stop{f2dot14(d, s), rd16(d, s + 2), f2dot14(d, s + 4)}
+		st := Colr_Stop{f2dot14(d, s), ft.read_u16(d, s + 2), f2dot14(d, s + 4)}
 		// Keep stops sorted by offset (insertion; lines are short).
 		j := len(cl.stops)
 		append(&cl.stops, st)
@@ -698,9 +674,9 @@ colr_emit :: proc(cl: ^Colr, leaf: Colr_Leaf, shape: Colr_Shape) {
 		fill.geom = {a.x, a.y, b.x, b.y, 0, 0}
 	case .Radial:
 		c0 := Vec2{fword(d, p + 4), fword(d, p + 6)}
-		r0 := f32(rd16(d, p + 8))
+		r0 := f32(ft.read_u16(d, p + 8))
 		c1 := Vec2{fword(d, p + 10), fword(d, p + 12)}
-		r1 := f32(rd16(d, p + 14))
+		r1 := f32(ft.read_u16(d, p + 14))
 		a, b := c0 + (c1 - c0) * lo, c0 + (c1 - c0) * hi
 		ra, rb := max(r0 + (r1 - r0) * lo, 0), max(r0 + (r1 - r0) * hi, 0)
 		if ra > rb {

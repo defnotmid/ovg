@@ -12,8 +12,8 @@ import "core:strings"
 // cut short and the limit is recorded (`Budget.hit`, one warning per limit
 // in a document's `warnings`).
 //
-// Fonts are not covered: stb_truetype does not validate font data, so
-// fonts must come from a trusted source.
+// Fonts are not covered: ovg/font checks every read, but kb_text_shape
+// shapes from tables it reads unchecked (README: Untrusted input).
 Limit :: enum u8 {
 	// Nesting of SVG elements, of Lottie JSON and of Lottie shape groups.
 	Depth,

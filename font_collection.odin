@@ -3,6 +3,8 @@ package ovg
 import "core:strings"
 import "core:sync"
 
+import ft "font"
+
 // A set of font faces found by family, weight and style (CSS font
 // matching), with per-glyph fallback through every face. Face data is
 // borrowed and must outlive the collection.
@@ -182,58 +184,18 @@ font_collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (^Font, Gly
 // italic bit of the face `font` was loaded from.
 font_identity :: proc(data: []u8, font: ^Font) -> (family: string, weight: int, italic: bool) {
 	weight = 400
-	base := int(font.info.fontstart)
-	if name, ok := find_table(data, base, "name"); ok {
+	if name := font.face.tables[.name].at; name != 0 {
 		family = read_name(data, name, 16)
 		if family == "" {
 			family = read_name(data, name, 1)
 		}
 	}
-	if os2, ok := find_table(data, base, "OS/2"); ok && os2 + 64 <= len(data) {
-		weight = int(be16(data, os2 + 4))
-		italic = be16(data, os2 + 62) & 1 != 0
+	if os2 := font.face.tables[.OS2]; os2.size >= 64 {
+		weight = int(ft.read_u16(data, os2.at + 4))
+		italic = ft.read_u16(data, os2.at + 62) & 1 != 0
 	}
 	if family == "" {
 		family = strings.clone("Unknown")
-	}
-	return
-}
-
-@(private)
-be16 :: proc(d: []u8, at: int) -> u16 {
-	return u16(d[at]) << 8 | u16(d[at + 1])
-}
-
-@(private)
-be32 :: proc(d: []u8, at: int) -> u32 {
-	return u32(be16(d, at)) << 16 | u32(be16(d, at + 2))
-}
-
-@(private)
-find_table :: proc(d: []u8, base: int, tag: string) -> (int, bool) {
-	off, _, ok := find_table_range(d, base, tag)
-	return off, ok
-}
-
-// Offset and length of a table, clamped to the data.
-@(private)
-find_table_range :: proc(d: []u8, base: int, tag: string) -> (offset, length: int, ok: bool) {
-	if base + 12 > len(d) {
-		return
-	}
-	n := int(be16(d, base + 4))
-	for i in 0 ..< n {
-		rec := base + 12 + i * 16
-		if rec + 16 > len(d) {
-			break
-		}
-		if string(d[rec:rec + 4]) == tag {
-			off := int(be32(d, rec + 8))
-			if off >= len(d) {
-				return
-			}
-			return off, min(int(be32(d, rec + 12)), len(d) - off), true
-		}
 	}
 	return
 }
@@ -243,35 +205,36 @@ find_table_range :: proc(d: []u8, base: int, tag: string) -> (offset, length: in
 // in some color-font subsets) make it read and write out of bounds.
 font_layout_tables_ok :: proc(f: ^Font) -> bool {
 	d := f.data
-	for tag in ([2]string{"GSUB", "GPOS"}) {
-		at, length, found := find_table_range(d, int(f.info.fontstart), tag)
-		if !found {
+	for table in ([2]ft.Table{.GSUB, .GPOS}) {
+		span := f.face.tables[table]
+		if span.at == 0 {
 			continue
 		}
-		t := d[at:][:length]
+		length := span.size
+		t := d[span.at:][:length]
 		if length < 10 {
 			return false
 		}
 		// ScriptList and FeatureList: a count of 6-byte records past the
 		// header (a null offset is read as the header itself).
 		for field in ([2]int{4, 6}) {
-			list := int(be16(t, field))
-			if list < 10 || list + 2 > length || list + 2 + int(be16(t, list)) * 6 > length {
+			list := int(ft.read_u16(t, field))
+			if list < 10 || list + 2 > length || list + 2 + int(ft.read_u16(t, list)) * 6 > length {
 				return false
 			}
 		}
 		// LookupList: offsets to lookups, each with its subtable offsets.
-		list := int(be16(t, 8))
+		list := int(ft.read_u16(t, 8))
 		if list < 10 || list + 2 > length {
 			return false
 		}
-		count := int(be16(t, list))
+		count := int(ft.read_u16(t, list))
 		if list + 2 + count * 2 > length {
 			return false
 		}
 		for i in 0 ..< count {
-			lookup := list + int(be16(t, list + 2 + i * 2))
-			if lookup + 6 > length || lookup + 6 + int(be16(t, lookup + 4)) * 2 > length {
+			lookup := list + int(ft.read_u16(t, list + 2 + i * 2))
+			if lookup + 6 > length || lookup + 6 + int(ft.read_u16(t, lookup + 4)) * 2 > length {
 				return false
 			}
 		}
@@ -285,20 +248,20 @@ read_name :: proc(d: []u8, table: int, name_id: u16) -> string {
 	if table + 6 > len(d) {
 		return ""
 	}
-	count := int(be16(d, table + 2))
-	strings_at := table + int(be16(d, table + 4))
+	count := int(ft.read_u16(d, table + 2))
+	strings_at := table + int(ft.read_u16(d, table + 4))
 	mac := ""
 	for i in 0 ..< count {
 		rec := table + 6 + i * 12
 		if rec + 12 > len(d) {
 			break
 		}
-		platform, encoding, language := be16(d, rec), be16(d, rec + 2), be16(d, rec + 4)
-		if be16(d, rec + 6) != name_id {
+		platform, encoding, language := ft.read_u16(d, rec), ft.read_u16(d, rec + 2), ft.read_u16(d, rec + 4)
+		if ft.read_u16(d, rec + 6) != name_id {
 			continue
 		}
-		length := int(be16(d, rec + 8))
-		at := strings_at + int(be16(d, rec + 10))
+		length := int(ft.read_u16(d, rec + 8))
+		at := strings_at + int(ft.read_u16(d, rec + 10))
 		if at + length > len(d) {
 			continue
 		}

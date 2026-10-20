@@ -871,6 +871,7 @@ test_sw_glyph_outline_area :: proc(t: ^testing.T) {
 	defer sw_close(&s)
 	font, err := font_load(#load("assets/Vera.ttf"))
 	testing.expect_value(t, err, Error.None)
+	defer font_destroy(&font)
 	sc := font_scale_for_em(&font, 48)
 	glyphs: [dynamic]Positioned_Glyph
 	defer delete(glyphs)

@@ -42,7 +42,7 @@ kb_allocator :: proc "c" (data: rawptr, op: ^kb.allocator_op) {
 @(private)
 Shape_Config :: struct {
 	data:      rawptr, // face identity: font bytes + offset
-	fontstart: i32,
+	fontstart: int,
 	script:    kb.script,
 	kb_font:   ^kb.font,
 	config:    ^kb.shape_config,
@@ -213,11 +213,11 @@ font_kb_destroy :: proc(f: ^Font) {
 shaper_config :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, f: ^Font, script: kb.script) -> ^Shape_Config {
 	data := raw_data(f.data)
 	for &cfg in s.configs {
-		if cfg.data == data && cfg.fontstart == f.info.fontstart && cfg.script == script {
+		if cfg.data == data && cfg.fontstart == f.face.start && cfg.script == script {
 			return &cfg
 		}
 	}
-	cfg := Shape_Config{data = data, fontstart = f.info.fontstart, script = script}
+	cfg := Shape_Config{data = data, fontstart = f.face.start, script = script}
 	if kf := font_kb(fonts, f); kf != nil {
 		cfg.config = kb.CreateShapeConfig(kf, script, .DONT_KNOW, kb_allocator, nil)
 		if cfg.config != nil {

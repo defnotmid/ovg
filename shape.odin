@@ -2,9 +2,9 @@ package ovg
 
 import "core:mem"
 import "core:sync"
-import stbtt "vendor:stb/truetype"
 
 import cv "curves"
+import ft "font"
 
 // Shapes drawn by per-pixel coverage: ovg's handle on the curves package
 // (curves/curves.odin: the word layout, the coverage and winding
@@ -102,26 +102,28 @@ shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 	shape_close(b)
 }
 
-// Adds a glyph's outline in font units, y down (the pen at the origin);
-// false when it has none.
-shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index) -> bool {
-	verts: [^]stbtt.vertex
-	n := stbtt.GetGlyphShape(&f.info, i32(g), &verts)
-	if n <= 0 {
+// Adds a glyph's outline in font units, y down (the pen at the origin),
+// reading it into `o`; false when it has none.
+shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index, o: ^ft.Outline) -> bool {
+	if !ft.glyph_outline(&f.face, ft.Glyph(g), o) {
 		return false
 	}
-	defer stbtt.FreeShape(&f.info, verts)
-	for v in verts[:n] {
-		p := Vec2{f32(v.x), -f32(v.y)}
-		#partial switch stbtt.vmove(v.type) {
-		case .vmove:
-			shape_move_to(b, p)
-		case .vline:
-			shape_line_to(b, p)
-		case .vcurve:
-			shape_quad_to(b, {f32(v.cx), -f32(v.cy)}, p)
-		case .vcubic:
-			shape_cubic_to(b, {f32(v.cx), -f32(v.cy)}, {f32(v.cx1), -f32(v.cy1)}, p)
+	i := 0
+	for v in o.verbs {
+		p := o.points[i:]
+		switch v {
+		case .Move:
+			shape_move_to(b, {p[0].x, -p[0].y})
+			i += 1
+		case .Line:
+			shape_line_to(b, {p[0].x, -p[0].y})
+			i += 1
+		case .Quad:
+			shape_quad_to(b, {p[0].x, -p[0].y}, {p[1].x, -p[1].y})
+			i += 2
+		case .Cubic:
+			shape_cubic_to(b, {p[0].x, -p[0].y}, {p[1].x, -p[1].y}, {p[2].x, -p[2].y})
+			i += 3
 		}
 	}
 	shape_close(b)
@@ -206,10 +208,10 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 
 // Builds a glyph's shape (font units, y down, the pen at the origin);
 // false for glyphs without an outline.
-shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, allocator := context.allocator) -> (Shape, bool) {
+shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator) -> (Shape, bool) {
 	b: Shape_Builder
 	b.curves.allocator = context.temp_allocator
-	if !shape_add_glyph(&b, f, g) {
+	if !shape_add_glyph(&b, f, g, o) {
 		return {}, false
 	}
 	return shape_build(&b, allocator)

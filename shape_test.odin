@@ -5,6 +5,7 @@ import "core:slice"
 import "core:testing"
 
 import cv "curves"
+import ft "font"
 
 @(private = "file")
 coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {
@@ -117,8 +118,10 @@ test_shape_curves_match_area :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, Error.None)
 	defer font_destroy(&font)
 	sc := font_scale_for_em(&font, 14)
+	o: ft.Outline
+	defer ft.outline_destroy(&o)
 	for r in "aRg@" {
-		g, ok := shape_from_glyph(&font, font_glyph_index(&font, r))
+		g, ok := shape_from_glyph(&font, font_glyph_index(&font, r), &o)
 		testing.expect(t, ok)
 		defer shape_destroy(&g)
 		upright := transform_multiply(transform_scaling(sc, sc), transform_translation(20, 20))
@@ -126,7 +129,7 @@ test_shape_curves_match_area :: proc(t: ^testing.T) {
 		rotated := transform_multiply(transform_multiply(transform_scaling(sc, sc), transform_rotation(0.3)), transform_translation(20, 20))
 		check(t, &g, rotated, 0, 0, 40, 40, 0.01, 0.04)
 	}
-	_, ok := shape_from_glyph(&font, font_glyph_index(&font, ' '))
+	_, ok := shape_from_glyph(&font, font_glyph_index(&font, ' '), &o)
 	testing.expect(t, !ok)
 }
 

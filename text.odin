@@ -1,18 +1,22 @@
 package ovg
 
 import "base:runtime"
+import "core:math"
 import "core:mem"
 import "core:sync"
 import "core:unicode/utf8"
 import kb "vendor:kb_text_shape"
-import stbtt "vendor:stb/truetype"
 
-// Fonts via stb_truetype: metrics, kerning, glyph outlines and coverage
-// bitmaps. Shaped layout is `text_layout` over a Font_Collection
+import cv "curves"
+import ft "font"
+
+// Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
+// outlines; glyphs draw as shapes, and atlas bitmaps are the shapes'
+// coverage. Shaped layout is `text_layout` over a Font_Collection
 // (text_shape.odin); `layout_simple` places plain left-to-right text.
 
 Font :: struct {
-	info:           stbtt.fontinfo,
+	face:           ft.Face,
 	// Borrowed TTF/OTF bytes; must outlive the font.
 	data:           []u8,
 	// Face index in a collection file.
@@ -28,7 +32,8 @@ Font :: struct {
 	// without an outline count as missing for fallback.
 	bitmap_colour:  bool,
 	// The glyphs' shapes (shape.odin), each built on first use and kept
-	// for the font's life; made with the first. Freed by `font_destroy`.
+	// for the font's life, and the outline glyphs are read into; made on
+	// first use. Freed by `font_destroy`.
 	shapes:         ^Font_Shapes,
 	// What the font allocates with when it builds on first use (its
 	// shapes), whatever allocator the drawing code runs under: the
@@ -41,6 +46,8 @@ Font_Shapes :: struct {
 	lock:      sync.Mutex,
 	// nil for glyphs without an outline.
 	glyphs:    map[Glyph_Index]^Shape,
+	// Where a glyph's outline is read (under the lock).
+	outline:   ft.Outline,
 	allocator: mem.Allocator,
 }
 
@@ -64,20 +71,20 @@ Font_V_Metrics :: struct {
 	ascent, descent, line_gap: i32,
 }
 
+// Reads face `index` of a font or collection; .Font_Parse when it isn't
+// one or lacks what drawing text needs (ft.load says which).
 font_load :: proc(data: []u8, index: i32 = 0) -> (font: Font, err: Error) {
-	offset := stbtt.GetFontOffsetForIndex(raw_data(data), index)
-	if offset < 0 || !stbtt.InitFont(&font.info, raw_data(data), offset) {
+	face, face_err := ft.load(data, int(index))
+	if face_err != nil {
 		return {}, .Font_Parse
 	}
+	font.face = face
 	font.data = data
 	font.index = index
 	font.allocator = context.allocator
 	font.colr = colr_open(&font)
 	if font.colr == nil {
-		base := int(font.info.fontstart)
-		_, _, sbix := find_table_range(data, base, "sbix")
-		_, _, cbdt := find_table_range(data, base, "CBDT")
-		font.bitmap_colour = sbix || cbdt
+		font.bitmap_colour = face.tables[.sbix].at != 0 || face.tables[.CBDT].at != 0
 	}
 	return font, nil
 }
@@ -95,6 +102,7 @@ font_destroy :: proc(f: ^Font) {
 			}
 		}
 		delete(fs.glyphs)
+		ft.outline_destroy(&fs.outline)
 		free(fs, fs.allocator)
 		f.shapes = nil
 	}
@@ -105,27 +113,14 @@ font_destroy :: proc(f: ^Font) {
 // owned by the font until `font_destroy`; nil for glyphs without an outline. Shape units map to
 // font units, y down, the pen at the origin (`shape_local`).
 font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
-	fs := sync.atomic_load_explicit(&f.shapes, .Acquire)
-	if fs == nil {
-		allocator := font_allocator(f)
-		fresh := new(Font_Shapes, allocator)
-		fresh.glyphs = make(map[Glyph_Index]^Shape, allocator)
-		fresh.allocator = allocator
-		if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); won {
-			fs = fresh
-		} else {
-			delete(fresh.glyphs)
-			free(fresh, allocator)
-			fs = old
-		}
-	}
+	fs := font_shapes(f)
 	sync.mutex_lock(&fs.lock)
 	defer sync.mutex_unlock(&fs.lock)
 	if s, ok := fs.glyphs[g]; ok {
 		return s
 	}
 	context.allocator = fs.allocator
-	shape, ok := shape_from_glyph(f, g)
+	shape, ok := shape_from_glyph(f, g, &fs.outline)
 	s: ^Shape
 	if ok {
 		s = new_clone(shape)
@@ -134,10 +129,36 @@ font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 	return s
 }
 
+// The font's shapes, made on first use (safe from several threads).
+@(private)
+font_shapes :: proc(f: ^Font) -> ^Font_Shapes {
+	fs := sync.atomic_load_explicit(&f.shapes, .Acquire)
+	if fs != nil {
+		return fs
+	}
+	allocator := font_allocator(f)
+	fresh := new(Font_Shapes, allocator)
+	fresh.glyphs = make(map[Glyph_Index]^Shape, allocator)
+	fresh.outline = {
+		verbs  = make([dynamic]ft.Verb, allocator),
+		points = make([dynamic][2]f32, allocator),
+		glyf   = make(#soa[dynamic]ft.Glyf_Point, allocator),
+		ends   = make([dynamic]int, allocator),
+	}
+	fresh.allocator = allocator
+	if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); !won {
+		delete(fresh.glyphs)
+		ft.outline_destroy(&fresh.outline)
+		free(fresh, allocator)
+		return old
+	}
+	return fresh
+}
+
 // The glyph for `r`, or 0 when the face lacks it or has only a bitmap for it.
 font_glyph_index_drawable :: proc(f: ^Font, r: rune) -> Glyph_Index {
 	g := font_glyph_index(f, r)
-	if g != 0 && f.bitmap_colour && stbtt.IsGlyphEmpty(&f.info, i32(g)) {
+	if g != 0 && f.bitmap_colour && ft.glyph_empty(&f.face, ft.Glyph(g)) {
 		return 0
 	}
 	return g
@@ -145,63 +166,71 @@ font_glyph_index_drawable :: proc(f: ^Font, r: rune) -> Glyph_Index {
 
 // Scale from font units to pixels so ascent - descent == `height`.
 font_scale_for_pixel_height :: proc(f: ^Font, height: f32) -> f32 {
-	return stbtt.ScaleForPixelHeight(&f.info, height)
+	return ft.scale_for_pixel_height(&f.face, height)
 }
 
 // Scale from font units to pixels for a CSS-style font size (em size).
 font_scale_for_em :: proc(f: ^Font, size: f32) -> f32 {
-	return stbtt.ScaleForMappingEmToPixels(&f.info, size)
+	return ft.scale_for_em(&f.face, size)
 }
 
-font_v_metrics :: proc(f: ^Font) -> (m: Font_V_Metrics) {
-	stbtt.GetFontVMetrics(&f.info, &m.ascent, &m.descent, &m.line_gap)
-	return
+font_v_metrics :: proc(f: ^Font) -> Font_V_Metrics {
+	return {i32(f.face.ascent), i32(f.face.descent), i32(f.face.line_gap)}
 }
 
 font_glyph_index :: proc(f: ^Font, r: rune) -> Glyph_Index {
-	return Glyph_Index(stbtt.FindGlyphIndex(&f.info, r))
+	return Glyph_Index(ft.glyph_index(&f.face, r))
 }
 
 font_glyph_advance :: proc(f: ^Font, g: Glyph_Index) -> (advance, left_side_bearing: i32) {
-	stbtt.GetGlyphHMetrics(&f.info, i32(g), &advance, &left_side_bearing)
-	return
+	a, b := ft.h_metrics(&f.face, ft.Glyph(g))
+	return i32(a), i32(b)
 }
 
 font_glyph_kern :: proc(f: ^Font, a, b: Glyph_Index) -> i32 {
-	return stbtt.GetGlyphKernAdvance(&f.info, i32(a), i32(b))
+	return i32(ft.kern(&f.face, ft.Glyph(a), ft.Glyph(b)))
 }
 
 // Appends the glyph outline to `p`, scaled to pixels with its origin at
 // (x, y) and y pointing down.
 font_glyph_path :: proc(f: ^Font, g: Glyph_Index, x, y, scale: f32, p: ^Path) -> bool {
-	verts: [^]stbtt.vertex
-	n := stbtt.GetGlyphShape(&f.info, i32(g), &verts)
-	if n <= 0 {
+	fs := font_shapes(f)
+	sync.mutex_lock(&fs.lock)
+	defer sync.mutex_unlock(&fs.lock)
+	o := &fs.outline
+	if !ft.glyph_outline(&f.face, ft.Glyph(g), o) {
 		return false
 	}
-	defer stbtt.FreeShape(&f.info, verts)
-	open := false
-	for v in verts[:n] {
-		px := x + f32(v.x) * scale
-		py := y - f32(v.y) * scale
-		#partial switch stbtt.vmove(v.type) {
-		case .vmove:
-			if open {
+	at :: proc(o: ^ft.Outline, i: int, x, y, scale: f32) -> (f32, f32) {
+		q := o.points[i]
+		return x + q.x * scale, y - q.y * scale
+	}
+	i := 0
+	for v, k in o.verbs {
+		switch v {
+		case .Move:
+			if k > 0 {
 				path_close(p)
 			}
-			path_move_to(p, px, py)
-			open = true
-		case .vline:
-			path_line_to(p, px, py)
-		case .vcurve:
-			path_quad_to(p, x + f32(v.cx) * scale, y - f32(v.cy) * scale, px, py)
-		case .vcubic:
-			path_bezier_to(p, x + f32(v.cx) * scale, y - f32(v.cy) * scale, x + f32(v.cx1) * scale, y - f32(v.cy1) * scale, px, py)
+			path_move_to(p, at(o, i, x, y, scale))
+			i += 1
+		case .Line:
+			path_line_to(p, at(o, i, x, y, scale))
+			i += 1
+		case .Quad:
+			cx, cy := at(o, i, x, y, scale)
+			px, py := at(o, i + 1, x, y, scale)
+			path_quad_to(p, cx, cy, px, py)
+			i += 2
+		case .Cubic:
+			c1x, c1y := at(o, i, x, y, scale)
+			c2x, c2y := at(o, i + 1, x, y, scale)
+			px, py := at(o, i + 2, x, y, scale)
+			path_bezier_to(p, c1x, c1y, c2x, c2y, px, py)
+			i += 3
 		}
 	}
-	if open {
-		path_close(p)
-	}
+	path_close(p)
 	return true
 }
 
@@ -341,8 +370,12 @@ glyph_atlas_get :: proc(a: ^Glyph_Atlas, f: ^Font, g: Glyph_Index, scale: f32) -
 	if hit, ok := a.cache[key]; ok {
 		return hit, nil
 	}
+	// The pixels the glyph's box touches (y down).
 	x0, y0, x1, y1: i32
-	stbtt.GetGlyphBitmapBox(&f.info, i32(g), scale, scale, &x0, &y0, &x1, &y1)
+	if bx0, by0, bx1, by1, ok := ft.glyph_box(&f.face, ft.Glyph(g)); ok {
+		x0, y0 = i32(math.floor(f32(bx0) * scale)), i32(math.floor(f32(-by1) * scale))
+		x1, y1 = i32(math.ceil(f32(bx1) * scale)), i32(math.ceil(f32(-by0) * scale))
+	}
 	w, h := u32(max(x1 - x0, 0)), u32(max(y1 - y0, 0))
 	if w == 0 || h == 0 {
 		a.cache[key] = {}
@@ -354,8 +387,18 @@ glyph_atlas_get :: proc(a: ^Glyph_Atlas, f: ^Font, g: Glyph_Index, scale: f32) -
 	if !ok {
 		return {}, .Atlas_Full
 	}
-	dst := a.pixels[ay * a.width + ax:]
-	stbtt.MakeGlyphBitmap(&f.info, raw_data(dst), i32(w), i32(h), i32(a.width), scale, scale, i32(g))
+	if s := font_glyph_shape(f, g); s != nil {
+		// Each pixel's exact coverage: its box in the shape's units.
+		unit := 1 / (scale * s.extent)
+		for j in 0 ..< h {
+			row := a.pixels[(ay + j) * a.width + ax:][:w]
+			py := (f32(y0) + f32(j) + 0.5) / scale
+			for &px, i in row {
+				q := (Vec2{(f32(x0) + f32(i) + 0.5) / scale, py} - s.origin) / s.extent
+				px = u8(cv.coverage(s.data, q, {unit, unit}, false) * 255 + 0.5)
+			}
+		}
+	}
 	if a.dirty_y0 == a.dirty_y1 {
 		a.dirty_y0, a.dirty_y1 = ay, ay + h
 	} else {
@@ -522,5 +565,7 @@ stroke_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, 
 
 // The glyph's bounding box in font units (y up). False for empty glyphs.
 font_glyph_box :: proc(f: ^Font, g: Glyph_Index, x0, y0, x1, y1: ^i32) -> bool {
-	return stbtt.GetGlyphBox(&f.info, i32(g), x0, y0, x1, y1) != 0
+	bx0, by0, bx1, by1, ok := ft.glyph_box(&f.face, ft.Glyph(g))
+	x0^, y0^, x1^, y1^ = i32(bx0), i32(by0), i32(bx1), i32(by1)
+	return ok
 }
