@@ -53,6 +53,7 @@ Layer_Params :: struct {
 Pooled_Layer :: struct {
 	id:        Image_Id,
 	w, h:      u32,
+	format:    Pixel_Format,
 	in_use:    bool,
 	// `Layer_Stack.frame` when last acquired.
 	last_used: u32,
@@ -273,7 +274,7 @@ layer_offscreen_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, pool: ^[dynamic]Pool
 	}
 	if !image_id_valid(id) {
 		id, _ = create_image_empty(c, w, h, .RGBA8, flags)
-		append(pool, Pooled_Layer{id, w, h, true, ls.frame, 0})
+		append(pool, Pooled_Layer{id, w, h, .RGBA8, true, ls.frame, 0})
 	}
 	layer_target_begin(ls, c, id)
 	ls.targets[len(ls.targets) - 1].outer = {ls.width, ls.height}
@@ -719,8 +720,10 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 	sh := layer_bucket(r1 - r0, gh)
 	c0 = min(c0, gw - sw)
 	r0 = min(r0, gh - sh)
-	// Cell (i, j) of `small` is cell (c0 + i, r0 + j) of the canvas.
-	small := layer_acquire(ls, c, sw, sh)
+	// Cell (i, j) of `small` is cell (c0 + i, r0 + j) of the canvas; the
+	// copies keep dst's precision.
+	info, _ := image_info(c, dst)
+	small := layer_acquire(ls, c, sw, sh, format = info.format)
 	layer_draw_image(
 		ls,
 		c,
@@ -733,7 +736,7 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 		f32(win.w) * f32(gw) / cw,
 		f32(win.h) * f32(gh) / ch,
 	)
-	blurred := layer_acquire(ls, c, sw, sh)
+	blurred := layer_acquire(ls, c, sw, sh, format = info.format)
 	filter_image(c, blurred, Blur_XY{sigma.x / f, sigma.y / f, .Transparent}, small)
 	layer_release(ls, small)
 	layer_draw_image(
@@ -771,18 +774,18 @@ layer_bucket :: proc "contextless" (n, limit: u32) -> u32 {
 	return min((n + step - 1) / step * step, limit)
 }
 
-// A transparent `w x h` layer image from the pool, one not released after
-// release number `released_by`.
-layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := max(u32)) -> Image_Id {
+// A transparent `w x h` layer image of `format` from the pool, one not
+// released after release number `released_by`.
+layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := max(u32), format := Pixel_Format.RGBA8) -> Image_Id {
 	for &l in ls.pool {
-		if !l.in_use && l.w == w && l.h == h && l.released <= released_by {
+		if !l.in_use && l.w == w && l.h == h && l.format == format && l.released <= released_by {
 			l.in_use = true
 			l.last_used = ls.frame
 			return l.id
 		}
 	}
-	id, _ := create_image_empty(c, w, h, .RGBA8, {.Premultiplied})
-	append(&ls.pool, Pooled_Layer{id, w, h, true, ls.frame, 0})
+	id, _ := create_image_empty(c, w, h, format, {.Premultiplied})
+	append(&ls.pool, Pooled_Layer{id, w, h, format, true, ls.frame, 0})
 	return id
 }
 
@@ -805,7 +808,7 @@ layer_upload :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Source, flags: Ima
 	}
 	if !image_id_valid(id) {
 		id, _ = create_image_empty(c, src.width, src.height, .RGBA8, flags)
-		append(&ls.uploads, Pooled_Layer{id, src.width, src.height, true, ls.frame, 0})
+		append(&ls.uploads, Pooled_Layer{id, src.width, src.height, .RGBA8, true, ls.frame, 0})
 	}
 	update_image(c, id, src, 0, 0)
 	return id

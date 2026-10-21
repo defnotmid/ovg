@@ -197,6 +197,37 @@ scene_layer_filters :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_stack_end(ls, c)
 }
 
+// A black to #303030 ramp plain (top) and through a linearRGB bloom
+// (onimite's: threshold, blur, add; sigma 12 takes the downscaled blur):
+// the half-float filter images keep every dark level.
+scene_filter_darks :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H)
+	vg.clear_rect(c, 0, 0, W, H, vg.BLACK)
+	ramp := vg.paint_linear_gradient(0, 0, W, 0, vg.BLACK, vg.rgb(0x30, 0x30, 0x30))
+	p: vg.Path
+	defer vg.path_destroy(&p)
+	vg.path_rect(&p, 0, 0, W, H / 2)
+	vg.fill_path(c, &p, ramp)
+	slope := f32(1 / (1 - 0.75))
+	bloom := [3]vg.Filter_Primitive {
+		{op = .Composite, composite = .Arithmetic, in1 = {kind = .Source_Graphic}, in2 = {kind = .Source_Graphic}, k = {0, slope, 0, -0.75 * slope}},
+		{op = .Gaussian_Blur, in1 = {kind = .Previous}, std = {12, 12}},
+		{op = .Composite, composite = .Arithmetic, in1 = {kind = .Source_Graphic}, in2 = {kind = .Previous}, k = {0, 1, 0.7, 0}},
+	}
+	f := vg.Filter{primitives = bloom[:]}
+	vg.layer_push(ls, c, {filter = &f})
+	vg.path_reset(&p)
+	vg.path_rect(&p, 0, H / 2, W, H / 2)
+	vg.fill_path(c, &p, ramp)
+	// A bright bar that does bloom.
+	vg.path_reset(&p)
+	vg.path_rect(&p, 100, H * 3 / 4 - 4, 56, 8)
+	vg.fill_path(c, &p, vg.paint_color(vg.rgb(255, 240, 200)))
+	vg.layer_pop(ls, c)
+	vg.layer_stack_end(ls, c)
+}
+
 // feComponentTransfer, feMorphology, feTurbulence, lighting, feTile,
 // feDisplacementMap and feConvolveMatrix, each in its own region.
 scene_filters_more :: proc(c: ^vg.Canvas, r: ^Resources) {

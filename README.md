@@ -219,7 +219,10 @@ SVG filter effects on layers (`svg_filter.odin`, `Layer_Params.filter`): a
 `Filter` is a list of primitives (every SVG 1.1 one; feImage shows an
 image from `Filter.images`) reading the source graphic, its alpha or
 earlier results, computed in linear RGB unless `srgb`; component transfer
-tables and convolution kernels live in `Filter.values`. feTurbulence is the
+tables and convolution kernels live in `Filter.values`. A linear RGB
+filter's images are RGBA16F (8-bit linear light keeps 9 of sRGB's first 49
+levels), each released after the last primitive reading it; an sRGB
+filter's are RGBA8. feTurbulence is the
 spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
 seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
 row bands as resvg on the software backend (on `Software_Backend.pool`

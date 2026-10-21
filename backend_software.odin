@@ -611,10 +611,18 @@ fetch :: #force_inline proc "contextless" (t: Sw_Texture, x, y: u32) -> [4]f32 {
 	case .Gray16:
 		return {f32(u16(t.pixels[i * 2]) | u16(t.pixels[i * 2 + 1]) << 8) / 65535, 0, 0, 1}
 	case .RGBA16F:
-		p := (^[4]f16)(&t.pixels[i * 8])^
-		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])}
+		p := (^[4]u16)(&t.pixels[i * 8])^
+		return {half_to_f32(p[0]), half_to_f32(p[1]), half_to_f32(p[2]), half_to_f32(p[3])}
 	}
 	return {}
+}
+
+// f32(f16) for every finite half, without the library call it is on CPUs
+// without F16C (Odin's default target): the bits moved to f32's places,
+// scaled by 2^112 for the exponent bias (subnormals included).
+@(private = "file")
+half_to_f32 :: #force_inline proc "contextless" (h: u16) -> f32 {
+	return transmute(f32)(transmute(u32)(transmute(f32)(u32(h & 0x7fff) << 13) * 0h77800000) | u32(h & 0x8000) << 16)
 }
 
 @(private = "file")

@@ -307,3 +307,58 @@ test_paint_transform :: proc(t: ^testing.T) {
 	testing.expect_value(t, s.backend.pixels[25 * 4], 255) // red half, moved right
 	testing.expect_value(t, s.backend.pixels[35 * 4 + 2], 255) // blue half
 }
+
+// Linear-light intermediates keep sRGB's dark levels: a black to #303030
+// ramp through a linearRGB bloom (onimite's recipe) keeps every level it
+// had, and a filter that passes the source through returns it unchanged.
+@(test)
+test_filter_linear_keeps_darks :: proc(t: ^testing.T) {
+	s: Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	c := &s.canvas
+	W :: 256
+	set_size(c, W, 2)
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	ramp := paint_linear_gradient(0, 0, W, 0, BLACK, rgb(0x30, 0x30, 0x30))
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, W, 2)
+	slope := f32(1 / (1 - 0.75))
+	bloom := [?]Filter_Primitive {
+		{op = .Composite, composite = .Arithmetic, in1 = {kind = .Source_Graphic}, in2 = {kind = .Source_Graphic}, k = {0, slope, 0, -0.75 * slope}},
+		{op = .Gaussian_Blur, in1 = {kind = .Previous}, std = {8, 8}},
+		{op = .Composite, composite = .Arithmetic, in1 = {kind = .Source_Graphic}, in2 = {kind = .Previous}, k = {0, 1, 0.7, 0}},
+	}
+	levels :: proc(px: []u8) -> (n: int) {
+		seen: [256]bool
+		for x in 0 ..< W {
+			n += int(!seen[px[x * 4]])
+			seen[px[x * 4]] = true
+		}
+		return
+	}
+	plain: [W * 4]u8
+	for filtered in ([2]bool{false, true}) {
+		clear_rect(c, 0, 0, W, 2, BLACK)
+		layer_stack_begin(&ls, c, W, 2)
+		f := Filter{primitives = bloom[:]}
+		if filtered {
+			layer_push(&ls, c, {filter = &f})
+		}
+		fill_path(c, &p, ramp)
+		if filtered {
+			layer_pop(&ls, c)
+		}
+		layer_stack_end(&ls, c)
+		flush(c)
+		px := s.backend.pixels[:W * 4]
+		if !filtered {
+			copy(plain[:], px)
+			continue
+		}
+		testing.expectf(t, levels(px) == levels(plain[:]), "bloom keeps %d of %d levels", levels(px), levels(plain[:]))
+		testing.expect(t, string(px) == string(plain[:]), "nothing passes the threshold, so the ramp is unchanged")
+	}
+}

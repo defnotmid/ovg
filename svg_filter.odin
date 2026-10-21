@@ -256,9 +256,13 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		return region
 	}
 
+	// Linear light needs about 12 bits to keep sRGB's dark levels (8 bits
+	// keep 9 of sRGB's first 49), so a linearRGB filter's images are half
+	// floats.
+	format := Pixel_Format.RGBA8 if f.srgb else .RGBA16F
 	graphic := source
 	if !f.srgb {
-		graphic = layer_acquire(ls, c, w, h)
+		graphic = layer_acquire(ls, c, w, h, format = format)
 		filter_image(c, graphic, Color_Space_Convert{to_linear = true}, source)
 		layer_release(ls, source)
 	}
@@ -290,9 +294,40 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		}
 		return {srgb_to_linear(col.r), srgb_to_linear(col.g), srgb_to_linear(col.b), col.a}
 	}
+	// The last primitive reading each result, which releases it for the
+	// next to reuse (the final result is returned).
+	last := make([]int, len(f.primitives), context.temp_allocator)
+	result_of :: proc(ref: Filter_Ref, i: int) -> int {
+		switch ref.kind {
+		case .Previous:
+			return i - 1
+		case .Result:
+			return min(int(ref.index), i - 1)
+		case .Source_Graphic, .Source_Alpha:
+		}
+		return -1
+	}
+	for p, i in f.primitives {
+		last[i] = i
+		reads := [2]Filter_Ref{p.in1, p.in2}
+		for ref in reads[:2 if p.op == .Composite || p.op == .Blend || p.op == .Displacement_Map else 1] {
+			if r := result_of(ref, i); r >= 0 {
+				last[r] = i
+			}
+		}
+		if p.op == .Merge {
+			for ref in f.merge_refs[p.merge_first:][:p.merge_count] {
+				if r := result_of(ref, i); r >= 0 {
+					last[r] = i
+				}
+			}
+		}
+	}
+	last[len(last) - 1] = len(last)
 	for &p, i in f.primitives {
 		in1 := resolve(ls, c, p.in1, i, results, graphic, &alpha)
-		out := layer_acquire(ls, c, w, h)
+		// Turbulence is made in 8 bits (the software backend writes bytes).
+		out := layer_acquire(ls, c, w, h, format = .RGBA8 if p.op == .Turbulence else format)
 		switch p.op {
 		case .Gaussian_Blur:
 			layer_blur_into(ls, c, out, in1, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)
@@ -316,13 +351,13 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 			layer_target_end(ls, c)
 		case .Drop_Shadow:
 			// blur(alpha) -> offset -> flood-in -> under the input.
-			a := layer_acquire(ls, c, w, h)
+			a := layer_acquire(ls, c, w, h, format = format)
 			filter_image(c, a, Color_Matrix{ALPHA_ONLY}, in1)
-			blurred := layer_acquire(ls, c, w, h)
+			blurred := layer_acquire(ls, c, w, h, format = format)
 			layer_blur_into(ls, c, blurred, a, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)
-			moved := layer_acquire(ls, c, w, h)
+			moved := layer_acquire(ls, c, w, h, format = format)
 			filter_offset_into(ls, c, moved, blurred, offset_px(xform, p.dx, p.dy))
-			flood := layer_acquire(ls, c, w, h)
+			flood := layer_acquire(ls, c, w, h, format = format)
 			filter_flood_into(ls, c, flood, working(p.color, f.srgb))
 			filter_image(c, a, Composite{.In, {}, moved}, flood)
 			layer_target_begin(ls, c, out)
@@ -378,14 +413,14 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 			filter_region_clip(ls, c, f, xform, out)
 		}
 		results[i] = out
+		for r in 0 ..= i {
+			if last[r] == i {
+				layer_release(ls, results[r])
+			}
+		}
 	}
 
 	final := results[len(results) - 1]
-	for r, i in results {
-		if i != len(results) - 1 {
-			layer_release(ls, r)
-		}
-	}
 	if image_id_valid(alpha) {
 		layer_release(ls, alpha)
 	}

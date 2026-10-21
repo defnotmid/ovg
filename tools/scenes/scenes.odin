@@ -83,6 +83,7 @@ ALL := [?]Scene {
 	{"layer_masks", scene_layer_masks},
 	{"layer_filters", scene_layer_filters},
 	{"filters_more", scene_filters_more},
+	{"filter_darks", scene_filter_darks},
 	{"turbulence", scene_turbulence},
 	{"layer_blend", scene_layer_blend},
 	{"layer_groups", scene_layer_groups},
