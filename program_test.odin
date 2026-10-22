@@ -25,6 +25,32 @@ test_program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: 
 	}
 }
 
+// Keeps the channel sizes the sampler carries in `user`.
+@(private = "file")
+test_program_sizes :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: Pixel_Format, sampler: Program_Sampler) {
+	(^[PROGRAM_MAX_CHANNELS][2]i32)(user)^ = sampler.sizes
+}
+
+// The sampler gives each bound channel's size in texels, 0 x 0 unbound.
+@(test)
+test_program_channel_sizes :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 4, 4)
+	sizes: [PROGRAM_MAX_CHANNELS][2]i32
+	prog, _ := create_program(&c, {num_samplers = 2, cpu = test_program_sizes, cpu_user = &sizes})
+	wide, _ := create_image_empty(&c, 3, 2, .RGBA8, {.Premultiplied})
+	tall, _ := create_image_empty(&c, 1, 5, .RGBA16F)
+	dst, _ := create_image_empty(&c, 2, 2, .RGBA8, {.Premultiplied})
+	run_program(&c, prog, dst, nil, {wide, {}, tall})
+	flush(&c)
+	testing.expect_value(t, sizes, [PROGRAM_MAX_CHANNELS][2]i32{{3, 2}, {0, 0}, {1, 5}, {0, 0}})
+}
+
 @(test)
 test_run_program_software :: proc(t: ^testing.T) {
 	b: Software_Backend

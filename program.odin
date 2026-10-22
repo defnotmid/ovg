@@ -31,6 +31,9 @@ Program_Sample_Proc :: #type proc(data: rawptr, channel: int, uv: [2]f32, lod: f
 Program_Sampler :: struct {
 	data:   rawptr,
 	sample: Program_Sample_Proc,
+	// Each channel's size in texels (0 x 0 when unbound): GLSL's
+	// textureSize, and what an implicit mip level is reckoned from.
+	sizes:  [PROGRAM_MAX_CHANNELS][2]i32,
 }
 
 // The CPU program: shades a `width x height` image into `out` (`format`

@@ -536,7 +536,9 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
   (`out` holds `format` texels: RGBA8, or RGBA16F as `[4]f16`).
   `sampler.sample(data, channel, uv, lod)` gives GL `texture()` semantics
   over the channel images: bilinear or nearest, clamp or repeat, texels as
-  stored. The callback may split the image across threads.
+  stored (images have one level, so `lod` changes nothing); `sampler.sizes`
+  gives each channel's size in texels (GLSL `textureSize`), 0 x 0 when
+  unbound. The callback may split the image across threads.
 - Backends without programs leave `create_program` nil, and creating one
   then returns `.Unsupported_Operation`.
 - `run_external(c, fn, user)` runs host work at its place in the frame:

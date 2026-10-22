@@ -1182,9 +1182,11 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 		return
 	}
 	channels: Sw_Channels
+	sampler := Program_Sampler{&channels, sw_program_sample, {}}
 	for id, i in cmd.channels {
 		if t, ok := lookup_texture(images, id); ok {
 			channels[i] = t
+			sampler.sizes[i] = {i32(t.width), i32(t.height)}
 		}
 	}
 	w, h := int(entry.info.width), int(entry.info.height)
@@ -1195,7 +1197,7 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 		for &px in out {
 			px = {0, 0, 0, alpha}
 		}
-		p.cpu(p.user, frame_bytes(frame, cmd.uniforms), w, h, entry.image.pixels[:w * h * 8], w * 8, format, {&channels, sw_program_sample})
+		p.cpu(p.user, frame_bytes(frame, cmd.uniforms), w, h, entry.image.pixels[:w * h * 8], w * 8, format, sampler)
 		if .Opaque in cmd.flags {
 			for &px in out {
 				px[3] = 1
@@ -1208,7 +1210,7 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	for i := 0; i < len(out); i += 4 {
 		out[i], out[i + 1], out[i + 2], out[i + 3] = 0, 0, 0, clear_to
 	}
-	p.cpu(p.user, frame_bytes(frame, cmd.uniforms), w, h, out, w * 4, format, {&channels, sw_program_sample})
+	p.cpu(p.user, frame_bytes(frame, cmd.uniforms), w, h, out, w * 4, format, sampler)
 	if .Opaque in cmd.flags {
 		for i := 3; i < len(out); i += 4 {
 			out[i] = 255
