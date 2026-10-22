@@ -395,7 +395,7 @@ image_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id) -> ^sdl.GPUTexture {
 }
 
 // The texture behind an image of a store: a canvas's or a player's
-// (`vg.Player.images`), e.g. in a `vg.run_external` callback.
+// (`vg.Player.images`), e.g. the one a `vg.run_external` callback gets.
 image_store_texture :: proc(images: ^vg.Image_Store, id: vg.Image_Id) -> ^sdl.GPUTexture {
 	entry := vg.image_store_get(images, id)
 	if entry == nil || entry.image.user == nil {

@@ -319,3 +319,103 @@ test_font_default_family :: proc(t: ^testing.T) {
 	f, ok = font_collection_find(&s.fonts, "", 400)
 	testing.expect(t, ok && f == bebas)
 }
+
+// A font collection allocates from its own allocator: faces, family names
+// and glyph shapes, whatever the context's is when faces are added, shapes
+// built or the collection destroyed.
+@(test)
+test_font_collection_uses_its_allocator :: proc(t: ^testing.T) {
+	own, other: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&own, context.allocator)
+	defer mem.tracking_allocator_destroy(&own)
+	mem.tracking_allocator_init(&other, context.allocator)
+	defer mem.tracking_allocator_destroy(&other)
+	{
+		fonts: Font_Collection
+		font_collection_init(&fonts, nil, mem.tracking_allocator(&own))
+		context.allocator = mem.tracking_allocator(&other)
+		testing.expect(t, font_collection_add(&fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+		f := &fonts.faces[0].font
+		testing.expect(t, font_glyph_shape(f, font_glyph_index(f, 'A')) != nil)
+		testing.expect(t, font_glyph_shape(&fonts.fallback.font, font_glyph_index(&fonts.fallback.font, 'A')) != nil)
+		font_collection_destroy(&fonts)
+	}
+	testing.expect_value(t, other.total_allocation_count, 0)
+	testing.expect_value(t, len(own.allocation_map), 0)
+}
+
+// Faces go where `before` puts them; a removed face frees its name and
+// font, and a default family naming it is cleared.
+@(test)
+test_font_collection_place_and_remove :: proc(t: ^testing.T) {
+	own: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&own, context.allocator)
+	defer mem.tracking_allocator_destroy(&own)
+	{
+		fonts: Font_Collection
+		font_collection_init(&fonts, nil, mem.tracking_allocator(&own))
+		mono := #load("demo/media/JetBrainsMono-Regular.ttf")
+		testing.expect_value(t, font_collection_add(&fonts, DEFAULT_FONT_DATA), 1)
+		testing.expect_value(t, font_collection_add(&fonts, mono, before = 0), 1)
+		testing.expect_value(t, len(fonts.faces), 2)
+		testing.expect_value(t, fonts.faces[0].family, "JetBrains Mono")
+		testing.expect_value(t, fonts.faces[1].family, "Bitstream Vera Sans")
+		fonts.default_family = fonts.faces[0].family
+		l: Text_Layout
+		text_layout_init(&l, mem.tracking_allocator(&own))
+		text_layout(&fonts, {{text = "office", style = {size = 20}}}, {}, &l)
+		font_collection_remove(&fonts, 0)
+		testing.expect_value(t, fonts.default_family, "")
+		testing.expect_value(t, len(fonts.faces), 1)
+		testing.expect_value(t, fonts.faces[0].family, "Bitstream Vera Sans")
+		text_layout(&fonts, {{text = "office", style = {size = 20}}}, {}, &l)
+		testing.expect(t, len(l.glyphs) > 0)
+		text_layout_destroy(&l)
+		font_collection_destroy(&fonts)
+	}
+	testing.expect_value(t, len(own.allocation_map), 0)
+}
+
+// Paths, flattened paths, layouts and morphs made with an init allocate
+// from its allocator, whatever the context's is.
+@(test)
+test_inits_use_their_allocator :: proc(t: ^testing.T) {
+	own, other: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&own, context.allocator)
+	defer mem.tracking_allocator_destroy(&own)
+	mem.tracking_allocator_init(&other, context.allocator)
+	defer mem.tracking_allocator_destroy(&other)
+	{
+		alloc := mem.tracking_allocator(&own)
+		fonts: Font_Collection
+		font_collection_init(&fonts, nil, alloc)
+		a, b, out: Path
+		path_init(&a, alloc)
+		path_init(&b, alloc)
+		path_init(&out, alloc)
+		flat: Flat_Path
+		flat_path_init(&flat, alloc)
+		l: Text_Layout
+		text_layout_init(&l, alloc)
+		m: Path_Morph
+		path_morph_init(&m, alloc)
+		context.allocator = mem.tracking_allocator(&other)
+		path_circle(&a, 0, 0, 10)
+		path_rect(&b, 0, 0, 10, 20)
+		path_rect(&b, 30, 0, 10, 20)
+		path_flatten(&a, &flat)
+		text_layout(&fonts, {{text = "Hi", style = {family = "Nope", size = 20}}}, {}, &l)
+		path_morph_prepare(&m, &a, &b)
+		path_morph_eval(&m, 0.5, &out)
+		testing.expect_value(t, other.total_allocation_count, 0)
+		testing.expect(t, len(l.missing) == 1 && len(out.verbs) > 0)
+		path_destroy(&a)
+		path_destroy(&b)
+		path_destroy(&out)
+		flat_path_destroy(&flat)
+		text_layout_destroy(&l)
+		path_morph_destroy(&m)
+		font_collection_destroy(&fonts)
+	}
+	testing.expect_value(t, len(own.allocation_map), 0)
+}

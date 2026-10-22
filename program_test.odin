@@ -93,7 +93,6 @@ test_program_unsupported :: proc(t: ^testing.T) {
 }
 
 // Fills the target with the colour `user` points at.
-@(private = "file")
 test_program_fill :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: Pixel_Format, sampler: Program_Sampler) {
 	col := (^[4]u8)(user)^
 	for y in 0 ..< height {
@@ -148,6 +147,7 @@ test_program_recording :: proc(t: ^testing.T) {
 
 @(private = "file")
 External_Probe :: struct {
+	// The store the callback got.
 	images: ^Image_Store,
 	image:  Image_Id,
 	// The image's first pixel when the callback ran.
@@ -158,9 +158,10 @@ External_Probe :: struct {
 
 // Records the image's first pixel, then paints the image blue.
 @(private = "file")
-test_external_probe :: proc(user: rawptr, gpu: rawptr) {
+test_external_probe :: proc(user: rawptr, gpu: rawptr, images: ^Image_Store) {
 	probe := (^External_Probe)(user)
-	pixels := image_store_get(probe.images, probe.image).image.pixels
+	probe.images = images
+	pixels := image_store_get(images, probe.image).image.pixels
 	probe.seen = (^[4]u8)(&pixels[0])^
 	probe.calls += 1
 	probe.gpu = gpu
@@ -192,12 +193,13 @@ test_run_external :: proc(t: ^testing.T) {
 	c: Canvas
 	canvas_init(&c, software_backend(&b))
 	defer canvas_destroy(&c)
-	live := External_Probe{images = &c.images, gpu = &b}
+	live := External_Probe{gpu = &b}
 	record(&c, &live, &red)
 	flush(&c)
 	testing.expect_value(t, live.calls, 1)
 	testing.expect_value(t, live.seen, red)
 	testing.expect_value(t, live.gpu, nil)
+	testing.expect_value(t, live.images, &c.images)
 	testing.expect_value(t, (^[4]u8)(&b.pixels[(2 * 4 + 1) * 4])^, blue)
 
 	p: Player
@@ -208,7 +210,7 @@ test_run_external :: proc(t: ^testing.T) {
 	defer canvas_destroy(&rc)
 	rec: Recorded_Frame
 	defer recorded_frame_destroy(&rec)
-	played := External_Probe{images = &p.images}
+	played: External_Probe
 	record(&rc, &played, &red)
 	canvas_take(&rc, &rec)
 	player_apply(&p, &rec)
@@ -217,6 +219,7 @@ test_run_external :: proc(t: ^testing.T) {
 		player_render(&p, &rec)
 		testing.expect_value(t, played.calls, i)
 		testing.expect_value(t, played.seen, red)
+		testing.expect_value(t, played.images, &p.images)
 		testing.expect_value(t, (^[4]u8)(&b.pixels[(2 * 4 + 1) * 4])^, blue)
 	}
 }

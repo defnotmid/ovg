@@ -173,7 +173,7 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 			continue
 		}
 		if e, ok := cmd.type.(Cmd_Run_External); ok {
-			e.fn(e.user, nil)
+			e.fn(e.user, nil, images)
 			continue
 		}
 		target, ok := sw_active_target(b, images)

@@ -131,8 +131,7 @@ colr_open :: proc(f: ^Font) -> ^Colr {
 	cl.fills.allocator = heap
 	cl.stops.allocator = heap
 	cl.ramp.allocator = heap
-	cl.path.verbs.allocator = heap
-	cl.path.coords.allocator = heap
+	path_init(&cl.path, heap)
 	return cl
 }
 

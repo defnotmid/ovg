@@ -216,6 +216,12 @@ Flat_Contour :: struct {
 	closed:       bool,
 }
 
+// A flattened path allocating from `allocator`.
+flat_path_init :: proc(f: ^Flat_Path, allocator := context.allocator) {
+	f^ = {}
+	f.points.allocator, f.contours.allocator = allocator, allocator
+}
+
 flat_path_destroy :: proc(f: ^Flat_Path) {
 	delete(f.points)
 	delete(f.contours)
@@ -223,8 +229,14 @@ flat_path_destroy :: proc(f: ^Flat_Path) {
 }
 
 // Flattens `p` into `out` (cleared first). Curves are split into segments
-// of about 1.5 units; contours of fewer than two points are dropped.
-path_flatten :: proc(p: ^Path, out: ^Flat_Path) {
+// of about `segment` units (at most 256 a curve); contours of fewer than two
+// points are dropped.
+path_flatten :: proc(p: ^Path, out: ^Flat_Path, segment: f32 = 1.5) {
+	path_flatten_verbs(p.verbs[:], p.coords[:], out, segment)
+}
+
+// `path_flatten` of a path held as its verbs and coordinates.
+path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segment: f32 = 1.5) {
 	clear(&out.points)
 	clear(&out.contours)
 	open := false
@@ -236,28 +248,30 @@ path_flatten :: proc(p: ^Path, out: ^Flat_Path) {
 			pop(&out.contours)
 		}
 	}
-	it := path_iter(p)
-	for verb, coords in path_iter_next(&it) {
+	at := 0
+	for verb in verbs {
+		c := coords[at:][:verb_num_coords(verb)]
+		at += len(c)
 		switch verb {
 		case .Move_To:
 			if open {
 				end(out)
 			}
 			append(&out.contours, Flat_Contour{first = u32(len(out.points))})
-			append(&out.points, coords[0])
+			append(&out.points, c[0])
 			open = true
 		case .Line_To:
 			if open {
-				append(&out.points, coords[0])
+				append(&out.points, c[0])
 			}
 		case .Bezier_To:
 			if !open {
 				continue
 			}
 			p0 := out.points[len(out.points) - 1]
-			c1, c2, p3 := coords[0], coords[1], coords[2]
+			c1, c2, p3 := c[0], c[1], c[2]
 			approx := vec_len(c1 - p0) + vec_len(c2 - c1) + vec_len(p3 - c2)
-			n := clamp(int(approx / 1.5), 2, 256)
+			n := clamp(int(approx / segment), 2, 256)
 			for k in 1 ..= n {
 				t := f32(k) / f32(n)
 				u := 1 - t

@@ -155,9 +155,9 @@ shape_scratch_init :: proc(s: ^Shape_Scratch, allocator := context.allocator) {
 	s^ = {}
 	s.builder.curves.allocator = allocator
 	s.segs.allocator = allocator
-	s.dashed.verbs.allocator, s.dashed.coords.allocator = allocator, allocator
-	s.dots.verbs.allocator, s.dots.coords.allocator = allocator, allocator
-	s.flat.points.allocator, s.flat.contours.allocator = allocator, allocator
+	path_init(&s.dashed, allocator)
+	path_init(&s.dots, allocator)
+	flat_path_init(&s.flat, allocator)
 }
 
 shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
@@ -207,14 +207,21 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 }
 
 // Builds a glyph's shape (font units, y down, the pen at the origin);
-// false for glyphs without an outline.
-shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator) -> (Shape, bool) {
-	b: Shape_Builder
-	b.curves.allocator = context.temp_allocator
-	if !shape_add_glyph(&b, f, g, o) {
+// false for glyphs without an outline. `builder` is kept by a caller that
+// builds many; without one a build takes it from the context's temp
+// allocator.
+shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator, builder: ^Shape_Builder = nil) -> (Shape, bool) {
+	temp: Shape_Builder
+	b := builder
+	if b == nil {
+		temp.curves.allocator = context.temp_allocator
+		b = &temp
+	}
+	shape_builder_reset(b)
+	if !shape_add_glyph(b, f, g, o) {
 		return {}, false
 	}
-	return shape_build(&b, allocator)
+	return shape_build(b, allocator)
 }
 
 // ---- coverage ----------------------------------------------------------------------

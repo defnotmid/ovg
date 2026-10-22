@@ -46,8 +46,9 @@ Font_Shapes :: struct {
 	lock:      sync.Mutex,
 	// nil for glyphs without an outline.
 	glyphs:    map[Glyph_Index]^Shape,
-	// Where a glyph's outline is read (under the lock).
+	// Where a glyph's outline is read and its shape built (under the lock).
 	outline:   ft.Outline,
+	builder:   Shape_Builder,
 	allocator: mem.Allocator,
 }
 
@@ -73,7 +74,7 @@ Font_V_Metrics :: struct {
 
 // Reads face `index` of a font or collection; .Font_Parse when it isn't
 // one or lacks what drawing text needs (ft.load says which).
-font_load :: proc(data: []u8, index: i32 = 0) -> (font: Font, err: Error) {
+font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator) -> (font: Font, err: Error) {
 	face, face_err := ft.load(data, int(index))
 	if face_err != nil {
 		return {}, .Font_Parse
@@ -81,7 +82,7 @@ font_load :: proc(data: []u8, index: i32 = 0) -> (font: Font, err: Error) {
 	font.face = face
 	font.data = data
 	font.index = index
-	font.allocator = context.allocator
+	font.allocator = allocator
 	font.colr = colr_open(&font)
 	if font.colr == nil {
 		font.bitmap_colour = face.tables[.sbix].at != 0 || face.tables[.CBDT].at != 0
@@ -103,6 +104,7 @@ font_destroy :: proc(f: ^Font) {
 		}
 		delete(fs.glyphs)
 		ft.outline_destroy(&fs.outline)
+		shape_builder_destroy(&fs.builder)
 		free(fs, fs.allocator)
 		f.shapes = nil
 	}
@@ -120,7 +122,7 @@ font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 		return s
 	}
 	context.allocator = fs.allocator
-	shape, ok := shape_from_glyph(f, g, &fs.outline)
+	shape, ok := shape_from_glyph(f, g, &fs.outline, builder = &fs.builder)
 	s: ^Shape
 	if ok {
 		s = new_clone(shape)
@@ -145,6 +147,7 @@ font_shapes :: proc(f: ^Font) -> ^Font_Shapes {
 		glyf   = make(#soa[dynamic]ft.Glyf_Point, allocator),
 		ends   = make([dynamic]int, allocator),
 	}
+	fresh.builder.curves.allocator = allocator
 	fresh.allocator = allocator
 	if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); !won {
 		delete(fresh.glyphs)

@@ -40,6 +40,12 @@ Path :: struct {
 	dist_tol: f32,
 }
 
+// A path allocating from `allocator`.
+path_init :: proc(p: ^Path, allocator := context.allocator) {
+	p^ = {}
+	p.verbs.allocator, p.coords.allocator = allocator, allocator
+}
+
 path_destroy :: proc(p: ^Path) {
 	delete(p.verbs)
 	delete(p.coords)

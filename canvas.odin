@@ -53,10 +53,13 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		shapes          = make([dynamic]Shape_Instance, allocator),
 		shape_words     = make([dynamic]u32, allocator),
 		bytes           = make([dynamic]u8, allocator),
+		filters         = make([dynamic]Image_Filter, allocator),
+		runs            = make([dynamic]Program_Run, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
 		device_px_ratio = 1,
 	}
+	shape_scratch_init(&c.scratch, allocator)
 	image_store_init(&c.images, backend, allocator)
 	gradient_store_init(&c.gradients, allocator)
 	slot_map_init(&c.programs, allocator)
@@ -722,7 +725,13 @@ recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
 canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	assert(c.images.recording)
 	out.width, out.height, out.dpi = c.width, c.height, c.device_px_ratio
+	// A frame's arrays not yet made take the canvas's allocator, so the
+	// canvas never draws into memory of whatever allocator its first frame
+	// happened to run under.
 	swap_clear :: proc(a, b: ^[dynamic]$T) {
+		if b.allocator.procedure == nil {
+			b.allocator = a.allocator
+		}
 		a^, b^ = b^, a^
 		clear(a)
 	}

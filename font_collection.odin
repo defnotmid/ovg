@@ -1,5 +1,7 @@
 package ovg
 
+import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 
@@ -17,6 +19,8 @@ Font_Face :: struct {
 }
 
 Font_Collection :: struct {
+	// Its allocator is the collection's: faces, their family names and their
+	// fonts' shapes (collection_allocator).
 	faces:    [dynamic]Font_Face,
 	// Used when nothing matches, and as the last fallback for glyphs.
 	fallback:   Font_Face,
@@ -36,24 +40,25 @@ Font_Collection :: struct {
 font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator) {
 	c.faces = make([dynamic]Font_Face, allocator)
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
-	font, _ := font_load(data)
-	family, weight, italic := font_identity(data, &font)
+	font, _ := font_load(data, 0, allocator)
+	family, weight, italic := font_identity(data, &font, allocator)
 	c.fallback = {family, weight, italic, font}
 }
 
 font_collection_destroy :: proc(c: ^Font_Collection) {
+	allocator := collection_allocator(c)
 	for s in c.shapers {
 		shaper_destroy(s)
 	}
 	delete(c.shapers)
 	for &f in c.faces {
-		delete(f.family)
+		delete(f.family, allocator)
 		font_destroy(&f.font)
 	}
 	delete(c.faces)
-	delete(c.fallback.family)
+	delete(c.fallback.family, allocator)
 	font_destroy(&c.fallback.font)
-	delete(c.emoji.family)
+	delete(c.emoji.family, allocator)
 	font_destroy(&c.emoji.font)
 	c^ = {}
 }
@@ -69,39 +74,67 @@ EMOJI_FONT_DATA :: #load("assets/Noto-COLRv1.ttf")
 // emoji presentation sequences (U+FE0F). The data is borrowed. Not while
 // layouts run on the collection.
 font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
-	font, err := font_load(data)
+	allocator := collection_allocator(c)
+	font, err := font_load(data, 0, allocator)
 	if err != nil {
 		return false
 	}
-	// Pooled shapers hold the old face's kb font (configs, keyed by the
-	// data address, which new data may reuse): they go with it.
+	drop_shapers(c)
+	delete(c.emoji.family, allocator)
+	font_destroy(&c.emoji.font)
+	family, weight, italic := font_identity(data, &font, allocator)
+	c.emoji = {family, weight, italic, font}
+	return true
+}
+
+// Adds every face of a TTF/OTF/TTC, in order before face `before` (at the
+// end when past the last). Family, weight and style come from the font's
+// tables. Returns the number of faces added. Not while layouts run on the
+// collection (faces move).
+font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int)) -> int {
+	allocator := collection_allocator(c)
+	// A collection never initialized takes its allocator here, not from
+	// the first append.
+	c.faces.allocator = allocator
+	added := 0
+	for index in 0 ..< 64 {
+		font, err := font_load(data, i32(index), allocator)
+		if err != nil {
+			break
+		}
+		family, weight, italic := font_identity(data, &font, allocator)
+		append(&c.faces, Font_Face{family, weight, italic, font})
+		added += 1
+	}
+	if at := len(c.faces) - added; before < at {
+		slice.rotate_right(c.faces[max(before, 0):], added)
+	}
+	return added
+}
+
+// Removes and frees face `i`; a `default_family` that is its name becomes
+// empty. Not while layouts run on the collection.
+font_collection_remove :: proc(c: ^Font_Collection, i: int) {
+	drop_shapers(c)
+	face := &c.faces[i]
+	if raw_data(c.default_family) == raw_data(face.family) {
+		c.default_family = ""
+	}
+	delete(face.family, collection_allocator(c))
+	font_destroy(&face.font)
+	ordered_remove(&c.faces, i)
+}
+
+// Pooled shapers hold faces' kb fonts (configs, keyed by the data address,
+// which new data may reuse): a face going takes them with it.
+@(private = "file")
+drop_shapers :: proc(c: ^Font_Collection) {
 	sync.mutex_lock(&c.shape_lock)
 	for s in c.shapers {
 		shaper_destroy(s)
 	}
 	clear(&c.shapers)
 	sync.mutex_unlock(&c.shape_lock)
-	delete(c.emoji.family)
-	font_destroy(&c.emoji.font)
-	family, weight, italic := font_identity(data, &font)
-	c.emoji = {family, weight, italic, font}
-	return true
-}
-
-// Adds every face of a TTF/OTF/TTC. Family, weight and style come from the
-// font's tables. Returns the number of faces added.
-font_collection_add :: proc(c: ^Font_Collection, data: []u8) -> int {
-	added := 0
-	for index in 0 ..< 64 {
-		font, err := font_load(data, i32(index))
-		if err != nil {
-			break
-		}
-		family, weight, italic := font_identity(data, &font)
-		append(&c.faces, Font_Face{family, weight, italic, font})
-		added += 1
-	}
-	return added
 }
 
 // The best face for `family` (case-insensitive): matching style first, then
@@ -182,12 +215,12 @@ font_collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (^Font, Gly
 
 // Family name (typographic family, else family), OS/2 weight class and
 // italic bit of the face `font` was loaded from.
-font_identity :: proc(data: []u8, font: ^Font) -> (family: string, weight: int, italic: bool) {
+font_identity :: proc(data: []u8, font: ^Font, allocator := context.allocator) -> (family: string, weight: int, italic: bool) {
 	weight = 400
 	if name := font.face.tables[.name].at; name != 0 {
-		family = read_name(data, name, 16)
+		family = read_name(data, name, 16, allocator)
 		if family == "" {
-			family = read_name(data, name, 1)
+			family = read_name(data, name, 1, allocator)
 		}
 	}
 	if os2 := font.face.tables[.OS2]; os2.size >= 64 {
@@ -195,7 +228,7 @@ font_identity :: proc(data: []u8, font: ^Font) -> (family: string, weight: int, 
 		italic = ft.read_u16(data, os2.at + 62) & 1 != 0
 	}
 	if family == "" {
-		family = strings.clone("Unknown")
+		family = strings.clone("Unknown", allocator)
 	}
 	return
 }
@@ -244,7 +277,7 @@ font_layout_tables_ok :: proc(f: ^Font) -> bool {
 
 // A `name` table string, preferring Windows Unicode English, as UTF-8.
 @(private = "file")
-read_name :: proc(d: []u8, table: int, name_id: u16) -> string {
+read_name :: proc(d: []u8, table: int, name_id: u16, allocator: mem.Allocator) -> string {
 	if table + 6 > len(d) {
 		return ""
 	}
@@ -267,7 +300,7 @@ read_name :: proc(d: []u8, table: int, name_id: u16) -> string {
 		}
 		raw := d[at:at + length]
 		if platform == 3 && (encoding == 1 || encoding == 10) && (language == 0x409 || language & 0xff == 0x09) {
-			b := strings.builder_make()
+			b := strings.builder_make(allocator)
 			for j := 0; j + 1 < len(raw); j += 2 {
 				strings.write_rune(&b, rune(u16(raw[j]) << 8 | u16(raw[j + 1])))
 			}
@@ -277,5 +310,5 @@ read_name :: proc(d: []u8, table: int, name_id: u16) -> string {
 			mac = string(raw)
 		}
 	}
-	return strings.clone(mac) if mac != "" else ""
+	return strings.clone(mac, allocator) if mac != "" else ""
 }

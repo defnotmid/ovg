@@ -71,6 +71,19 @@ Morph_Candidate :: struct {
 	cost: f32,
 }
 
+// A morph allocating from `allocator`.
+path_morph_init :: proc(m: ^Path_Morph, allocator := context.allocator) {
+	m^ = {}
+	m.from.allocator, m.to.allocator, m.contours.allocator = allocator, allocator, allocator
+	for &f in m.flat {
+		flat_path_init(&f, allocator)
+	}
+	for &r in m.rings {
+		r.allocator = allocator
+	}
+	m.cands.allocator, m.params.allocator, m.samples.allocator = allocator, allocator, allocator
+}
+
 path_morph_destroy :: proc(m: ^Path_Morph) {
 	delete(m.from)
 	delete(m.to)

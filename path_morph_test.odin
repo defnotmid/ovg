@@ -411,3 +411,21 @@ test_svg_element_path_text :: proc(t: ^testing.T) {
 		testing.expect(t, q.x >= 110 && q.x < 200 && q.y > 20 && q.y <= 60.5)
 	}
 }
+
+// `segment` sets how finely curves split: a 30-unit cubic is 20 segments at
+// the default 1.5 units, 10 at 3, and at least 2 however long they may be.
+@(test)
+test_path_flatten_segment :: proc(t: ^testing.T) {
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 0, 0)
+	path_bezier_to(&p, 10, 0, 20, 0, 30, 0)
+	f: Flat_Path
+	defer flat_path_destroy(&f)
+	path_flatten(&p, &f)
+	testing.expect_value(t, len(f.points), 21)
+	path_flatten(&p, &f, 3)
+	testing.expect_value(t, len(f.points), 11)
+	path_flatten(&p, &f, 100)
+	testing.expect_value(t, len(f.points), 3)
+}

@@ -761,7 +761,7 @@ record_rows :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer, images: ^vg.Ima
 		case .External:
 			flush(&r)
 			end_pass(&r)
-			row.external.fn(row.external.user, cmd)
+			row.external.fn(row.external.user, cmd, images)
 		}
 	}
 	flush(&r)

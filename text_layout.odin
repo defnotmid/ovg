@@ -82,6 +82,13 @@ Text_Layout :: struct {
 	min, max: Vec2,
 }
 
+// A layout allocating from `allocator`.
+text_layout_init :: proc(l: ^Text_Layout, allocator := context.allocator) {
+	l^ = {}
+	l.glyphs.allocator, l.clusters.allocator, l.runs.allocator = allocator, allocator, allocator
+	l.lines.allocator, l.missing.allocator = allocator, allocator
+}
+
 text_layout_destroy :: proc(l: ^Text_Layout) {
 	delete(l.glyphs)
 	delete(l.clusters)

@@ -540,13 +540,15 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
 - Backends without programs leave `create_program` nil, and creating one
   then returns `.Unsupported_Operation`.
 - `run_external(c, fn, user)` runs host work at its place in the frame:
-  `fn(user, gpu)` sees what earlier commands made, and later draws see its
-  output (a 3D render into a canvas image that samples this frame's video
-  frame, say). On SDL_GPU `gpu` is the frame's `^sdl.GPUCommandBuffer`,
-  outside any pass; `fn` records into it (closing the passes it opens)
-  without submitting it or creating textures, and
-  `vgsdl.image_store_texture(&c.images or &player.images, id)` gives an
-  image's texture. The software backend calls `fn` with `gpu = nil`. ovg
+  `fn(user, gpu, images)` sees what earlier commands made, and later draws
+  see its output (a 3D render into a canvas image that samples this frame's
+  video frame, say). `images` is the store the frame's images live in (the
+  canvas's, or the player's when a recording plays). On SDL_GPU `gpu` is the
+  frame's `^sdl.GPUCommandBuffer`, outside any pass; `fn` records into it
+  (closing the passes it opens) without submitting it or creating
+  textures, and `vgsdl.image_store_texture(images, id)` gives an image's
+  texture. The software backend calls `fn` with `gpu = nil`; it reads and
+  writes an image's pixels through `image_store_get(images, id)`. ovg
   doesn't track the images `fn` touches (layers neither bound nor redirect
   it). On a recording canvas `user` must outlive the frame's playback;
   every `player_render` calls `fn`.
@@ -666,8 +668,9 @@ every part follows:
   charstrings; bounds-checked; outlines placed by hmtx's side bearing as
   HarfBuzz places them, and checked glyph by glyph against fontTools). `fill_glyph_outlines` fills each glyph as the
   font's shape (`font_glyph_shape`: built on first use with the font's
-  allocator, the context's at `font_load`, whatever the drawing code runs
-  under; owned by the font, freed by `font_destroy`), all sharing one paint row: a run costs no
+  allocator, `font_load`'s (a collection's fonts take the collection's),
+  whatever the drawing code runs under; owned by the font, freed by
+  `font_destroy`), all sharing one paint row: a run costs no
   outline work, and draws in one call. Opaque runs draw
   each glyph as it is; a run with global alpha, a translucent paint or
   another blend fills as one, a group of its glyphs in white tinted by the

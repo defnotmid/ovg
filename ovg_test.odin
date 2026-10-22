@@ -972,6 +972,46 @@ test_sw_zero_length_mixed_caps :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, 27, 32), [4]u8{255, 255, 255, 255}) // behind: butt
 }
 
+// A canvas allocates from its own allocator, whatever the context's is when
+// it first fills, strokes, filters, runs a program or hands a frame over.
+@(test)
+test_canvas_uses_its_allocator :: proc(t: ^testing.T) {
+	own, other: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&own, context.allocator)
+	defer mem.tracking_allocator_destroy(&own)
+	mem.tracking_allocator_init(&other, context.allocator)
+	defer mem.tracking_allocator_destroy(&other)
+	{
+		c: Canvas
+		canvas_init_recording(&c, mem.tracking_allocator(&own))
+		rec: Recorded_Frame
+		red := [4]u8{255, 0, 0, 255}
+		prog, _ := create_program(&c, {cpu = test_program_fill, cpu_user = &red})
+		src, _ := create_image_empty(&c, 4, 4, .RGBA8, {.Premultiplied})
+		dst, _ := create_image_empty(&c, 4, 4, .RGBA8, {.Premultiplied})
+		p: Path
+		path_circle(&p, 16, 16, 8)
+		stroke := paint_color(BLACK)
+		stroke.stroke.line_width = 2
+		dash := [?]f32{3, 1}
+		stroke.stroke.dash = dash[:]
+		context.allocator = mem.tracking_allocator(&other)
+		for _ in 0 ..< 2 {
+			fill_path(&c, &p, paint_color(BLACK))
+			stroke_path(&c, &p, stroke)
+			filter_image(&c, dst, Gaussian_Blur{sigma = 1}, src)
+			run_program(&c, prog, dst, nil)
+			canvas_take(&c, &rec)
+		}
+		testing.expect_value(t, other.total_allocation_count, 0)
+		context.allocator = mem.tracking_allocator(&own)
+		path_destroy(&p)
+		recorded_frame_destroy(&rec)
+		canvas_destroy(&c)
+	}
+	testing.expect_value(t, len(own.allocation_map), 0)
+}
+
 // A recording canvas renders nothing to read back.
 @(test)
 test_recording_screenshot :: proc(t: ^testing.T) {
