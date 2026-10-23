@@ -197,6 +197,11 @@ font_glyph_kern :: proc(f: ^Font, a, b: Glyph_Index) -> i32 {
 // Appends the glyph outline to `p`, scaled to pixels with its origin at
 // (x, y) and y pointing down.
 font_glyph_path :: proc(f: ^Font, g: Glyph_Index, x, y, scale: f32, p: ^Path) -> bool {
+	return font_glyph_path_transformed(f, g, {scale, 0, 0, -scale, x, y}, p)
+}
+
+// Appends the glyph outline to `p`, its font units (y up) mapped by `m`.
+font_glyph_path_transformed :: proc(f: ^Font, g: Glyph_Index, m: Transform2D, p: ^Path) -> bool {
 	fs := font_shapes(f)
 	sync.mutex_lock(&fs.lock)
 	defer sync.mutex_unlock(&fs.lock)
@@ -204,9 +209,9 @@ font_glyph_path :: proc(f: ^Font, g: Glyph_Index, x, y, scale: f32, p: ^Path) ->
 	if !ft.glyph_outline(&f.face, ft.Glyph(g), o) {
 		return false
 	}
-	at :: proc(o: ^ft.Outline, i: int, x, y, scale: f32) -> (f32, f32) {
-		q := o.points[i]
-		return x + q.x * scale, y - q.y * scale
+	at :: proc(o: ^ft.Outline, i: int, m: Transform2D) -> (f32, f32) {
+		q := transform_point(m, o.points[i].x, o.points[i].y)
+		return q.x, q.y
 	}
 	i := 0
 	for v, k in o.verbs {
@@ -215,20 +220,20 @@ font_glyph_path :: proc(f: ^Font, g: Glyph_Index, x, y, scale: f32, p: ^Path) ->
 			if k > 0 {
 				path_close(p)
 			}
-			path_move_to(p, at(o, i, x, y, scale))
+			path_move_to(p, at(o, i, m))
 			i += 1
 		case .Line:
-			path_line_to(p, at(o, i, x, y, scale))
+			path_line_to(p, at(o, i, m))
 			i += 1
 		case .Quad:
-			cx, cy := at(o, i, x, y, scale)
-			px, py := at(o, i + 1, x, y, scale)
+			cx, cy := at(o, i, m)
+			px, py := at(o, i + 1, m)
 			path_quad_to(p, cx, cy, px, py)
 			i += 2
 		case .Cubic:
-			c1x, c1y := at(o, i, x, y, scale)
-			c2x, c2y := at(o, i + 1, x, y, scale)
-			px, py := at(o, i + 2, x, y, scale)
+			c1x, c1y := at(o, i, m)
+			c2x, c2y := at(o, i + 1, m)
+			px, py := at(o, i + 2, m)
 			path_bezier_to(p, c1x, c1y, c2x, c2y, px, py)
 			i += 3
 		}

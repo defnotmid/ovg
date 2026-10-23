@@ -276,7 +276,7 @@ font_layout_tables_ok :: proc(f: ^Font) -> bool {
 }
 
 // A `name` table string, preferring Windows Unicode English, as UTF-8.
-@(private = "file")
+@(private)
 read_name :: proc(d: []u8, table: int, name_id: u16, allocator: mem.Allocator) -> string {
 	if table + 6 > len(d) {
 		return ""
@@ -302,7 +302,15 @@ read_name :: proc(d: []u8, table: int, name_id: u16, allocator: mem.Allocator) -
 		if platform == 3 && (encoding == 1 || encoding == 10) && (language == 0x409 || language & 0xff == 0x09) {
 			b := strings.builder_make(allocator)
 			for j := 0; j + 1 < len(raw); j += 2 {
-				strings.write_rune(&b, rune(u16(raw[j]) << 8 | u16(raw[j + 1])))
+				r := rune(u16(raw[j]) << 8 | u16(raw[j + 1]))
+				// A surrogate pair is one code point.
+				if r >= 0xd800 && r < 0xdc00 && j + 3 < len(raw) {
+					if lo := rune(u16(raw[j + 2]) << 8 | u16(raw[j + 3])); lo >= 0xdc00 && lo < 0xe000 {
+						r = 0x10000 + (r - 0xd800) << 10 + (lo - 0xdc00)
+						j += 2
+					}
+				}
+				strings.write_rune(&b, r)
 			}
 			return strings.to_string(b)
 		}

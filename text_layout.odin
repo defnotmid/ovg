@@ -38,6 +38,17 @@ Text_Style :: struct {
 	letter_spacing: f32,
 	// The caller's paint for these glyphs, carried into the runs.
 	paint:          u32,
+	// OpenType features turned on or off over the shaper's defaults, the
+	// first of a tag winning (CSS font-feature-settings). Letter spacing
+	// turns liga, clig and dlig off unless these set them.
+	features:       []Font_Feature,
+}
+
+// A feature's four-character tag ("smcp", "ss01"; shorter tags are padded
+// with spaces) and value: 0 off, 1 on, n > 1 the nth alternate (salt, cv01).
+Font_Feature :: struct {
+	tag:   string,
+	value: u32,
 }
 
 // Text in one style; "\n" starts a new line. `dx`/`dy` move the pen before
@@ -80,13 +91,16 @@ Text_Layout :: struct {
 	missing:  [dynamic]string,
 	// Extent of the laid-out text (ascent to descent of each line).
 	min, max: Vec2,
+	// Per glyph, once placed on a path (text_layout_on_path): its direction
+	// (cos, sin), {0, 0} when off the path. Empty for straight text.
+	turns:    [dynamic]Vec2,
 }
 
 // A layout allocating from `allocator`.
 text_layout_init :: proc(l: ^Text_Layout, allocator := context.allocator) {
 	l^ = {}
 	l.glyphs.allocator, l.clusters.allocator, l.runs.allocator = allocator, allocator, allocator
-	l.lines.allocator, l.missing.allocator = allocator, allocator
+	l.lines.allocator, l.missing.allocator, l.turns.allocator = allocator, allocator, allocator
 }
 
 text_layout_destroy :: proc(l: ^Text_Layout) {
@@ -95,6 +109,7 @@ text_layout_destroy :: proc(l: ^Text_Layout) {
 	delete(l.runs)
 	delete(l.lines)
 	delete(l.missing)
+	delete(l.turns)
 	l^ = {}
 }
 
@@ -105,6 +120,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	clear(&l.runs)
 	clear(&l.lines)
 	clear(&l.missing)
+	clear(&l.turns)
 	l.min, l.max = {}, {}
 	if len(pieces) == 0 {
 		return
@@ -115,6 +131,9 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	clear(&s.piece_start)
 	clear(&s.piece_font)
 	clear(&s.piece_size)
+	clear(&s.piece_features)
+	clear(&s.piece_config)
+	clear(&s.overrides)
 	clear(&s.runes)
 	clear(&s.piece)
 	clear(&s.font)
@@ -126,6 +145,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		append(&s.piece_start, i32(len(s.runes)))
 		append(&s.piece_font, font)
 		append(&s.piece_size, size)
+		shaper_add_piece_features(s, piece.style)
 		for r in piece.text {
 			f := font
 			if r != '\n' && r != ' ' && r != '\t' && font_glyph_index_drawable(font, r) == 0 {
@@ -250,11 +270,15 @@ text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 // layout puts them (positions, alignment, baseline, letter spacing and
 // fallback faces as laid out). Fill them with the non-zero rule. A colour
 // glyph (COLR emoji) adds its base glyph's plain outline, which is often
-// empty: emoji mostly add nothing.
+// empty: emoji mostly add nothing. Glyphs placed on a path turn with it.
 text_layout_path :: proc(l: ^Text_Layout, out: ^Path) {
 	for run in l.runs {
-		for g in l.glyphs[run.first:][:run.count] {
-			font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, out)
+		for g, k in l.glyphs[run.first:][:run.count] {
+			if len(l.turns) == 0 {
+				font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, out)
+			} else if turn := l.turns[run.first + k] * run.em; turn != {} {
+				font_glyph_path_transformed(run.font, g.glyph, {turn.x, turn.y, turn.y, -turn.x, g.x, g.y}, out)
+			}
 		}
 	}
 }

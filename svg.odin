@@ -135,13 +135,25 @@ Svg_Text :: struct {
 // Text starting at an absolute position (the text element, or a tspan
 // with x or y), laid out as one line.
 Svg_Text_Chunk :: struct {
-	x, y:     f32,
+	x, y:       f32,
 	// A missing coordinate continues where the previous chunk ended.
-	has_x:    bool,
-	has_y:    bool,
-	anchor:   Text_Align,
-	baseline: Text_Baseline,
-	pieces:   Range,
+	has_x:      bool,
+	has_y:      bool,
+	anchor:     Text_Align,
+	baseline:   Text_Baseline,
+	pieces:     Range,
+	// Into `Svg_Document.text_paths` when the chunk runs along a path (x is
+	// then a distance along it), else -1; `path_start`: the first chunk of
+	// its textPath, starting at the startOffset.
+	path:       i32,
+	path_start: bool,
+}
+
+// A textPath's path, in the text's user space (into `verbs` and `coords`).
+Svg_Text_Path :: struct {
+	verbs, coords: Range,
+	start:         f32,
+	side:          Text_Path_Side,
 }
 
 Svg_Text_Piece :: struct {
@@ -267,6 +279,7 @@ Svg_Document :: struct {
 	shapes:        [dynamic]Svg_Shape,
 	texts:         [dynamic]Svg_Text,
 	chunks:        [dynamic]Svg_Text_Chunk,
+	text_paths:    [dynamic]Svg_Text_Path,
 	pieces:        [dynamic]Svg_Text_Piece,
 	families:      [dynamic]string,
 	images:        [dynamic]Svg_Image,
@@ -335,6 +348,7 @@ svg_destroy :: proc(doc: ^Svg_Document) {
 	delete(doc.shapes)
 	delete(doc.texts)
 	delete(doc.chunks)
+	delete(doc.text_paths)
 	delete(doc.pieces)
 	delete(doc.families)
 	delete(doc.images)
@@ -2330,6 +2344,10 @@ Svg_Text_State :: struct {
 	chars:      int,
 	rot:        f32,
 	lists:      [dynamic]Svg_Text_Lists,
+	// The textPath the text is in (-1 none), and whether the next
+	// character starts a chunk (entering or leaving one).
+	path:       i32,
+	path_break: bool,
 }
 
 @(private)
@@ -2349,6 +2367,7 @@ svg_convert_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32
 	ts := Svg_Text_State {
 		text       = text,
 		chunk      = -1,
+		path       = -1,
 		last_space = true,
 		baseline   = st.baseline,
 		lists      = make([dynamic]Svg_Text_Lists, p.tmp),
@@ -2456,9 +2475,6 @@ svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Te
 			tag := svg_tag(ce.ident)
 			switch tag {
 			case "tspan", "a", "textPath":
-				if tag == "textPath" {
-					svg_warn(p, "textPath is not supported (drawn as a tspan)")
-				}
 				if !svg_conditions_pass(ce) {
 					continue
 				}
@@ -2467,14 +2483,84 @@ svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Te
 					// Its characters still take their positions.
 					continue
 				}
-				svg_text_push_lists(p, ce, &cst, ts)
+				outer := ts.path
+				if tag == "textPath" {
+					// Only a text's own child, and not drawn without a path.
+					if outer >= 0 {
+						continue
+					}
+					ts.path = svg_text_path(p, ce, &cst)
+					if ts.path < 0 {
+						continue
+					}
+					ts.path_break = true
+					// It takes no positions of its own.
+					append(&ts.lists, Svg_Text_Lists{start = ts.chars})
+				} else {
+					svg_text_push_lists(p, ce, &cst, ts)
+				}
 				svg_collect_text(p, c, &cst, ts)
 				pop(&ts.lists)
+				if tag == "textPath" {
+					ts.path, ts.path_break = outer, true
+				}
 			case "tref":
 				svg_warn(p, "tref is not supported")
 			}
 		}
 	}
+}
+
+// The path a textPath runs along (its href, or SVG 2's `path`) in the
+// text's user space, added to `text_paths`; -1 when it names none.
+@(private)
+svg_text_path :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed) -> i32 {
+	doc := p.doc
+	path := &p.path
+	path_reset(path)
+	// The referenced path's transform maps it into the text's space.
+	t := TRANSFORM_IDENTITY
+	if data, ok := svg_attr(e, "path"); ok {
+		path_svg(path, data)
+	} else {
+		href, _ := svg_href(e)
+		el, found := svg_ref(p, href)
+		if !found || svg_tag(p.x.elements[el].ident) != "path" {
+			return -1
+		}
+		pe := &p.x.elements[el]
+		d, _ := svg_attr(pe, "d")
+		path_svg(path, d)
+		t = svg_element_transform(p, pe, st)
+	}
+	if len(path.verbs) == 0 {
+		return -1
+	}
+	tp := Svg_Text_Path {
+		verbs  = {u32(len(doc.verbs)), u32(len(path.verbs))},
+		coords = {u32(len(doc.coords)), u32(len(path.coords))},
+	}
+	append(&doc.verbs, ..path.verbs[:])
+	for q in path.coords {
+		append(&doc.coords, transform_point(t, q.x, q.y))
+	}
+	if side, ok := svg_attr(e, "side"); ok && strings.trim_space(side) == "right" {
+		tp.side = .Right
+	}
+	if v, ok := svg_attr(e, "startOffset"); ok {
+		if l, lok := svg_parse_length(strings.trim_space(v)); lok {
+			length: f32
+			if l.unit == .Percent {
+				flat: Flat_Path
+				flat_path_init(&flat, p.tmp)
+				path_flatten_verbs(doc.verbs[tp.verbs.start:][:tp.verbs.count], doc.coords[tp.coords.start:][:tp.coords.count], &flat)
+				length = flat_path_length(&flat)
+			}
+			tp.start = svg_length_px(l, length, st.font_size)
+		}
+	}
+	append(&doc.text_paths, tp)
+	return i32(len(doc.text_paths) - 1)
 }
 
 // Appends the processed text `s` in style `st`, split into pieces where
@@ -2524,7 +2610,7 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 		x, y, dx, dy, rot := svg_text_char_pos(ts, ts.chars)
 		_, has_x := x.?
 		_, has_y := y.?
-		new_chunk := has_x || has_y || ts.chunk < 0
+		new_chunk := has_x || has_y || ts.chunk < 0 || ts.path_break
 		ddx, ddy := dx.? or_else 0, dy.? or_else 0
 		if new_chunk || ddx != 0 || ddy != 0 || rot != cur_rot {
 			flush(p, s, piece_from, off, st, ts, style, cur_dx, cur_dy, cur_rot)
@@ -2532,9 +2618,12 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 			cur_dx, cur_dy, cur_rot = ddx, ddy, rot
 		}
 		if new_chunk {
-			first := ts.chunk < 0
-			append(&doc.chunks, Svg_Text_Chunk{x = x.? or_else 0, y = y.? or_else 0, has_x = has_x || first, has_y = has_y || first, anchor = st.anchor, baseline = ts.baseline, pieces = {u32(len(doc.pieces)), 0}})
+			// The text's first chunk starts at its x, y (0 by default) unless
+			// it runs along a path.
+			first := ts.chunk < 0 && ts.path < 0
+			append(&doc.chunks, Svg_Text_Chunk{x = x.? or_else 0, y = y.? or_else 0, has_x = has_x || first, has_y = has_y || first, anchor = st.anchor, baseline = ts.baseline, pieces = {u32(len(doc.pieces)), 0}, path = ts.path, path_start = ts.path_break})
 			ts.chunk = i32(len(doc.chunks) - 1)
+			ts.path_break = false
 		}
 		ts.chars += 1
 	}
@@ -2590,10 +2679,13 @@ svg_text_bbox :: proc(p: ^Svg_Parser, t: Svg_Text, font_size: f32) -> Rect {
 	if p.opts.fonts != nil {
 		l: Text_Layout
 		pieces := make([dynamic]Text_Piece, p.tmp)
+		tp: Text_Path
+		text_path_init(&tp, p.tmp)
 		defer text_layout_destroy(&l)
 		pen: Vec2
+		along: f32
 		for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
-			pen = svg_layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, &l, &pieces)
+			pen, along = svg_layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, along, &l, &pieces, &tp)
 			if len(l.glyphs) > 0 {
 				box = svg_box_union(box, {l.min.x, l.min.y, l.max.x - l.min.x, l.max.y - l.min.y})
 			}
@@ -2620,20 +2712,26 @@ svg_text_bbox :: proc(p: ^Svg_Parser, t: Svg_Text, font_size: f32) -> Rect {
 }
 
 // Lays out one chunk into `l` from the pen position left by the previous
-// chunk; returns where this one ends. `pieces` is scratch.
-svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_Text_Chunk, pen: Vec2, l: ^Text_Layout, pieces: ^[dynamic]Text_Piece) -> Vec2 {
+// chunk (and its distance along a path); returns where this one ends.
+// `pieces` and `tp` are scratch.
+svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_Text_Chunk, pen: Vec2, along: f32, l: ^Text_Layout, pieces: ^[dynamic]Text_Piece, tp: ^Text_Path) -> (end: Vec2, end_along: f32) {
 	clear(pieces)
 	y := ch.y if ch.has_y else pen.y
 	x := ch.x if ch.has_x else pen.x
+	if ch.path >= 0 {
+		// Along the path: x a distance on it, y across it.
+		x = ch.x if ch.has_x else (doc.text_paths[ch.path].start if ch.path_start else along)
+		y = 0
+	}
 	total_dy: f32
 	for &pc, i in doc.pieces[ch.pieces.start:][:ch.pieces.count] {
 		family := svg_pick_family(fonts, doc, pc.families)
-		append(pieces, Text_Piece{pc.text, {family, pc.size, pc.weight, pc.italic, pc.letter_spacing, u32(i)}, pc.dx, pc.dy})
+		append(pieces, Text_Piece{pc.text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
 		total_dy += pc.dy
 	}
 	text_layout(fonts, pieces[:], {x = x, y = y, baseline = ch.baseline}, l)
 	if len(l.glyphs) == 0 {
-		return {x, y + total_dy}
+		return ({x, y + total_dy} if ch.path < 0 else pen), x
 	}
 	// text-anchor aligns the extent of the glyphs (dx included, trailing
 	// letter-spacing not), as resvg does.
@@ -2661,8 +2759,27 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 		l.min.x += shift
 		l.max.x += shift
 	}
-	end := x + (l.lines[0].width if len(l.lines) > 0 else 0) + shift
-	return {end, y + total_dy}
+	end_x := x + (l.lines[0].width if len(l.lines) > 0 else 0) + shift
+	if ch.path < 0 {
+		return {end_x, y + total_dy}, end_x
+	}
+	tpd := &doc.text_paths[ch.path]
+	// Segments in proportion to the text, so it sits alike at any scale.
+	segment := doc.pieces[ch.pieces.start].size / 48
+	text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
+	text_layout_on_path(l, tp, {side = tpd.side})
+	// Text after the path continues from its last glyph's end.
+	end = pen
+	#reverse for run in l.runs {
+		for k := run.count - 1; k >= 0; k -= 1 {
+			if turn := l.turns[run.first + k]; turn != {} {
+				g := l.glyphs[run.first + k]
+				adv, _ := font_glyph_advance(run.font, g.glyph)
+				return {g.x, g.y} + turn * (f32(adv) * run.em), end_x
+			}
+		}
+	}
+	return end, end_x
 }
 
 // The first family of `families` the collection has (generic names map to

@@ -333,7 +333,11 @@ vg.layer_stack_end(&ls, &c)
   units, regions, subregions, primitive units). Text: `text` / `tspan`
   chunks with x / y / dx / dy lists, `rotate`, font family lists, size,
   weight, style, letter-spacing, text-anchor (on the glyph extent, as
-  resvg), dominant-baseline, CSS whitespace collapsing (the XML reader trims
+  resvg), dominant-baseline, `textPath` (a `path` href or SVG 2's `path`
+  attribute, the referenced path's transform, startOffset as a length or a
+  percentage of the path, side; not nested, no positions of its own, method
+  and spacing ignored; text after it continues from its last glyph), CSS
+  whitespace collapsing (the XML reader trims
   bodies, so text whitespace is protected before parsing). Images: data:
   URIs and other hrefs through `Svg_Parse_Options.load_file`; raster
   (odecs' image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
@@ -352,7 +356,7 @@ vg.layer_stack_end(&ls, &c)
   whole document or one element's subtree, under its transforms, text with
   a layout) to a `Path`, returning the fill rule (and whether shapes mix
   rules); strokes, images, clips, masks and filters are ignored.
-- Unsupported (warned in `doc.warnings`): textPath, tref, textLength, markers, feImage
+- Unsupported (warned in `doc.warnings`): tref, textLength, markers, feImage
   referencing an element (images work), CSS filter functions, BackgroundImage inputs, DTD entities,
   WebP and svgz images, `context-fill`. Strokes under non-uniform scale or
   skew are expanded in device space (uniform width), images sample bilinear
@@ -702,8 +706,14 @@ every part follows:
   right-to-left letters kept in order inside them). Faces without GPOS
   kern with their legacy `kern` table; faces kb cannot read (or whose
   GSUB / GPOS lists point outside the table, which kb does not check) are
-  placed per codepoint with advances and kerning. Letter-spacing turns off
-  liga / clig / dlig (CSS) and is not added after attached marks. The
+  placed per codepoint with advances and kerning. `Text_Style.features`
+  turns OpenType features on or off per piece over the shaper's defaults
+  (`{{"smcp", 1}, {"liga", 0}, {"salt", 2}}`: small caps, no ligatures,
+  the second alternate; the first of a tag wins, as CSS
+  font-feature-settings); each segment places its pieces' glyph configs in
+  the shaper's scratch, so overrides cost no allocation once warm.
+  Letter-spacing turns off liga / clig / dlig (CSS) unless the piece sets
+  them, and is not added after attached marks. The
   collection parses a face for kb on first use and pools `Text_Shaper`s
   (shape configs, scratchpads, glyph storage, layout tables), so layouts
   may run concurrently on one collection; a warm shaper does not allocate.
@@ -711,9 +721,27 @@ every part follows:
   by the caller and drawn again while its text is unchanged. Not handled:
   explicit
   bidi controls (U+202A..U+202E, U+2066..U+2069, unsupported by kb), a
-  right-to-left paragraph direction, vertical text, font features chosen
-  by the caller. `layout_simple` still places plain left-to-right text
-  with advances and kerning (UI labels).
+  right-to-left paragraph direction, vertical text, variable fonts (the
+  default instance is drawn). `layout_simple` still places plain
+  left-to-right text with advances and kerning (UI labels).
+- **Text on a path** (`text_path.odin`, SVG textPath): `text_path_set`
+  measures a path (flattened, each point's distance along it) into a
+  `Text_Path`; `text_layout_on_path` moves a layout made from x = 0, y = 0
+  onto it, x becoming a distance along the path (`start` offsets it) and y
+  an offset across it. Each glyph sits where its middle falls, turned to
+  the path's direction there: `Text_Layout.turns` holds each glyph's
+  direction (cos, sin), {0, 0} for a glyph off either end (not drawn).
+  `side = .Right` runs along the path reversed. `text_layout_path` follows
+  the turns; to draw, turn each glyph about its origin
+  (`apply_transform(c, {t.x, t.y, -t.y, t.x, g.x, g.y})`, then the glyph at
+  0, 0), as `svg_draw` does.
+- **Font information** (cold, for font pickers and glyph browsers):
+  `font_info` reads a font's typographic family and subfamily, full and
+  PostScript names, glyph count and the GSUB / GPOS feature tags it has
+  (what `features` can set); `font_glyph_names` gives every glyph's name
+  (post formats 1 and 2, or the CFF charset; none for CID-keyed fonts),
+  slices of the font data. Checked against fontTools over 2,380 installed
+  faces: names, feature lists and glyph names all agree.
 
 ## Implementation notes
 

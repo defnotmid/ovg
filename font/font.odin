@@ -49,6 +49,7 @@ Table :: enum u8 {
 	CBDT,
 	name,
 	OS2,
+	post,
 }
 
 @(private)
@@ -70,6 +71,7 @@ TAGS := [Table]string {
 	.CBDT = "CBDT",
 	.name = "name",
 	.OS2  = "OS/2",
+	.post = "post",
 }
 
 // The cmap subtables (platform, encoding) that map Unicode, most preferred

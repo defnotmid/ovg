@@ -47,8 +47,6 @@ Shape_Config :: struct {
 	kb_font:   ^kb.font,
 	config:    ^kb.shape_config,
 	scratch:   ^kb.shape_scratchpad,
-	// liga / clig / dlig off, for letter-spaced text (CSS).
-	no_liga:   ^kb.glyph_config,
 	// No GPOS: the legacy `kern` table kerns instead.
 	kern:      bool,
 }
@@ -67,24 +65,38 @@ Shape_Segment :: struct {
 
 // Shaping state for one layout at a time (pooled by Font_Collection).
 Text_Shaper :: struct {
-	storage:     kb.glyph_storage,
-	configs:     [dynamic]Shape_Config,
+	storage:        kb.glyph_storage,
+	configs:        [dynamic]Shape_Config,
 	// Per piece.
-	piece_start: [dynamic]i32, // first codepoint
-	piece_font:  [dynamic]^Font,
-	piece_size:  [dynamic]f32,
+	piece_start:    [dynamic]i32, // first codepoint
+	piece_font:     [dynamic]^Font,
+	piece_size:     [dynamic]f32,
+	// The piece's feature overrides (Text_Style.features, then letter
+	// spacing's), and its glyph config while a segment holding it shapes
+	// (placed in `config_words`).
+	piece_features: [dynamic]Piece_Features,
+	piece_config:   [dynamic]^kb.glyph_config,
+	overrides:      [dynamic]kb.feature_override,
+	config_words:   [dynamic]u64,
 	// Per codepoint of the text.
-	runes:       [dynamic]rune,
-	piece:       [dynamic]i32,
-	font:        [dynamic]^Font, // after fallback
-	script:      [dynamic]kb.script,
-	level:       [dynamic]u8, // bidi level (text_bidi.odin)
-	bidi:        [dynamic]Bidi_Class, // scratch
+	runes:          [dynamic]rune,
+	piece:          [dynamic]i32,
+	font:           [dynamic]^Font, // after fallback
+	script:         [dynamic]kb.script,
+	level:          [dynamic]u8, // bidi level (text_bidi.odin)
+	bidi:           [dynamic]Bidi_Class, // scratch
 	// Segments of the current line, and their visual order.
-	segs:        [dynamic]Shape_Segment,
-	order:       [dynamic]i32,
+	segs:           [dynamic]Shape_Segment,
+	order:          [dynamic]i32,
 	// Shaped glyphs of the current line.
-	glyphs:      [dynamic]Shaped_Glyph,
+	glyphs:         [dynamic]Shaped_Glyph,
+}
+
+@(private)
+Piece_Features :: struct {
+	first, count: i32, // overrides
+	// No `kern` override of 0: the legacy kern table applies.
+	kern:         bool,
 }
 
 // One shaped glyph, in font units (y up). The layout reads every field per
@@ -114,6 +126,10 @@ shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
 	s.piece_start.allocator = allocator
 	s.piece_font.allocator = allocator
 	s.piece_size.allocator = allocator
+	s.piece_features.allocator = allocator
+	s.piece_config.allocator = allocator
+	s.overrides.allocator = allocator
+	s.config_words.allocator = allocator
 	s.runes.allocator = allocator
 	s.piece.allocator = allocator
 	s.font.allocator = allocator
@@ -143,9 +159,6 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 		if cfg.scratch != nil {
 			kb.DestroyShapeScratchpad(cfg.scratch)
 		}
-		if cfg.no_liga != nil {
-			kb.DestroyGlyphConfig(cfg.no_liga)
-		}
 		if cfg.config != nil {
 			kb.DestroyShapeConfig(cfg.config)
 		}
@@ -155,6 +168,10 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 	delete(s.piece_start)
 	delete(s.piece_font)
 	delete(s.piece_size)
+	delete(s.piece_features)
+	delete(s.piece_config)
+	delete(s.overrides)
+	delete(s.config_words)
 	delete(s.runes)
 	delete(s.piece)
 	delete(s.font)
@@ -225,8 +242,6 @@ shaper_config :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, f: ^Font, script
 		}
 		if cfg.scratch != nil {
 			cfg.kb_font = kf
-			off := [3]kb.feature_override{{.liga, 0}, {.clig, 0}, {.dlig, 0}}
-			cfg.no_liga = kb.CreateGlyphConfig(cfg.config, off[:], kb_allocator, nil)
 			cfg.kern = kf.Blob.Tables[.GPOS].Length == 0
 		} else if cfg.config != nil {
 			kb.DestroyShapeConfig(cfg.config)
@@ -313,11 +328,10 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 	cfg := shaper_config(fonts, s, seg.font, seg.script)
 	shaped := false
 	if cfg.kb_font != nil {
+		shaper_place_configs(s, cfg, seg)
 		kb.ClearActiveGlyphs(&s.storage)
 		for i in seg.first ..< seg.first + seg.count {
-			// Letter-spacing turns ligatures off (CSS).
-			gc := cfg.no_liga if pieces[s.piece[i]].style.letter_spacing != 0 else nil
-			_ = kb.PushGlyph(&s.storage, cfg.kb_font, s.runes[i], gc, c.int(i))
+			_ = kb.PushGlyph(&s.storage, cfg.kb_font, s.runes[i], s.piece_config[s.piece[i]], c.int(i))
 		}
 		dir: kb.direction = .KBTS_DIRECTION_RTL if seg.level & 1 == 1 else .KBTS_DIRECTION_LTR
 		it, err := kb.ShapeDirect(cfg.scratch, &s.storage, dir)
@@ -346,7 +360,56 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 	if cfg.kern && seg.level & 1 == 0 {
 		// Legacy `kern` table pairs (fonts without GPOS, e.g. Vera).
 		for j in 1 ..< len(rows) {
-			rows[j - 1].advance += font_glyph_kern(seg.font, rows[j - 1].id, rows[j].id)
+			if s.piece_features[s.piece[rows[j - 1].cluster]].kern {
+				rows[j - 1].advance += font_glyph_kern(seg.font, rows[j - 1].id, rows[j].id)
+			}
+		}
+	}
+}
+
+// Records a piece's feature overrides: its style's, then liga, clig and
+// dlig off when letter-spaced (CSS); kb_text_shape takes a tag's first.
+@(private)
+shaper_add_piece_features :: proc(s: ^Text_Shaper, st: Text_Style) {
+	pf := Piece_Features{first = i32(len(s.overrides)), kern = true}
+	for f in st.features {
+		tag := [4]u8{' ', ' ', ' ', ' '}
+		copy(tag[:], f.tag)
+		append(&s.overrides, kb.feature_override{kb.feature_tag(transmute(u32)tag), c.int(f.value)})
+		if pf.kern && string(tag[:]) == "kern" && f.value == 0 {
+			pf.kern = false
+		}
+	}
+	if st.letter_spacing != 0 {
+		append(&s.overrides, kb.feature_override{.liga, 0}, kb.feature_override{.clig, 0}, kb.feature_override{.dlig, 0})
+	}
+	pf.count = i32(len(s.overrides)) - pf.first
+	append(&s.piece_features, pf)
+	append(&s.piece_config, nil)
+}
+
+// Places the glyph configs of the segment's pieces that override features
+// into the shaper's words (sized, then placed once: the configs point into
+// them), good while the segment shapes.
+@(private)
+shaper_place_configs :: proc(s: ^Text_Shaper, cfg: ^Shape_Config, seg: ^Shape_Segment) {
+	p0, p1 := s.piece[seg.first], s.piece[seg.first + seg.count - 1]
+	words := 0
+	for p in p0 ..= p1 {
+		pf := s.piece_features[p]
+		if pf.count > 0 {
+			words += (int(kb.SizeOfGlyphConfig(cfg.config, s.overrides[pf.first:][:pf.count])) + 7) / 8
+		}
+	}
+	resize(&s.config_words, words)
+	at := 0
+	for p in p0 ..= p1 {
+		pf := s.piece_features[p]
+		s.piece_config[p] = nil
+		if pf.count > 0 {
+			o := s.overrides[pf.first:][:pf.count]
+			s.piece_config[p] = kb.PlaceGlyphConfig(cfg.config, o, &s.config_words[at])
+			at += (int(kb.SizeOfGlyphConfig(cfg.config, o)) + 7) / 8
 		}
 	}
 }

@@ -16,6 +16,10 @@ Cff :: struct {
 	subrs:       []u8,
 	fontdicts:   []u8,
 	fdselect:    []u8,
+	// The string INDEX (SIDs from 391 on) and where the charset lies (0, 1
+	// and 2 name the predefined ones): glyph names (names.odin).
+	strings:     []u8,
+	charset:     int,
 }
 
 // A read position in a CFF structure; reads past the end give 0.
@@ -186,11 +190,13 @@ cff_load :: proc(f: ^Face) -> Error {
 	seek(&b, get8(&b)) // the header's size
 	index_at(&b) // names: the first font is used
 	top := index_get(index_at(&b), 0)
-	index_at(&b) // strings
+	c.strings = index_at(&b)
 	c.gsubrs = index_at(&b)
 	kind := [1]int{2}
-	charstrings, fdarray, fdselect: [1]int
+	charstrings, fdarray, fdselect, charset: [1]int
 	dict_ints(top, 17, charstrings[:])
+	dict_ints(top, 15, charset[:])
+	c.charset = charset[0]
 	dict_ints(top, 0x100 | 6, kind[:])
 	dict_ints(top, 0x100 | 36, fdarray[:])
 	dict_ints(top, 0x100 | 37, fdselect[:])

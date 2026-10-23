@@ -3,6 +3,7 @@ package ovg
 import "core:log"
 import "core:os"
 import "core:mem"
+import "core:slice"
 import "core:testing"
 import "core:unicode/utf8"
 
@@ -256,9 +257,11 @@ test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
 	defer fx_close(&s)
 	fx_add_noto(t, &s, "NotoSansArabic-Regular.ttf")
 	lines := [?]string{"The quick brown fox, 1234.", "office affinity AVAT", "abc مرحبا 42 def"}
+	// Letter spacing places glyph configs (feature overrides) per segment.
 	for _ in 0 ..< 3 {
 		for line in lines {
 			fx_layout(&s, line, "Bitstream Vera Sans")
+			fx_layout(&s, line, "Bitstream Vera Sans", 2)
 		}
 	}
 	track: mem.Tracking_Allocator
@@ -269,6 +272,7 @@ test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
 		for _ in 0 ..< 10 {
 			for line in lines {
 				fx_layout(&s, line, "Bitstream Vera Sans")
+				fx_layout(&s, line, "Bitstream Vera Sans", 2)
 			}
 		}
 	}
@@ -418,4 +422,84 @@ test_inits_use_their_allocator :: proc(t: ^testing.T) {
 		font_collection_destroy(&fonts)
 	}
 	testing.expect_value(t, len(own.allocation_map), 0)
+}
+
+@(test)
+test_shape_features :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	if !fx_add_noto(t, &s, "NotoSans-Regular.ttf") {
+		return
+	}
+	layout :: proc(s: ^Shape_Fx, text: string, features: []Font_Feature, letter_spacing: f32 = 0) -> []Positioned_Glyph {
+		piece := Text_Piece{text = text, style = {family = "Noto Sans", size = 100, letter_spacing = letter_spacing, features = features}}
+		text_layout(&s.fonts, {piece}, {}, &s.layout)
+		return s.layout.glyphs[:]
+	}
+	// Glyph ids from fontTools: a.sc, zero.slash, and aalt's alternates of I
+	// (i.sc, I.salt).
+	smcp := [?]Font_Feature{{"smcp", 1}}
+	testing.expect_value(t, layout(&s, "a", smcp[:])[0].glyph, 1868)
+	zero := [?]Font_Feature{{"zero", 1}}
+	testing.expect_value(t, layout(&s, "0", zero[:])[0].glyph, 2251)
+	aalt1, aalt2 := [?]Font_Feature{{"aalt", 1}}, [?]Font_Feature{{"aalt", 2}}
+	testing.expect_value(t, layout(&s, "I", aalt1[:])[0].glyph, 1911)
+	testing.expect_value(t, layout(&s, "I", aalt2[:])[0].glyph, 1738)
+	// Off by default, on by default turned off, and a style's own setting
+	// over letter spacing's.
+	testing.expect_value(t, layout(&s, "a", nil)[0].glyph, 68)
+	no_liga, liga := [?]Font_Feature{{"liga", 0}}, [?]Font_Feature{{"liga", 1}}
+	testing.expect_value(t, len(layout(&s, "fi", nil)), 1)
+	testing.expect_value(t, len(layout(&s, "fi", no_liga[:])), 2)
+	testing.expect_value(t, len(layout(&s, "fi", liga[:], 2)), 1)
+	// kern off: the pair keeps its advance.
+	font, _ := font_collection_find(&s.fonts, "Noto Sans", 400)
+	em := font_scale_for_em(font, 100)
+	no_kern := [?]Font_Feature{{"kern", 0}}
+	g := layout(&s, "AV", no_kern[:])
+	adv, _ := font_glyph_advance(font, g[0].glyph)
+	testing.expect(t, abs(g[1].x - g[0].x - f32(adv) * em) < 0.01)
+	// Features stay with their piece within one shaped segment.
+	pieces := [?]Text_Piece{{text = "aa", style = {family = "Noto Sans", size = 100, features = smcp[:]}}, {text = "aa", style = {family = "Noto Sans", size = 100}}}
+	text_layout(&s.fonts, pieces[:], {}, &s.layout)
+	ids: [4]Glyph_Index
+	for gl, i in s.layout.glyphs {
+		ids[i] = gl.glyph
+	}
+	testing.expect_value(t, ids, [4]Glyph_Index{1868, 1868, 68, 68})
+}
+
+@(test)
+test_font_info :: proc(t: ^testing.T) {
+	// Expected values from fontTools.
+	f, err := font_load(#load("demo/media/JetBrainsMono-Regular.ttf"))
+	testing.expect_value(t, err, nil)
+	defer font_destroy(&f)
+	info := font_info(&f)
+	defer font_info_destroy(&info)
+	testing.expect_value(t, info.family, "JetBrains Mono")
+	testing.expect_value(t, info.subfamily, "Regular")
+	testing.expect_value(t, info.full_name, "JetBrains Mono Regular")
+	testing.expect_value(t, info.postscript_name, "JetBrainsMono-Regular")
+	testing.expect_value(t, info.glyph_count, 1168)
+	features := [?]string{"aalt", "calt", "case", "ccmp", "frac", "locl", "mark", "ordn", "sinf", "subs", "sups", "zero"}
+	testing.expect(t, slice.equal(info.features, features[:]))
+	names := font_glyph_names(&f)
+	defer delete(names)
+	testing.expect_value(t, len(names), 1168)
+	testing.expect_value(t, names[0], ".notdef")
+	testing.expect_value(t, names[536], "zero")
+	testing.expect_value(t, names[546], "zero.zero")
+
+	// The feature the info lists, set on a style.
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	zero := [?]Font_Feature{{"zero", 1}}
+	pieces := [?]Text_Piece{{text = "0", style = {family = "JetBrains Mono", size = 10}}, {text = "0", style = {family = "JetBrains Mono", size = 10, features = zero[:]}}}
+	text_layout(&s.fonts, pieces[:], {}, &s.layout)
+	testing.expect_value(t, s.layout.glyphs[0].glyph, 536)
+	testing.expect_value(t, s.layout.glyphs[1].glyph, 546)
 }
