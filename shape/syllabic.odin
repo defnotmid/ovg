@@ -148,7 +148,7 @@ insert_dotted_circles :: proc(s: ^Shaper, f: ^ft.Face, broken: int, category: u8
 	if .Has_Broken_Syllable not_in s.flags {
 		return false
 	}
-	g, ok := nominal_glyph(f, 0x25CC)
+	g, ok := nominal_glyph(s, 0x25CC)
 	if !ok {
 		return false
 	}
@@ -196,17 +196,19 @@ clear_substitution_flags :: proc(s: ^Shaper) {
 // needing backtrack or lookahead don't count).
 @(private)
 would_substitute :: proc(plan: ^Plan, stage: int, glyphs: []u16, zero_context: bool) -> bool {
-	if stage < 0 || stage >= len(plan.stages[.GSUB]) || len(glyphs) == 0 {
+	if stage < 0 || stage >= len(plan.stages[.GSUB]) || len(glyphs) == 0 || plan.starts[.GSUB].words == 0 {
 		return false
 	}
 	l := plan.layout
 	first := 0 if stage == 0 else int(plan.stages[.GSUB][stage - 1].end)
 	end := int(plan.stages[.GSUB][stage].end)
-	for pl in plan.lookups[.GSUB][first:end] {
-		lookup := &l.tables[.GSUB].lookups[pl.index]
-		if !digest_may_have(&lookup.digest, glyphs[0]) {
+	starts := &plan.starts[.GSUB]
+	row := starts_row(starts, starts_row_of(starts, glyphs[0]))
+	for pl, k in plan.lookups[.GSUB][first:end] {
+		if row[(first + k) / 64] & (u64(1) << uint((first + k) % 64)) == 0 {
 			continue
 		}
+		lookup := &l.tables[.GSUB].lookups[pl.index]
 		for sub in l.tables[.GSUB].subtables[lookup.first:][:lookup.count] {
 			if subtable_would_apply(l.data, lookup.type, int(sub.at), glyphs, zero_context) {
 				return true

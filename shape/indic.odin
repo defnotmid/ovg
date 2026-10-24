@@ -246,7 +246,7 @@ indic_initial_reorder :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
 	config := indic_config(plan.script)
 	s.virama = 0
 	if config.virama != 0 {
-		s.virama, _ = nominal_glyph(f, config.virama)
+		s.virama, _ = nominal_glyph(s, config.virama)
 	}
 	if s.virama != 0 {
 		for &info in s.info[:s.len] {

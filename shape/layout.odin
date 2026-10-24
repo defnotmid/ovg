@@ -47,93 +47,19 @@ GPOS_CHAIN_CONTEXT :: 8
 GPOS_EXTENSION :: 9
 
 Lookup :: struct {
-	type:   u8,
+	type:  u8,
 	// LookupFlag in the low 16 bits, the mark filtering set above them.
-	props:  u32,
+	props: u32,
 	// Its subtables in Layout_Table.subtables.
-	first:  i32,
-	count:  i32,
-	// The glyphs its subtables start at, as a digest: a glyph it lacks is
-	// surely not covered (most glyphs, for most lookups).
-	digest: Digest,
-}
-
-// A set of glyphs summarized as bits of three shifts of each glyph id
-// (HarfBuzz's set digest): no false negatives, few false positives.
-Digest :: [3]u64
-
-@(private)
-DIGEST_SHIFTS :: [3]u32{4, 0, 9}
-
-digest_may_have :: #force_inline proc "contextless" (dg: ^Digest, g: u16) -> bool {
-	shifts := DIGEST_SHIFTS
-	a := dg[0] >> ((u32(g) >> shifts[0]) & 63)
-	b := dg[1] >> ((u32(g) >> shifts[1]) & 63)
-	c := dg[2] >> ((u32(g) >> shifts[2]) & 63)
-	return (a & b & c & 1) != 0
-}
-
-digests_intersect :: #force_inline proc "contextless" (a, b: ^Digest) -> bool {
-	return a[0] & b[0] != 0 && a[1] & b[1] != 0 && a[2] & b[2] != 0
-}
-
-@(private)
-digest_add_range :: proc "contextless" (dg: ^Digest, a, b: u16) {
-	shifts := DIGEST_SHIFTS
-	for k in 0 ..< 3 {
-		lo, hi := u32(a) >> shifts[k], u32(b) >> shifts[k]
-		if hi - lo >= 63 {
-			dg[k] = ~u64(0)
-			continue
-		}
-		for v in lo ..= hi {
-			dg[k] |= 1 << (v & 63)
-		}
-	}
-}
-
-// Adds a coverage table's glyphs; false when `budget` (glyphs to add)
-// runs out first.
-@(private)
-digest_add_coverage :: proc(dg: ^Digest, d: []u8, t: int, budget: ^int) -> bool {
-	if t == 0 {
-		return true
-	}
-	count := int(ft.read_u16(d, t + 2))
-	switch ft.read_u16(d, t) {
-	case 1:
-		n := min(count, max(len(d) - t - 4, 0) / 2)
-		budget^ -= n
-		if budget^ < 0 {
-			return false
-		}
-		for i in 0 ..< n {
-			g := ft.read_u16(d, t + 4 + 2 * i)
-			digest_add_range(dg, g, g)
-		}
-	case 2:
-		n := min(count, max(len(d) - t - 4, 0) / 6)
-		budget^ -= n
-		if budget^ < 0 {
-			return false
-		}
-		for i in 0 ..< n {
-			r := t + 4 + 6 * i
-			a, b := ft.read_u16(d, r), ft.read_u16(d, r + 2)
-			if a <= b {
-				digest_add_range(dg, a, b)
-			}
-		}
-	}
-	return true
+	first: i32,
+	count: i32,
 }
 
 Subtable :: struct {
 	// Where the subtable lies, and the coverage of the glyph it starts
-	// matching at, with its digest.
+	// matching at.
 	at:       i32,
 	coverage: Unpacked,
-	digest:   Digest,
 	// Class definitions: a pair adjustment's (format 2) first and second
 	// glyphs' at 0 and 1; a context rule set's (format 2) backtrack, input
 	// and lookahead at 0, 1 and 2.
@@ -158,6 +84,7 @@ Unpacked :: struct {
 Layout_Table :: struct {
 	// 0 when the face has no such table (or it can't be read).
 	at:                 int,
+	size:               int,
 	scripts:            int,
 	features:           int,
 	feature_variations: int,
@@ -178,6 +105,8 @@ Layout :: struct {
 	var_store:           int,
 	// The legacy kern table (0 for none).
 	kern:                int,
+	// The face's cmap: each character's glyph (0 for none).
+	cmap:                Two_Level,
 	// Unpacked coverages and class definitions (Unpacked).
 	bits:                []u64,
 	ranks:               []u16,
@@ -229,6 +158,7 @@ layout_init :: proc(l: ^Layout, f: ^ft.Face, allocator := context.allocator) {
 	}
 	// Unpacked, at most as many bytes as the tables hold.
 	layout_unpack(l, gsub_size + gpos_size + gdef_size)
+	cmap_init(&l.cmap, f, allocator)
 }
 
 layout_destroy :: proc(l: ^Layout) {
@@ -237,6 +167,8 @@ layout_destroy :: proc(l: ^Layout) {
 		delete(t.subtables, l.allocator)
 	}
 	delete(l.mark_set_coverages, l.allocator)
+	delete(l.cmap.stage1, l.allocator)
+	delete(l.cmap.blocks, l.allocator)
 	delete(l.bits, l.allocator)
 	delete(l.ranks, l.allocator)
 	delete(l.classes, l.allocator)
@@ -263,7 +195,7 @@ layout_table_init :: proc(l: ^Layout, kind: Table_Kind, at, size: int) {
 		return
 	}
 	t := &l.tables[kind]
-	t.at = at
+	t.at, t.size = at, size
 	t.scripts = offset16(d, at, at + 4)
 	t.features = offset16(d, at, at + 6)
 	list := offset16(d, at, at + 8)
@@ -286,11 +218,6 @@ layout_table_init :: proc(l: ^Layout, kind: Table_Kind, at, size: int) {
 	subtable_count = min(subtable_count, size / 2)
 	t.lookups = make([]Lookup, lookup_count, l.allocator)
 	t.subtables = make([]Subtable, subtable_count, l.allocator)
-	// Coverages are shared between subtables, so digesting them reads more
-	// than the table; a corrupt table sharing one huge coverage everywhere
-	// would read without end, so past a generous budget lookups take full
-	// digests (always tried).
-	budget := 8 * size + 65536
 	n := 0
 	for i in 0 ..< lookup_count {
 		lookup := offset16(d, list, list + 2 + 2 * i)
@@ -341,14 +268,6 @@ layout_table_init :: proc(l: ^Layout, kind: Table_Kind, at, size: int) {
 			lk.type = wrapped
 		}
 		lk.count = i32(n) - lk.first
-		for &sub in t.subtables[lk.first:n] {
-			if !digest_add_coverage(&sub.digest, d, int(sub.coverage.table), &budget) {
-				sub.digest = {~u64(0), ~u64(0), ~u64(0)}
-			}
-			for k in 0 ..< 3 {
-				lk.digest[k] |= sub.digest[k]
-			}
-		}
 	}
 }
 
@@ -464,6 +383,128 @@ glyph_props :: proc(l: ^Layout, g: u16) -> u16 {
 // Whether mark glyph set `set` holds the glyph.
 mark_set_covers :: proc(l: ^Layout, set: int, g: u16) -> bool {
 	return set < len(l.mark_set_coverages) && unpacked_coverage(l, l.mark_set_coverages[set], g) >= 0
+}
+
+// ---- two-level tables ----------------------------------------------------------------
+
+// A table from keys (characters, glyphs) to 16-bit values in two levels:
+// key k's value is blocks[stage1[k >> TWO_LEVEL_SHIFT] << TWO_LEVEL_SHIFT
+// | k % TWO_LEVEL_BLOCK], 0 past stage1's keys. Built from spans of keys
+// whose values are constant or count up by one: a block inside a constant
+// span is one block shared by every such block of its value.
+Two_Level :: struct {
+	stage1: []u16,
+	blocks: []u16,
+}
+
+// Keys from `start` (to the next span's start, or the table's end) with
+// values from `value`, constant (`step` 0) or counting up (1).
+Two_Level_Span :: struct {
+	start: i32,
+	value: u16,
+	step:  u16,
+}
+
+TWO_LEVEL_SHIFT :: 7
+TWO_LEVEL_BLOCK :: 1 << TWO_LEVEL_SHIFT
+
+two_level_get :: #force_inline proc "contextless" (t: ^Two_Level, key: int) -> u16 {
+	b := key >> TWO_LEVEL_SHIFT
+	if uint(b) >= uint(len(t.stage1)) {
+		return 0
+	}
+	return t.blocks[int(t.stage1[b]) << TWO_LEVEL_SHIFT | key % TWO_LEVEL_BLOCK]
+}
+
+// Builds `t` over keys 0 ..< `keys` from `spans` (in order, the first at
+// key 0): each block within one constant span takes its value's shared
+// block, the others are written out.
+two_level_init :: proc(t: ^Two_Level, spans: []Two_Level_Span, keys: int, allocator: runtime.Allocator) {
+	// Each block's span (the one holding its first key), whether one
+	// constant span covers it, and the blocks: one per such value, one for
+	// each other block; counted, placed, then filled run by run.
+	top := 0
+	for sp in spans {
+		if sp.step == 0 {
+			top = max(top, int(sp.value))
+		}
+	}
+	shared := make([]u16, top + 1, context.temp_allocator)
+	for &b in shared {
+		b = 0xFFFF
+	}
+	stage1 := make([]u16, (keys + TWO_LEVEL_BLOCK - 1) >> TWO_LEVEL_SHIFT, allocator)
+	first := make([]i32, len(stage1), context.temp_allocator)
+	count := 0
+	at := 0
+	for &b, i in stage1 {
+		lo, hi := i32(i << TWO_LEVEL_SHIFT), i32((i + 1) << TWO_LEVEL_SHIFT)
+		for at + 1 < len(spans) && spans[at + 1].start <= lo {
+			at += 1
+		}
+		first[i] = i32(at)
+		if (at + 1 == len(spans) || spans[at + 1].start >= hi) && spans[at].step == 0 {
+			v := spans[at].value
+			if shared[v] == 0xFFFF {
+				shared[v] = u16(count)
+				count += 1
+			}
+			b = shared[v]
+		} else {
+			b = u16(count)
+			count += 1
+		}
+	}
+	blocks := make([]u16, count << TWO_LEVEL_SHIFT, allocator)
+	done := make([]bool, count, context.temp_allocator)
+	for b, i in stage1 {
+		if done[b] {
+			continue
+		}
+		done[b] = true
+		out := blocks[int(b) << TWO_LEVEL_SHIFT:][:TWO_LEVEL_BLOCK]
+		lo := i32(i << TWO_LEVEL_SHIFT)
+		for j, k := int(first[i]), lo; k < lo + TWO_LEVEL_BLOCK; j += 1 {
+			end := min(spans[j + 1].start, lo + TWO_LEVEL_BLOCK) if j + 1 < len(spans) else lo + TWO_LEVEL_BLOCK
+			sp := spans[j]
+			for key in k ..< end {
+				out[key - lo] = sp.value + sp.step * u16(key - sp.start)
+			}
+			k = end
+		}
+	}
+	t.stage1 = stage1
+	t.blocks = blocks
+}
+
+// The face's cmap as a two-level table: the characters it maps (ascending,
+// exactly those ft.glyph_index maps) in spans of consecutive characters
+// with consecutive glyphs.
+@(private)
+cmap_init :: proc(t: ^Two_Level, f: ^ft.Face, allocator: runtime.Allocator) {
+	chars := make([]rune, ft.codepoints(f, nil), context.temp_allocator)
+	ft.codepoints(f, chars)
+	spans := make([dynamic]Two_Level_Span, context.temp_allocator)
+	append(&spans, Two_Level_Span{0, 0, 0})
+	last, last_glyph := i32(-2), u16(0)
+	for r in chars {
+		g := u16(ft.glyph_index(f, r))
+		if i32(r) == last + 1 && g == last_glyph + 1 && spans[len(spans) - 1].step == 1 {
+			last, last_glyph = i32(r), g
+			continue
+		}
+		if i32(r) != last + 1 && last >= 0 {
+			append(&spans, Two_Level_Span{last + 1, 0, 0})
+		}
+		if top := &spans[len(spans) - 1]; top.start == i32(r) {
+			top^ = {i32(r), g, 1}
+		} else {
+			append(&spans, Two_Level_Span{i32(r), g, 1})
+		}
+		last, last_glyph = i32(r), g
+	}
+	append(&spans, Two_Level_Span{last + 1, 0, 0})
+	two_level_init(t, spans[:], int(last) + 1 if last >= 0 else 0, allocator)
 }
 
 // ---- unpacked coverages and classes -------------------------------------------------

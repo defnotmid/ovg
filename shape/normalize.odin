@@ -14,8 +14,8 @@ MAX_COMBINING_MARKS :: 32
 
 // The font's glyph for `r` (ok false when it has none).
 @(private)
-nominal_glyph :: #force_inline proc(f: ^ft.Face, r: rune) -> (g: u16, ok: bool) {
-	g = u16(ft.glyph_index(f, r))
+nominal_glyph :: #force_inline proc "contextless" (s: ^Shaper, r: rune) -> (g: u16, ok: bool) {
+	g = two_level_get(&s.layout.cmap, int(r))
 	return g, g != 0
 }
 
@@ -46,7 +46,7 @@ normalize :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
 		}
 		done := 0
 		for might_short && s.idx + done < end {
-			g, ok := nominal_glyph(f, s.info[s.idx + done].char)
+			g, ok := nominal_glyph(s, s.info[s.idx + done].char)
 			if !ok {
 				break
 			}
@@ -129,7 +129,7 @@ normalize :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
 		out := out_rows(s)
 		if is_unicode_mark(cur) && (starter == s.out_len - 1 || mcc_of(out[s.out_len - 1]) < mcc_of(cur)) {
 			if ab, ok := shaper_compose(plan, out[starter].char, cur.char); ok {
-				if g, has := nominal_glyph(f, ab); has {
+				if g, has := nominal_glyph(s, ab); has {
 					next_glyph(s)
 					if !s.ok {
 						return
@@ -158,7 +158,7 @@ normalize :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
 @(private)
 decompose_current :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, shortest: bool) {
 	r := s.info[s.idx].char
-	g, ok := nominal_glyph(f, r)
+	g, ok := nominal_glyph(s, r)
 	if !shortest || !ok {
 		if decompose_into(s, plan, f, shortest, r) > 0 {
 			skip_glyph(s)
@@ -172,7 +172,7 @@ decompose_current :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, shortest: bool) 
 	}
 	if gc_of(s.info[s.idx]) == .Zs {
 		if kind := space_kind(r); kind != .None {
-			if space, has := nominal_glyph(f, ' '); has {
+			if space, has := nominal_glyph(s, ' '); has {
 				info := &s.info[s.idx]
 				info.unicode = info.unicode & 0xFF | u16(kind) << 8
 				info.glyph = space
@@ -183,7 +183,7 @@ decompose_current :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, shortest: bool) 
 		}
 	}
 	if r == 0x2011 {
-		if hyphen, has := nominal_glyph(f, 0x2010); has {
+		if hyphen, has := nominal_glyph(s, 0x2010); has {
 			s.info[s.idx].glyph = hyphen
 			next_glyph(s)
 			return
@@ -201,11 +201,11 @@ decompose_into :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, shortest: bool, r: 
 	if !ok {
 		return 0
 	}
-	a_glyph, has_a := nominal_glyph(f, a)
+	a_glyph, has_a := nominal_glyph(s, a)
 	b_glyph: u16
 	if b != 0 {
 		has_b: bool
-		if b_glyph, has_b = nominal_glyph(f, b); !has_b {
+		if b_glyph, has_b = nominal_glyph(s, b); !has_b {
 			return 0
 		}
 	}
@@ -249,13 +249,13 @@ decompose_cluster :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, end: int, shorte
 @(private)
 variation_cluster :: proc(s: ^Shaper, f: ^ft.Face, end: int) {
 	set_glyph :: proc(s: ^Shaper, f: ^ft.Face) {
-		if g, ok := nominal_glyph(f, s.info[s.idx].char); ok {
+		if g, ok := nominal_glyph(s, s.info[s.idx].char); ok {
 			s.info[s.idx].glyph = g
 		}
 	}
 	for s.idx < end - 1 && s.ok {
 		if is_variation_selector(s.info[s.idx + 1].char) {
-			if g, ok := variation_glyph(f, s.info[s.idx].char, s.info[s.idx + 1].char); ok {
+			if g, ok := variation_glyph(s, f, s.info[s.idx].char, s.info[s.idx + 1].char); ok {
 				// The sequence's glyph; the selector is dropped.
 				s.info[s.idx].glyph = g
 				merge_clusters(s, s.idx, s.idx + 2)
@@ -285,7 +285,7 @@ variation_cluster :: proc(s: ^Shaper, f: ^ft.Face, end: int) {
 // The glyph cmap's variation sequences (format 14) give a character with
 // a selector: its own glyph, or the default (the character's) glyph.
 @(private)
-variation_glyph :: proc(f: ^ft.Face, r, selector: rune) -> (g: u16, ok: bool) {
+variation_glyph :: proc(s: ^Shaper, f: ^ft.Face, r, selector: rune) -> (g: u16, ok: bool) {
 	d := f.data
 	cmap := f.tables[.cmap].at
 	if cmap == 0 {
@@ -323,7 +323,7 @@ variation_glyph :: proc(f: ^ft.Face, r, selector: rune) -> (g: u16, ok: bool) {
 					start := rune(ft.read_u24(d, at + 4 + 4 * k))
 					extra := rune(ft.read_u8(d, at + 7 + 4 * k))
 					if r >= start && r <= start + extra {
-						return nominal_glyph(f, r)
+						return nominal_glyph(s, r)
 					}
 				}
 			}

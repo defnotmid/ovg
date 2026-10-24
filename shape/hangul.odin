@@ -61,8 +61,9 @@ is_syllable :: #force_inline proc "contextless" (r: rune) -> bool {
 }
 
 @(private)
-has_glyph :: #force_inline proc(f: ^ft.Face, r: rune) -> bool {
-	return ft.glyph_index(f, r) != 0
+has_glyph :: #force_inline proc(s: ^Shaper, r: rune) -> bool {
+	_, ok := nominal_glyph(s, r)
+	return ok
 }
 
 // Replaces the next `n` rows with one for character `r` (clusters merged).
@@ -92,7 +93,7 @@ hangul_preprocess :: proc(s: ^Shaper, f: ^ft.Face) {
 			// with no advance (then it stays, combining).
 			if start < end && end == s.out_len {
 				next_glyph(s)
-				g := ft.glyph_index(f, r)
+				g, _ := nominal_glyph(s, r)
 				if g == 0 || ft.advance(f, g) != 0 {
 					merge_out_clusters(s, start, end + 1)
 					out := out_rows(s)
@@ -100,10 +101,10 @@ hangul_preprocess :: proc(s: ^Shaper, f: ^ft.Face) {
 					copy(out[start + 1:end + 1], out[start:end])
 					out[start] = tone
 				}
-			} else if has_glyph(f, 0x25CC) {
+			} else if has_glyph(s, 0x25CC) {
 				// Alone: shown on a dotted circle (after it when the tone
 				// mark has no advance of its own).
-				g := ft.glyph_index(f, r)
+				g, _ := nominal_glyph(s, r)
 				zero_width := g != 0 && ft.advance(f, g) == 0
 				row := s.info[s.idx]
 				if !make_room_for(s, 1, 2) {
@@ -137,7 +138,7 @@ hangul_preprocess :: proc(s: ^Shaper, f: ^ft.Face) {
 				// L V (T) the font has as a syllable: composed.
 				if is_combining_l(l) && is_combining_v(v) && (t == 0 || is_combining_t(t)) {
 					syllable := rune(HANGUL_S + int(l - HANGUL_L) * HANGUL_N_COUNT + int(v - HANGUL_V) * HANGUL_T_COUNT + t_index)
-					if has_glyph(f, syllable) {
+					if has_glyph(s, syllable) {
 						replace_chars(s, 3 if t != 0 else 2, syllable)
 						end = start + 1
 						continue
@@ -159,14 +160,14 @@ hangul_preprocess :: proc(s: ^Shaper, f: ^ft.Face) {
 				continue
 			}
 		} else if is_syllable(r) {
-			has := has_glyph(f, r)
+			has := has_glyph(s, r)
 			si := int(r - HANGUL_S)
 			l_index, n_index := si / HANGUL_N_COUNT, si % HANGUL_N_COUNT
 			v_index, t_index := n_index / HANGUL_T_COUNT, n_index % HANGUL_T_COUNT
 			// An LV syllable and a trailing jamo the font has composed.
 			if t_index == 0 && s.idx + 1 < s.len && is_combining_t(s.info[s.idx + 1].char) {
 				composed := r + s.info[s.idx + 1].char - HANGUL_T
-				if has_glyph(f, composed) {
+				if has_glyph(s, composed) {
 					replace_chars(s, 2, composed)
 					end = start + 1
 					continue
@@ -176,7 +177,7 @@ hangul_preprocess :: proc(s: ^Shaper, f: ^ft.Face) {
 			// decomposed when the font has the jamo.
 			if !has || (t_index == 0 && s.idx + 1 < s.len && is_jamo_t(s.info[s.idx + 1].char)) {
 				parts := [3]rune{rune(HANGUL_L + l_index), rune(HANGUL_V + v_index), rune(HANGUL_T + t_index)}
-				if has_glyph(f, parts[0]) && has_glyph(f, parts[1]) && (t_index == 0 || has_glyph(f, parts[2])) {
+				if has_glyph(s, parts[0]) && has_glyph(s, parts[1]) && (t_index == 0 || has_glyph(s, parts[2])) {
 					n := 3 if t_index != 0 else 2
 					for k in 0 ..< n {
 						output_char(s, parts[k], 0)

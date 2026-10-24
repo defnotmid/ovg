@@ -31,9 +31,6 @@ Apply_Context :: struct {
 	// The base the last mark attached to, found searching back from
 	// `last_base_until` (so marks after one base search it once).
 	last_base, last_base_until: int,
-	// The glyphs in the buffer (added to as GSUB substitutes): lookups
-	// none of them can start are skipped whole.
-	digest:                  Digest,
 }
 
 // How a rule's values match glyphs: glyph ids, classes of a class
@@ -116,7 +113,8 @@ Skippy :: struct {
 	ignore_zwnj:   bool,
 	ignore_zwj:    bool,
 	ignore_hidden: bool,
-	matcher:       Matcher,
+	// The rule's values (nil for none), read where the rule lies.
+	matcher:       ^Matcher,
 	// The rule value the next match compares against.
 	value:         int,
 }
@@ -163,8 +161,8 @@ step :: proc(it: ^Skippy, info: Glyph_Info) -> Step {
 	matched: Skip = .Maybe
 	if info.mask & it.mask == 0 || (it.syllable != 0 && it.syllable != info.syllable) {
 		matched = .No
-	} else if it.matcher.kind != .None {
-		matched = .Yes if match_value(it.c, &it.matcher, it.value, info.glyph) else .No
+	} else if it.matcher != nil && it.matcher.kind != .None {
+		matched = .Yes if match_value(it.c, it.matcher, it.value, info.glyph) else .No
 	}
 	if matched == .Yes || (matched == .Maybe && skip == .No) {
 		return .Match
@@ -225,7 +223,7 @@ Matched :: struct {
 // by coverage; `m` matches the rest). A sequence may not mix marks of
 // different ligature components, unless the ligature is ignored.
 @(private)
-match_input :: proc(c: ^Apply_Context, count: int, m: Matcher, out: ^Matched) -> bool {
+match_input :: proc(c: ^Apply_Context, count: int, m: ^Matcher, out: ^Matched) -> bool {
 	if count > MAX_CONTEXT {
 		return false
 	}
@@ -285,7 +283,7 @@ match_input :: proc(c: ^Apply_Context, count: int, m: Matcher, out: ^Matched) ->
 // Matches `count` glyphs before the current one (in the output); where
 // the first of them lies.
 @(private)
-match_backtrack :: proc(c: ^Apply_Context, count: int, m: Matcher) -> (start: int, ok: bool) {
+match_backtrack :: proc(c: ^Apply_Context, count: int, m: ^Matcher) -> (start: int, ok: bool) {
 	s := c.s
 	it := skippy_init(c, s.out_len if s.have_output else s.idx, true)
 	it.matcher = m
@@ -299,7 +297,7 @@ match_backtrack :: proc(c: ^Apply_Context, count: int, m: Matcher) -> (start: in
 
 // Matches `count` glyphs from `start` on; one past the last.
 @(private)
-match_lookahead :: proc(c: ^Apply_Context, count: int, m: Matcher, start: int) -> (end: int, ok: bool) {
+match_lookahead :: proc(c: ^Apply_Context, count: int, m: ^Matcher, start: int) -> (end: int, ok: bool) {
 	it := skippy_init(c, start - 1, true)
 	it.matcher = m
 	for _ in 0 ..< count {
@@ -332,16 +330,16 @@ Rule :: struct {
 apply_rule :: proc(c: ^Apply_Context, r: ^Rule) -> bool {
 	// Every field read is written by match_input.
 	m: Matched = ---
-	if !match_input(c, r.input_count, r.input, &m) {
+	if !match_input(c, r.input_count, &r.input, &m) {
 		return false
 	}
 	if r.lookahead_count > 0 {
-		if _, ok := match_lookahead(c, r.lookahead_count, r.lookahead, m.end); !ok {
+		if _, ok := match_lookahead(c, r.lookahead_count, &r.lookahead, m.end); !ok {
 			return false
 		}
 	}
 	if r.backtrack_count > 0 {
-		if _, ok := match_backtrack(c, r.backtrack_count, r.backtrack); !ok {
+		if _, ok := match_backtrack(c, r.backtrack_count, &r.backtrack); !ok {
 			return false
 		}
 	}
@@ -448,9 +446,6 @@ apply_at :: proc(c: ^Apply_Context, lookup: ^Lookup) -> bool {
 	t := &c.layout.tables[c.kind]
 	g := c.s.info[c.s.idx].glyph
 	for &sub in t.subtables[lookup.first:][:lookup.count] {
-		if !digest_may_have(&sub.digest, g) {
-			continue
-		}
 		covered := unpacked_coverage(c.layout, sub.coverage, g)
 		if covered < 0 {
 			continue

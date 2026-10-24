@@ -1,5 +1,7 @@
 package shape
 
+import "core:hash"
+import "core:mem"
 import "core:slice"
 import ft "../font"
 
@@ -123,6 +125,30 @@ Plan :: struct {
 	indic_old_spec:          bool,
 	// Indic: the GSUB stage of each form (-1 when the plan lacks it).
 	indic_form_stages:       [Indic_Form]i8,
+	// Per table, which of its lookups can start at each glyph.
+	starts:                  [Table_Kind]Lookup_Starts,
+	allocator:               mem.Allocator,
+}
+
+// Which of a table's plan lookups can start at each glyph (the glyphs
+// their subtables' first coverages list): glyph g's row is `rows` entry
+// row_of[g] (a two-level table over all 65,536 glyph ids, built from the
+// coverages' spans), `words` words with bit k for Plan.lookups[kind][k].
+// Equal rows are stored once.
+Lookup_Starts :: struct {
+	words:  int,
+	row_of: Two_Level,
+	rows:   []u64,
+}
+
+// Row `r`'s bits.
+starts_row :: #force_inline proc "contextless" (st: ^Lookup_Starts, r: u16) -> []u64 {
+	return st.rows[int(r) * st.words:][:st.words]
+}
+
+// Glyph g's row.
+starts_row_of :: #force_inline proc "contextless" (st: ^Lookup_Starts, g: u16) -> u16 {
+	return two_level_get(&st.row_of, int(g))
 }
 
 // The global bit every on-by-default feature shares.
@@ -198,7 +224,7 @@ add_pause :: proc(p: ^Planner, kind: Table_Kind, pause := Pause.None) {
 // face's instance as it is now (FeatureVariations pick lookups by it):
 // after set_variations, plan again. Scratch comes from the temp allocator.
 plan_init :: proc(p: ^Plan, layout: ^Layout, f: ^ft.Face, script: Script, direction: Direction, language: Tag = 0, features: []Feature = nil, allocator := context.allocator) {
-	p^ = {layout = layout, script = script, direction = direction}
+	p^ = {layout = layout, script = script, direction = direction, allocator = allocator}
 	for kind in Table_Kind {
 		p.lookups[kind] = make([dynamic]Plan_Lookup, allocator)
 		p.stages[kind] = make([dynamic]Plan_Stage, allocator)
@@ -219,6 +245,9 @@ plan_init :: proc(p: ^Plan, layout: ^Layout, f: ^ft.Face, script: Script, direct
 	collect_features(&pl, features)
 	compile(&pl, f, language)
 	shaper_plan(p)
+	for kind in Table_Kind {
+		lookup_starts_init(&p.starts[kind], layout, kind, p.lookups[kind][:], allocator)
+	}
 
 	// Who positions: GPOS when the face has it (and, for scripts whose
 	// shaper asks, it has the script's own lookups), the kern table when
@@ -251,10 +280,196 @@ plan_destroy :: proc(p: ^Plan) {
 	for kind in Table_Kind {
 		delete(p.lookups[kind])
 		delete(p.stages[kind])
+		delete(p.starts[kind].row_of.stage1, p.allocator)
+		delete(p.starts[kind].row_of.blocks, p.allocator)
+		delete(p.starts[kind].rows, p.allocator)
 	}
 	delete(p.features)
 	p^ = {}
 }
+
+// Builds a table's Lookup_Starts: each lookup's covered spans as edges
+// (+1 at a span's first glyph, -1 past its last), sorted and swept into
+// spans of glyphs with one row each, then blocks. Past as many edges as
+// the table has bytes (work in proportion to the font) a lookup covers
+// every glyph, as does every lookup when the rows would outnumber 16 bits.
+@(private)
+lookup_starts_init :: proc(st: ^Lookup_Starts, l: ^Layout, kind: Table_Kind, lookups: []Plan_Lookup, allocator: mem.Allocator) {
+	n := len(lookups)
+	if n == 0 {
+		return
+	}
+	words := (n + 63) / 64
+	st.words = words
+	d := l.data
+	t := &l.tables[kind]
+	// Each lookup's coverage edges (subtables sharing a coverage give it
+	// again; the sweep counts overlaps): counted, a lookup past the budget
+	// taking one span over every glyph, placed once, filled, sorted by
+	// glyph.
+	budget := max(t.size, 2)
+	spans := make([]int, n, context.temp_allocator)
+	total := 0
+	for pl, k in lookups {
+		lk := t.lookups[pl.index]
+		room := max(budget - total, 0) / 2
+		for sub in t.subtables[lk.first:][:lk.count] {
+			if spans[k] += coverage_edges(d, int(sub.coverage.table), i32(k), nil, room - spans[k]); spans[k] > room {
+				spans[k] = -1
+				break
+			}
+		}
+		total += 2 * spans[k] if spans[k] >= 0 else 2
+	}
+	edges := make([]Start_Edge, total, context.temp_allocator)
+	at := 0
+	for pl, k in lookups {
+		if spans[k] < 0 {
+			edges[at], edges[at + 1] = {0, i32(k), 1}, {1 << 16, i32(k), -1}
+			at += 2
+			continue
+		}
+		lk := t.lookups[pl.index]
+		for sub in t.subtables[lk.first:][:lk.count] {
+			at += 2 * coverage_edges(d, int(sub.coverage.table), i32(k), edges[at:], len(edges))
+		}
+	}
+	sort_edges(edges, make([]Start_Edge, total, context.temp_allocator))
+
+	// Spans of glyphs with one row each, the rows stored once.
+	glyph_spans := make([dynamic]Two_Level_Span, context.temp_allocator)
+	rows := make([dynamic]u64, words, context.temp_allocator)
+	// Rows by a hash of their words (a collision only stores a row twice).
+	ids := make(map[u64]u16, allocator = context.temp_allocator)
+	counts := make([]i32, n, context.temp_allocator)
+	row := make([]u64, words, context.temp_allocator)
+	ids[hash.fnv64a(mem.slice_to_bytes(row))] = 0
+	append(&glyph_spans, Two_Level_Span{0, 0, 0})
+	overflow := false
+	for i := 0; i < len(edges) && !overflow; {
+		g := edges[i].glyph
+		for ; i < len(edges) && edges[i].glyph == g; i += 1 {
+			e := edges[i]
+			counts[e.lookup] += e.delta
+			bit := u64(1) << uint(e.lookup % 64)
+			if counts[e.lookup] > 0 {
+				row[e.lookup / 64] |= bit
+			} else {
+				row[e.lookup / 64] &~= bit
+			}
+		}
+		if g >= 1 << 16 {
+			break
+		}
+		key := hash.fnv64a(mem.slice_to_bytes(row))
+		id, found := ids[key]
+		if !found || !slice.equal(rows[int(id) * words:][:words], row) {
+			if len(rows) / words > 0xFFFF {
+				overflow = true
+				break
+			}
+			id = u16(len(rows) / words)
+			ids[key] = id
+			append(&rows, ..row)
+		}
+		if last := &glyph_spans[len(glyph_spans) - 1]; last.start == g {
+			last.value = id
+		} else if last.value != id {
+			append(&glyph_spans, Two_Level_Span{g, id, 0})
+		}
+	}
+	if overflow {
+		// Every lookup at every glyph.
+		clear(&glyph_spans)
+		resize(&rows, 2 * words)
+		for &v, i in rows[words:] {
+			v = ~u64(0) >> uint(64 - min(n - 64 * i, 64))
+		}
+		append(&glyph_spans, Two_Level_Span{0, 1, 0})
+	}
+	two_level_init(&st.row_of, glyph_spans[:], 1 << 16, allocator)
+	st.rows = slice.clone(rows[:], allocator)
+}
+
+@(private)
+Start_Edge :: struct {
+	glyph:  i32,
+	lookup: i32,
+	delta:  i32,
+}
+
+// The spans the coverage at `t` lists (a format 1 coverage's consecutive
+// glyphs as one), each written as two edges for lookup `k` into `out`
+// while they fit: a call with nil counts them. Stops past `limit` spans.
+@(private)
+coverage_edges :: proc(d: []u8, t: int, k: i32, out: []Start_Edge, limit: int) -> (spans: int) {
+	if t == 0 {
+		return
+	}
+	span :: #force_inline proc(out: []Start_Edge, spans: ^int, a, b: int, k: i32) {
+		if 2 * spans^ + 2 <= len(out) {
+			out[2 * spans^], out[2 * spans^ + 1] = {i32(a), k, 1}, {i32(b) + 1, k, -1}
+		}
+		spans^ += 1
+	}
+	switch ft.read_u16(d, t) {
+	case 1:
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 2)
+		first, last := -1, -1
+		for i in 0 ..< count {
+			g := int(ft.read_u16(d, t + 4 + 2 * i))
+			if g == last + 1 && first >= 0 {
+				last = g
+				continue
+			}
+			if first >= 0 {
+				span(out, &spans, first, last, k)
+			}
+			if spans > limit {
+				return
+			}
+			first, last = g, g
+		}
+		if first >= 0 {
+			span(out, &spans, first, last, k)
+		}
+	case 2:
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 6)
+		for i in 0 ..< count {
+			r := t + 4 + 6 * i
+			if a, b := int(ft.read_u16(d, r)), int(ft.read_u16(d, r + 2)); a <= b {
+				span(out, &spans, a, b, k)
+			}
+			if spans > limit {
+				return
+			}
+		}
+	}
+	return
+}
+
+// Sorts edges by glyph (up to 1 << 16, the end past the last glyph):
+// two stable counting passes of 9 bits, through `scratch` and back.
+@(private)
+sort_edges :: proc(edges, scratch: []Start_Edge) {
+	src, dst := edges, scratch
+	for shift in ([2]uint{0, 9}) {
+		counts: [1 << 9 + 1]int
+		for e in src {
+			counts[int(e.glyph) >> shift & (1 << 9 - 1) + 1] += 1
+		}
+		for i in 1 ..< len(counts) {
+			counts[i] += counts[i - 1]
+		}
+		for e in src {
+			b := int(e.glyph) >> shift & (1 << 9 - 1)
+			dst[counts[b]] = e
+			counts[b] += 1
+		}
+		src, dst = dst, src
+	}
+}
+
 
 // The mask (and its shift) of a feature in the plan; 0 when it has none.
 plan_feature_mask :: proc(p: ^Plan, t: Tag) -> (mask: u32, shift: u8) {

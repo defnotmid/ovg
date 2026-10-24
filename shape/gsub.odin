@@ -1,5 +1,6 @@
 package shape
 
+import "base:intrinsics"
 import ft "../font"
 
 // GSUB: glyph substitution lookups, applied to the buffer in order, each
@@ -21,27 +22,29 @@ gsub_start :: proc(c: ^Apply_Context) {
 	}
 }
 
-// One lookup over the whole buffer: skipped when no glyph in it can be
-// covered; else glyphs it can't apply to pass through in runs.
+// Plan lookup `k` over the buffer, at the positions it can start at
+// (skipped whole when there are none); the glyphs between pass through in
+// runs.
 @(private)
-apply_lookup_pass :: proc(c: ^Apply_Context, lookup: ^Lookup) {
+apply_lookup_pass :: proc(c: ^Apply_Context, lookup: ^Lookup, k: int) {
 	s := c.s
-	if s.len == 0 || c.lookup_mask == 0 || !digests_intersect(&lookup.digest, &c.digest) {
+	cand := s.cand[k * s.cand_words:][:s.cand_words]
+	if s.len == 0 || c.lookup_mask == 0 || !any_bit(cand) {
 		return
 	}
 	c.lookup_props = lookup.props
 	c.last_base, c.last_base_until = -1, 0
 	if c.kind == .GSUB && lookup.type == GSUB_REVERSE_CHAIN {
 		// In place, last glyph to first.
-		s.idx = s.len - 1
-		for {
-			if may_apply(c, lookup, s.info[s.idx]) {
-				apply_at(c, lookup)
+		for i := len(cand) - 1; i >= 0; i -= 1 {
+			for bits := cand[i]; bits != 0; {
+				b := 63 - int(intrinsics.count_leading_zeros(bits))
+				bits &~= u64(1) << uint(b)
+				if p := 64 * i + b; may_apply(c, s.info[p]) {
+					s.idx = p
+					apply_at(c, lookup)
+				}
 			}
-			if s.idx == 0 {
-				break
-			}
-			s.idx -= 1
 		}
 		return
 	}
@@ -50,13 +53,8 @@ apply_lookup_pass :: proc(c: ^Apply_Context, lookup: ^Lookup) {
 	}
 	s.idx = 0
 	for s.idx < s.len && s.ok {
-		start := s.idx
-		for s.idx < s.len && !may_apply(c, lookup, s.info[s.idx]) {
-			s.idx += 1
-		}
-		n := s.idx - start
-		s.idx = start
-		next_glyphs(s, n)
+		next := next_candidate(c, cand, s.idx)
+		next_glyphs(s, next - s.idx)
 		if s.idx < s.len && !apply_at(c, lookup) {
 			next_glyph(s)
 		}
@@ -66,11 +64,42 @@ apply_lookup_pass :: proc(c: ^Apply_Context, lookup: ^Lookup) {
 	}
 }
 
-// Whether the lookup may apply at a glyph: in its digest, its features'
-// mask, not ignored by its flags.
+// The first position from `from` on that the lookup may apply at (one it
+// can start at, in its features' mask, not ignored by its flags); s.len
+// for none.
 @(private)
-may_apply :: #force_inline proc(c: ^Apply_Context, lookup: ^Lookup, info: Glyph_Info) -> bool {
-	return digest_may_have(&lookup.digest, info.glyph) && info.mask & c.lookup_mask != 0 && check_glyph_property(c, info, c.lookup_props)
+next_candidate :: proc(c: ^Apply_Context, cand: []u64, from: int) -> int {
+	s := c.s
+	for i := from / 64; i < len(cand); i += 1 {
+		bits := cand[i]
+		if i == from / 64 {
+			bits &= ~u64(0) << uint(from % 64)
+		}
+		for ; bits != 0; bits &= bits - 1 {
+			p := 64 * i + int(intrinsics.count_trailing_zeros(bits))
+			if may_apply(c, s.info[p]) {
+				return p
+			}
+		}
+	}
+	return s.len
+}
+
+@(private)
+any_bit :: #force_inline proc "contextless" (bits: []u64) -> bool {
+	for v in bits {
+		if v != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether the lookup may apply at a glyph it can start at: in its
+// features' mask, not ignored by its flags.
+@(private)
+may_apply :: #force_inline proc(c: ^Apply_Context, info: Glyph_Info) -> bool {
+	return info.mask & c.lookup_mask != 0 && check_glyph_property(c, info, c.lookup_props)
 }
 
 // The glyph's new properties after substitution: substituted, ligated or
@@ -87,7 +116,21 @@ set_glyph_class :: proc(c: ^Apply_Context, g: u16, class_guess: u16 = 0, ligatur
 	if component {
 		props |= GLYPH_MULTIPLIED
 	}
-	digest_add_range(&c.digest, g, g)
+	s := c.s
+	if !s.have_output || (!s.separate && s.out_len == s.idx) {
+		// In place: the position's candidates follow its new glyph.
+		new := starts_row(s.starts, starts_row_of(s.starts, g))
+		bit := u64(1) << uint(s.idx % 64)
+		for word, i in starts_row(s.starts, starts_row_of(s.starts, info.glyph)) {
+			s.active[i] |= new[i]
+			for change := word ~ new[i]; change != 0; change &= change - 1 {
+				k := 64 * i + int(intrinsics.count_trailing_zeros(change))
+				s.cand[k * s.cand_words + s.idx / 64] ~= bit
+			}
+		}
+	} else {
+		s.shifted = true
+	}
 	PRESERVE :: GLYPH_SUBSTITUTED | GLYPH_LIGATED | GLYPH_MULTIPLIED
 	if c.has_glyph_classes {
 		props = props & PRESERVE | glyph_props(c.layout, g)
@@ -198,7 +241,8 @@ gsub_apply :: proc(c: ^Apply_Context, type: u8, sub: ^Subtable, covered: int) ->
 			}
 			// Every field read is written by match_input.
 			m: Matched = ---
-			if match_input(c, comps, {.Glyph, lig + 4, {}, 0}, &m) {
+			components := Matcher{.Glyph, lig + 4, {}, 0}
+			if match_input(c, comps, &components, &m) {
 				ligate(c, comps, &m, lig_glyph)
 				return true
 			}
@@ -219,10 +263,12 @@ gsub_apply :: proc(c: ^Apply_Context, type: u8, sub: ^Subtable, covered: int) ->
 		if covered >= int(ft.read_u16(d, subst_at)) {
 			return false
 		}
-		if _, ok := match_backtrack(c, backtrack, {.Coverage, at + 6, {}, at}); !ok {
+		behind := Matcher{.Coverage, at + 6, {}, at}
+		if _, ok := match_backtrack(c, backtrack, &behind); !ok {
 			return false
 		}
-		if _, ok := match_lookahead(c, lookahead, {.Coverage, ahead_at + 2, {}, at}, s.idx + 1); !ok {
+		ahead := Matcher{.Coverage, ahead_at + 2, {}, at}
+		if _, ok := match_lookahead(c, lookahead, &ahead, s.idx + 1); !ok {
 			return false
 		}
 		g := ft.read_u16(d, subst_at + 2 + 2 * covered)

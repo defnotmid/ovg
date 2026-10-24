@@ -17,6 +17,7 @@
 // order.
 package shape
 
+import "base:intrinsics"
 import ft "../font"
 
 Shaper :: struct {
@@ -43,8 +44,22 @@ Shaper :: struct {
 	scratch_cats:      [dynamic]u8,
 	scratch_index:     [dynamic]i32,
 	scratch_syllables: [dynamic]u8,
+	// The layout of the face being shaped (its cmap table).
+	layout:            ^Layout,
 	// Indic: the font's virama glyph for the script (0 for none).
 	virama:            u16,
+	// Which of the applying table's plan lookups can start at each glyph,
+	// and per plan lookup the positions whose glyph it can start at:
+	// `cand_words` words of bits each.
+	starts:            ^Lookup_Starts,
+	cand:              [dynamic]u64,
+	cand_words:        int,
+	// The plan lookups some glyph can start at (a bit per lookup): the
+	// others are skipped untouched.
+	active:            [dynamic]u64,
+	// Rows moved during a pass (the output fell behind or ahead of the
+	// input), so positions changed.
+	shifted:           bool,
 }
 
 // A shaped glyph, in font units (y up), in visual order.
@@ -66,6 +81,8 @@ shaper_init :: proc(s: ^Shaper, allocator := context.allocator) {
 	s.scratch_cats = make([dynamic]u8, allocator)
 	s.scratch_index = make([dynamic]i32, allocator)
 	s.scratch_syllables = make([dynamic]u8, allocator)
+	s.cand = make([dynamic]u64, allocator)
+	s.active = make([dynamic]u64, allocator)
 }
 
 shaper_destroy :: proc(s: ^Shaper) {
@@ -75,6 +92,8 @@ shaper_destroy :: proc(s: ^Shaper) {
 	delete(s.scratch_cats)
 	delete(s.scratch_index)
 	delete(s.scratch_syllables)
+	delete(s.cand)
+	delete(s.active)
 	s^ = {}
 }
 
@@ -94,6 +113,7 @@ shape :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, text: []rune, features: []Fe
 	s.serial = 0
 	s.random_state = 1
 	s.direction = plan.direction
+	s.layout = plan.layout
 	s.max_len = max(n * MAX_LEN_FACTOR, MAX_LEN_MIN)
 	s.max_ops = max(n * MAX_OPS_FACTOR, MAX_OPS_MIN)
 	if !ensure(s, n) {
@@ -146,33 +166,87 @@ shape :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, text: []rune, features: []Fe
 	}
 }
 
-// Applies one table's lookups, stage by stage.
+// Applies one table's lookups, stage by stage, each over the positions
+// it can start at (Shaper.cand): found once, kept as GSUB substitutes in
+// place, found again when rows move.
 @(private)
 apply_table :: proc(c: ^Apply_Context, kind: Table_Kind) {
 	plan := c.plan
 	c.kind = kind
-	c.digest = {}
-	for info in c.s.info[:c.s.len] {
-		digest_add_range(&c.digest, info.glyph, info.glyph)
-	}
+	c.s.starts = &plan.starts[kind]
 	lookups := plan.layout.tables[kind].lookups
+	n := len(plan.lookups[kind])
+	find_candidates(c.s, n)
 	first := 0
 	for stage in plan.stages[kind] {
-		for pl in plan.lookups[kind][first:stage.end] {
+		// The stage's active lookups in order (passes may activate more).
+		for k := next_active(c.s, first, int(stage.end)); k < int(stage.end); k = next_active(c.s, k + 1, int(stage.end)) {
+			pl := plan.lookups[kind][k]
 			c.lookup_index = int(pl.index)
 			c.lookup_mask = pl.mask
 			c.flags = pl.flags
-			apply_lookup_pass(c, &lookups[pl.index])
+			c.s.shifted = false
+			apply_lookup_pass(c, &lookups[pl.index], k)
+			if c.s.shifted {
+				find_candidates(c.s, n)
+			}
 		}
 		first = int(stage.end)
 		if kind == .GSUB && stage.pause != .None {
 			shaper_pause(c, stage.pause)
-			// It may have added glyphs (dotted circles).
-			c.digest = {}
-			for info in c.s.info[:c.s.len] {
-				digest_add_range(&c.digest, info.glyph, info.glyph)
+			if pause_moves_rows(stage.pause) {
+				find_candidates(c.s, n)
 			}
 		}
+	}
+}
+
+// The positions of each of the table's `n` plan lookups (Shaper.cand)
+// from each glyph's row of Lookup_Starts: sized, cleared, then filled.
+@(private)
+find_candidates :: proc(s: ^Shaper, n: int) {
+	st := s.starts
+	w := (s.len + 63) / 64
+	s.cand_words = w
+	resize(&s.cand, n * w)
+	slice_zero(s.cand[:])
+	resize(&s.active, st.words)
+	slice_zero(s.active[:])
+	if st.words == 0 {
+		return
+	}
+	info := s.info[:s.len]
+	for p in 0 ..< len(info) {
+		bit := u64(1) << uint(p % 64)
+		for word, i in starts_row(st, starts_row_of(st, info[p].glyph)) {
+			s.active[i] |= word
+			for bits := word; bits != 0; bits &= bits - 1 {
+				k := 64 * i + int(intrinsics.count_trailing_zeros(bits))
+				s.cand[k * w + p / 64] |= bit
+			}
+		}
+	}
+}
+
+// The first active plan lookup from `from` (`end` for none).
+@(private)
+next_active :: proc "contextless" (s: ^Shaper, from, end: int) -> int {
+	for i := from / 64; i < len(s.active) && 64 * i < end; i += 1 {
+		bits := s.active[i]
+		if i == from / 64 {
+			bits &= ~u64(0) << uint(from % 64)
+		}
+		if bits != 0 {
+			return min(64 * i + int(intrinsics.count_trailing_zeros(bits)), end)
+		}
+	}
+	return end
+}
+
+@(private)
+slice_zero :: #force_inline proc "contextless" (v: []u64) {
+	for &x in v {
+		x = 0
 	}
 }
 
@@ -261,7 +335,7 @@ native_direction :: proc(s: ^Shaper, plan: ^Plan) {
 mirror_chars :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
 	for &info in s.info[:s.len] {
 		if m := char_mirror(info.char); m != 0 {
-			if _, ok := nominal_glyph(f, m); ok {
+			if _, ok := nominal_glyph(s, m); ok {
 				info.char = m
 				continue
 			}
@@ -401,14 +475,14 @@ adjust_spaces :: proc(s: ^Shaper, f: ^ft.Face) {
 			p.x_advance = upem * 4 / 18
 		case .Figure:
 			for ch in '0' ..= '9' {
-				if g, ok := nominal_glyph(f, ch); ok {
+				if g, ok := nominal_glyph(s, ch); ok {
 					p.x_advance = i32(ft.advance(f, ft.Glyph(g)))
 					break
 				}
 			}
 		case .Punctuation:
 			for ch in ([?]rune{'.', ','}) {
-				if g, ok := nominal_glyph(f, ch); ok {
+				if g, ok := nominal_glyph(s, ch); ok {
 					p.x_advance = i32(ft.advance(f, ft.Glyph(g)))
 					break
 				}
@@ -519,7 +593,7 @@ hide_default_ignorables :: proc(s: ^Shaper, f: ^ft.Face) {
 	if .Has_Default_Ignorables not_in s.flags {
 		return
 	}
-	if space, ok := nominal_glyph(f, ' '); ok {
+	if space, ok := nominal_glyph(s, ' '); ok {
 		for &info in s.info[:s.len] {
 			if is_ignorable(info) {
 				info.glyph = space

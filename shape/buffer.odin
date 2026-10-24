@@ -266,6 +266,7 @@ make_room_for :: proc(s: ^Shaper, num_in, num_out: int) -> bool {
 next_glyph :: proc(s: ^Shaper) {
 	if s.have_output {
 		if s.separate || s.out_len != s.idx {
+			s.shifted = true
 			if !make_room_for(s, 1, 1) {
 				return
 			}
@@ -279,6 +280,7 @@ next_glyph :: proc(s: ^Shaper) {
 next_glyphs :: proc(s: ^Shaper, n: int) {
 	if s.have_output {
 		if s.separate || s.out_len != s.idx {
+			s.shifted = true
 			if !make_room_for(s, n, n) {
 				return
 			}
@@ -291,12 +293,14 @@ next_glyphs :: proc(s: ^Shaper, n: int) {
 
 // Drops the current row.
 skip_glyph :: #force_inline proc "contextless" (s: ^Shaper) {
+	s.shifted ||= s.have_output
 	s.idx += 1
 }
 
 // Outputs the current row with a new glyph and moves on.
 replace_glyph :: proc(s: ^Shaper, g: u16) {
 	if s.separate || s.out_len != s.idx {
+		s.shifted = true
 		if !make_room_for(s, 1, 1) {
 			return
 		}
@@ -310,6 +314,7 @@ replace_glyph :: proc(s: ^Shaper, g: u16) {
 // Outputs a copy of the current row (the last output row at the end) with
 // a new glyph, staying on the current row.
 output_glyph :: proc(s: ^Shaper, g: u16) {
+	s.shifted = true
 	if !make_room_for(s, 0, 1) {
 		return
 	}
@@ -343,6 +348,7 @@ move_to :: proc(s: ^Shaper, i: int) -> bool {
 		s.idx = i
 		return true
 	}
+	s.shifted ||= s.separate || s.out_len != s.idx
 	if !s.ok {
 		return false
 	}

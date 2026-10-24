@@ -248,6 +248,17 @@ shaper_pause :: proc(c: ^Apply_Context, pause: Pause) {
 	}
 }
 
+// Whether a pause moves rows or adds some (reordering, dotted circles),
+// so the lookups after it start at other positions.
+@(private)
+pause_moves_rows :: proc(pause: Pause) -> bool {
+	#partial switch pause {
+	case .None, .Arabic_Stch, .Clear_Substitution_Flags, .Use_Record_Rphf, .Use_Record_Pref:
+		return false
+	}
+	return true
+}
+
 // After positioning and the final reorder.
 @(private)
 shaper_postprocess :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face) {
