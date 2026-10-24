@@ -2,6 +2,8 @@ package ovg
 
 import "core:math"
 
+import cv "curves"
+
 // Evaluating and drawing a `Lottie_Document` (lottie.odin). Properties are
 // interpolated at the frame each draw (no cached state), shape geometry is
 // built per layer into the renderer's scratch buffers (cubic contours, then
@@ -358,8 +360,8 @@ lottie_spatial_point :: proc "contextless" (p0, p1, p2, p3: Vec2, e: f32) -> Vec
 	lens: [N + 1]f32
 	prev := p0
 	for i in 1 ..= N {
-		q := cubic_point(p0, p1, p2, p3, f32(i) / N)
-		lens[i] = lens[i - 1] + lottie_len(q - prev)
+		q := cv.cubic_at([4]Vec2{p0, p1, p2, p3}, f32(i) / N)
+		lens[i] = lens[i - 1] + vec_len(q - prev)
 		prev = q
 	}
 	total := lens[N]
@@ -371,21 +373,10 @@ lottie_spatial_point :: proc "contextless" (p0, p1, p2, p3: Vec2, e: f32) -> Vec
 		if lens[i] >= target {
 			seg := lens[i] - lens[i - 1]
 			f := (target - lens[i - 1]) / seg if seg > 0 else 0
-			return cubic_point(p0, p1, p2, p3, (f32(i - 1) + f) / N)
+			return cv.cubic_at([4]Vec2{p0, p1, p2, p3}, (f32(i - 1) + f) / N)
 		}
 	}
 	return p3
-}
-
-@(private)
-lottie_len :: #force_inline proc "contextless" (v: Vec2) -> f32 {
-	return math.sqrt(v.x * v.x + v.y * v.y)
-}
-
-@(private)
-cubic_point :: #force_inline proc "contextless" (p0, p1, p2, p3: Vec2, t: f32) -> Vec2 {
-	m := 1 - t
-	return p0 * (m * m * m) + p1 * (3 * m * m * t) + p2 * (3 * m * t * t) + p3 * (t * t * t)
 }
 
 // The matrix of a transform at `t` and its opacity (0..1).
@@ -929,7 +920,7 @@ lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 		vert :: proc "contextless" (c: Vec2, rad, ang, perim, round: f32) -> (v, tin, tout: Vec2) {
 			v = {rad * math.cos(ang), rad * math.sin(ang)}
 			o: Vec2
-			if l := lottie_len(v); l > 0 {
+			if l := vec_len(v); l > 0 {
 				o = {v.y / l, -v.x / l}
 			}
 			v += c
@@ -1062,8 +1053,8 @@ lottie_cubic_length :: proc "contextless" (p0, p1, p2, p3: Vec2) -> f32 {
 	total: f32
 	prev := p0
 	for i in 1 ..= N {
-		q := cubic_point(p0, p1, p2, p3, f32(i) / N)
-		total += lottie_len(q - prev)
+		q := cv.cubic_at([4]Vec2{p0, p1, p2, p3}, f32(i) / N)
+		total += vec_len(q - prev)
 		prev = q
 	}
 	return total
@@ -1082,8 +1073,8 @@ lottie_cubic_param :: proc "contextless" (p0, p1, p2, p3: Vec2, l, total: f32) -
 	acc: f32
 	prev := p0
 	for i in 1 ..= N {
-		q := cubic_point(p0, p1, p2, p3, f32(i) / N)
-		seg := lottie_len(q - prev)
+		q := cv.cubic_at([4]Vec2{p0, p1, p2, p3}, f32(i) / N)
+		seg := vec_len(q - prev)
 		if acc + seg >= l {
 			f := (l - acc) / seg if seg > 0 else 0
 			return (f32(i - 1) + f) / N
@@ -1736,7 +1727,7 @@ lottie_gradient :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32, opacity: f32
 	if .Radial not_in sh.flags {
 		return paint_linear_gradient_stops(s.x, s.y, e.x, e.y, r.stops[:]), true
 	}
-	rad := lottie_len(e - s)
+	rad := vec_len(e - s)
 	h := clamp(lottie_eval1(doc, sh.props[LOTTIE_HIGHLIGHT], t, 0) / 100, -0.99, 0.99)
 	a := lottie_eval1(doc, sh.props[LOTTIE_HIGHLIGHT_ANGLE], t, 0) * math.RAD_PER_DEG
 	ang := math.atan2(e.y - s.y, e.x - s.x) + a

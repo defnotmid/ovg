@@ -356,7 +356,7 @@ instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc,
 	if inst.aliased {
 		// Off center as the shader samples it.
 		w := cv.winding(words, rc + (u + v) / 64)
-		return 1 if (w & 1 != 0 if inst.even_odd else w != 0) else 0
+		return 1 if cv.fill_inside(w, inst.even_odd) else 0
 	}
 	return shape_coverage(words, rc, u, v, inst.even_odd)
 }

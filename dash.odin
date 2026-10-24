@@ -2,6 +2,8 @@ package ovg
 
 import "core:math"
 
+import cv "curves"
+
 // Dashes `src` into `dst` (SVG stroke-dasharray / stroke-dashoffset /
 // pathLength: when `total_length` > 0, dash lengths are fractions of it).
 // Curves stay curves: a cubic is cut at the dash ends, found along it by
@@ -120,12 +122,6 @@ dash_length :: #force_inline proc "contextless" (d: ^Dasher) -> f32 {
 	return d.dashes[d.idx % len(d.dashes)] * d.scale
 }
 
-@(private = "file")
-cubic_at :: #force_inline proc "contextless" (c: [4]Vec2, t: f32) -> Vec2 {
-	u := 1 - t
-	return c[0] * (u * u * u) + c[1] * (3 * u * u * t) + c[2] * (3 * u * t * t) + c[3] * (t * t * t)
-}
-
 // Walks the pattern along one segment (a line from c[0] to c[3], or a
 // cubic): the parts that draw go to the path as lines or cubics.
 @(private = "file")
@@ -143,7 +139,7 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 		prev := c[0]
 		for k in 1 ..= steps {
 			t := f32(k) / f32(steps)
-			q := cubic_at(c, t)
+			q := cv.cubic_at(c, t)
 			seg += vec_len(q - prev)
 			append(d.lengths, Vec2{seg, t})
 			prev = q
@@ -168,8 +164,8 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 			path_line_to(d.dst, p.x, p.y)
 			return
 		}
-		_, c1, c2, p := cubic_split(c[0], c[1], c[2], c[3], t0, t1)
-		path_bezier_to(d.dst, c1.x, c1.y, c2.x, c2.y, p.x, p.y)
+		q := cv.cubic_range(c, t0, t1)
+		path_bezier_to(d.dst, q[1].x, q[1].y, q[2].x, q[2].y, q[3].x, q[3].y)
 	}
 	pos, from: f32 = 0, 0
 	for seg - pos > d.remaining {
@@ -181,7 +177,7 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 		if d.on {
 			draw(d, c, cubic, from, t)
 		} else {
-			p := cubic_at(c, t) if cubic else c[0] + (c[3] - c[0]) * t
+			p := cv.cubic_at(c, t) if cubic else c[0] + (c[3] - c[0]) * t
 			path_move_to(d.dst, p.x, p.y)
 		}
 		from = t
@@ -199,10 +195,6 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 	return true
 }
 
-@(private = "file")
-vec_len :: #force_inline proc "contextless" (v: Vec2) -> f32 {
-	return math.sqrt(v.x * v.x + v.y * v.y)
-}
 
 // A path flattened to polylines: every contour's points in one array, each
 // contour a range of it (closed ones end on their first point).
@@ -273,9 +265,7 @@ path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segme
 			approx := vec_len(c1 - p0) + vec_len(c2 - c1) + vec_len(p3 - c2)
 			n := clamp(int(approx / segment), 2, 256)
 			for k in 1 ..= n {
-				t := f32(k) / f32(n)
-				u := 1 - t
-				append(&out.points, p0 * (u * u * u) + c1 * (3 * u * u * t) + c2 * (3 * u * t * t) + p3 * (t * t * t))
+				append(&out.points, cv.cubic_at([4]Vec2{p0, c1, c2, p3}, f32(k) / f32(n)))
 			}
 		case .Close:
 			if open {

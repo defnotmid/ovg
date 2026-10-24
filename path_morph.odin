@@ -379,7 +379,7 @@ morph_params :: proc(out: ^[dynamic]f32, pts: []Vec2) {
 	total: f32 = 0
 	for q, k in pts {
 		append(out, total)
-		total += vec_length(pts[(k + 1) % len(pts)] - q)
+		total += vec_len(pts[(k + 1) % len(pts)] - q)
 	}
 	ps := out[start:]
 	for &p, k in ps {
@@ -463,9 +463,4 @@ morph_winding :: proc "contextless" (pts: []Vec2, p: Vec2) -> int {
 		}
 	}
 	return w
-}
-
-@(private = "file")
-vec_length :: #force_inline proc "contextless" (v: Vec2) -> f32 {
-	return math.sqrt(v.x * v.x + v.y * v.y)
 }

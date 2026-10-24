@@ -2,6 +2,8 @@ package ovg
 
 import "core:math"
 
+import cv "curves"
+
 // Strokes as fills: a path's stroke becomes contours whose non-zero fill is
 // the stroked area (each contour's outline: one side's offset forward, a
 // cap, the other side's back, a cap; a closed contour's two sides apart),
@@ -87,19 +89,16 @@ stroke_outline :: proc(b: ^Shape_Builder, p: ^Path, t: Transform2D, s: Stroke_Se
 			if !moved {
 				continue
 			}
-			// n quadratics, each the midpoint approximation of its piece:
-			// within sqrt(3)/36 |p3 - 3 c2 + 3 c1 - p0| / n^3 (curves.odin).
-			p0, c1, c2, p3 := last, coords[0], coords[1], coords[2]
-			d := p3 - 3 * c2 + 3 * c1 - p0
-			n := clamp(int(math.ceil(math.cbrt(math.sqrt(f32(3)) / 36 * math.hypot(d.x, d.y) / tol))), 1, 64)
-			from := p0
+			// n quadratics, each the midpoint approximation of its piece.
+			cubic := [4]Vec2{last, coords[0], coords[1], coords[2]}
+			n := cv.cubic_quad_count(cubic, tol)
+			from := cubic[0]
 			for i in 0 ..< n {
-				a0, a1, a2, a3 := cubic_split(p0, c1, c2, p3, f32(i) / f32(n), f32(i + 1) / f32(n))
-				to := a3 if i < n - 1 else p3
-				add_quad(&o, segs, from, (3 * (a1 + a2) - a0 - a3) * 0.25, to, i == 0)
+				c, to := cv.cubic_quad(cubic, i, n)
+				add_quad(&o, segs, from, c, to, i == 0)
 				from = to
 			}
-			last = p3
+			last = cubic[3]
 		case .Close:
 			if moved {
 				add_line(&o, segs, last, start, true)
@@ -112,23 +111,6 @@ stroke_outline :: proc(b: ^Shape_Builder, p: ^Path, t: Transform2D, s: Stroke_Se
 		}
 	}
 	outline_contour(&o, segs[:], false)
-}
-
-// The cubic's control points restricted to [t0, t1].
-@(private)
-cubic_split :: proc "contextless" (p0, p1, p2, p3: Vec2, t0, t1: f32) -> (a, b, c, d: Vec2) {
-	at :: proc "contextless" (p0, p1, p2, p3: Vec2, t: f32) -> Vec2 {
-		u := 1 - t
-		return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
-	}
-	tangent :: proc "contextless" (p0, p1, p2, p3: Vec2, t: f32) -> Vec2 {
-		u := 1 - t
-		return 3 * (u * u * (p1 - p0) + 2 * u * t * (p2 - p1) + t * t * (p3 - p2))
-	}
-	h := (t1 - t0) / 3
-	a = at(p0, p1, p2, p3, t0)
-	d = at(p0, p1, p2, p3, t1)
-	return a, a + tangent(p0, p1, p2, p3, t0) * h, d - tangent(p0, p1, p2, p3, t1) * h, d
 }
 
 @(private = "file")

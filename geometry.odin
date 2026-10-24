@@ -135,6 +135,12 @@ transform_inverse :: proc "contextless" (t: Transform2D) -> Transform2D {
 	}
 }
 
+// A vector's length.
+@(private)
+vec_len :: #force_inline proc "contextless" (v: Vec2) -> f32 {
+	return math.sqrt(v.x * v.x + v.y * v.y)
+}
+
 transform_point :: #force_inline proc "contextless" (t: Transform2D, x, y: f32) -> Vec2 {
 	return {x * t[0] + y * t[2] + t[4], x * t[1] + y * t[3] + t[5]}
 }

@@ -332,7 +332,7 @@ contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool
 	words, origin, extent := path_words(c, p, state(c).transform) or_return
 	defer resize(&c.shape_words, len(c.shape_words) - len(words))
 	w := cv.winding(words, (Vec2{x, y} - origin) / extent)
-	return w & 1 != 0 if rule == .Even_Odd else w != 0
+	return cv.fill_inside(w, rule == .Even_Odd)
 }
 
 // Bounds of the path under the current transform.

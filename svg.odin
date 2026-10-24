@@ -10,6 +10,8 @@ import "core:slice"
 import "core:strings"
 import image "deps:odecs/image"
 
+import cv "curves"
+
 // SVG import: `svg_parse` turns SVG markup into an `Svg_Document`, a
 // render-ready, data-oriented copy (like usvg's tree): `<use>` instances
 // expanded, styles computed (presentation attributes, `style`, `<style>`
@@ -2108,9 +2110,7 @@ svg_path_bbox :: proc(verbs: []Verb, coords: []Vec2) -> Rect {
 				}
 				for t in ts[:nt] {
 					if t > 0 && t < 1 {
-						mt := 1 - t
-						q := cur * (mt * mt * mt) + c1 * (3 * mt * mt * t) + c2 * (3 * mt * t * t) + to * (t * t * t)
-						add(&lo, &hi, q)
+						add(&lo, &hi, cv.cubic_at([4]Vec2{cur, c1, c2, to}, t))
 					}
 				}
 			}
