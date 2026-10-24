@@ -1486,26 +1486,7 @@ lottie_gather :: proc(d: ^Lottie_Draw, items: Range, k: u32, rel: Transform2D, t
 			lottie_gather(d, sh.children, sh.children.count, transform_multiply(m, rel), t)
 		case .Rect, .Ellipse, .Path, .Star, .Merge:
 			g := r.geometry[i]
-			p := &r.path
-			identity := rel == TRANSFORM_IDENTITY
-			for ci in g.start ..< g.start + g.count {
-				ct := r.contours[ci]
-				pts := r.pts[ct.start:][:ct.segs * 3 + 1]
-				q := pts[0] if identity else transform_point(rel, pts[0].x, pts[0].y)
-				path_move_to(p, q.x, q.y)
-				for s in 0 ..< ct.segs {
-					c1, c2, e := pts[1 + 3 * s], pts[2 + 3 * s], pts[3 + 3 * s]
-					if !identity {
-						c1 = transform_point(rel, c1.x, c1.y)
-						c2 = transform_point(rel, c2.x, c2.y)
-						e = transform_point(rel, e.x, e.y)
-					}
-					path_bezier_to(p, c1.x, c1.y, c2.x, c2.y, e.x, e.y)
-				}
-				if ct.closed {
-					path_close(p)
-				}
-			}
+			path_append_contours(&r.path, &r.geo, g.start, g.count, rel)
 		}
 	}
 }
