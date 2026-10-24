@@ -54,8 +54,6 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 		scale  = scale,
 		budget = max_dashes,
 	}
-	start, pen: Vec2
-	open := false
 	// The flattened samples of each drawing segment, in the same order.
 	seg := 0
 	samples :: proc(flat: ^Flat_Path, seg: ^int) -> []Vec2 {
@@ -63,12 +61,11 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 		seg^ += 1
 		return flat.points[fs.first:][:fs.count]
 	}
-	it := path_iter(src)
-	for verb, coords in path_iter_next(&it) {
+	it := path_events(src)
+	for e in path_events_next(&it) {
 		ok := true
-		switch verb {
-		case .Move_To:
-			start, pen, open = coords[0], coords[0], true
+		switch e.kind {
+		case .Begin:
 			// Where in the pattern the subpath starts.
 			phase := math.mod(offset * scale, total * scale)
 			if phase < 0 {
@@ -82,23 +79,12 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 			d.remaining = dash_length(&d) - phase
 			d.on = d.idx % 2 == 0
 			if d.on {
-				path_move_to(dst, pen.x, pen.y)
+				path_move_to(dst, e.p[0].x, e.p[0].y)
 			}
-		case .Line_To:
-			if open {
-				ok = dash_segment(&d, {pen, pen, coords[0], coords[0]}, samples(flat, &seg))
-				pen = coords[0]
-			}
-		case .Bezier_To:
-			if open {
-				ok = dash_segment(&d, {pen, coords[0], coords[1], coords[2]}, samples(flat, &seg), true)
-				pen = coords[2]
-			}
-		case .Close:
-			if open {
-				ok = dash_segment(&d, {pen, pen, start, start}, samples(flat, &seg))
-				pen = start
-			}
+		case .Line, .Close:
+			ok = dash_segment(&d, {e.p[0], e.p[0], e.p[1], e.p[1]}, samples(flat, &seg))
+		case .Cubic:
+			ok = dash_segment(&d, e.p, samples(flat, &seg), true)
 		case .Solid, .Hole:
 		}
 		if !ok {
@@ -234,7 +220,9 @@ path_flatten :: proc(p: ^Path, out: ^Flat_Path, segment: f32 = 1.5) {
 	path_flatten_verbs(p.verbs[:], p.coords[:], out, segment)
 }
 
-// `path_flatten` of a path held as its verbs and coordinates.
+// `path_flatten` of a path held as its verbs and coordinates. The path is
+// read as fill reads it (path_events): a drawing verb after a Close starts
+// a new contour at the closed one's start.
 path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segment: f32 = 1.5) {
 	clear(&out.points)
 	clear(&out.contours)
@@ -248,42 +236,34 @@ path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segme
 			pop(&out.contours)
 		}
 	}
-	at := 0
-	for verb in verbs {
-		c := coords[at:][:verb_num_coords(verb)]
-		at += len(c)
-		switch verb {
-		case .Move_To:
+	it := path_events_of(verbs, coords)
+	for e in path_events_next(&it) {
+		switch e.kind {
+		case .Begin:
 			if open {
 				end(out)
 			}
 			append(&out.contours, Flat_Contour{first = u32(len(out.points))})
-			append(&out.points, c[0])
+			append(&out.points, e.p[0])
 			open = true
-		case .Line_To:
-			if open {
-				append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
-				append(&out.points, c[0])
-			}
-		case .Bezier_To:
-			if !open {
-				continue
-			}
-			p0 := out.points[len(out.points) - 1]
-			c1, c2, p3 := c[0], c[1], c[2]
-			approx := vec_len(c1 - p0) + vec_len(c2 - c1) + vec_len(p3 - c2)
+		case .Line:
+			append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
+			append(&out.points, e.p[1])
+		case .Cubic:
+			p := e.p
+			approx := vec_len(p[1] - p[0]) + vec_len(p[2] - p[1]) + vec_len(p[3] - p[2])
 			n := clamp(int(approx / segment), 2, 256)
 			append(&out.segs, Flat_Segment{u32(len(out.points)), u32(n)})
 			for k in 1 ..= n {
-				append(&out.points, cv.cubic_at([4]Vec2{p0, c1, c2, p3}, f32(k) / f32(n)))
+				append(&out.points, cv.cubic_at(p, f32(k) / f32(n)))
 			}
 		case .Close:
-			if open {
-				ct := &out.contours[len(out.contours) - 1]
-				ct.closed = true
-				append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
-				append(&out.points, out.points[ct.first])
-			}
+			ct := &out.contours[len(out.contours) - 1]
+			ct.closed = true
+			append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
+			append(&out.points, out.points[ct.first])
+			end(out)
+			open = false
 		case .Solid, .Hole:
 		}
 	}

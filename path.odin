@@ -287,28 +287,6 @@ path_arc_to :: proc(p: ^Path, x1, y1, x2, y2, radius: f32) {
 	path_arc(p, c.x, c.y, radius, a0 + math.PI / 2, a1 + math.PI / 2, dir)
 }
 
-// Iterates verbs with their coordinates.
-Path_Iter :: struct {
-	path:      ^Path,
-	verb_idx:  int,
-	coord_idx: int,
-}
-
-path_iter :: proc "contextless" (p: ^Path) -> Path_Iter {
-	return {path = p}
-}
-
-path_iter_next :: proc "contextless" (it: ^Path_Iter) -> (verb: Verb, coords: []Vec2, ok: bool) {
-	if it.verb_idx >= len(it.path.verbs) {
-		return
-	}
-	verb = it.path.verbs[it.verb_idx]
-	n := verb_num_coords(verb)
-	coords = it.path.coords[it.coord_idx:][:n]
-	it.verb_idx += 1
-	it.coord_idx += n
-	return verb, coords, true
-}
 
 // A path's drawing as events, normalized the way fill reads it: drawing
 // before the first Move_To is skipped; Move_To begins a contour; a line or
@@ -332,20 +310,27 @@ Path_Event :: struct {
 }
 
 Path_Events :: struct {
-	path:        ^Path,
+	verbs:       []Verb,
+	coords:      []Vec2,
 	verb, coord: int,
 	pen, start:  Vec2,
 	moved, open: bool,
 }
 
+// The path must not grow while its events are read.
 path_events :: proc "contextless" (p: ^Path) -> Path_Events {
-	return {path = p}
+	return {verbs = p.verbs[:], coords = p.coords[:]}
+}
+
+// `path_events` of path data held as verbs and coordinates.
+path_events_of :: proc "contextless" (verbs: []Verb, coords: []Vec2) -> Path_Events {
+	return {verbs = verbs, coords = coords}
 }
 
 path_events_next :: proc "contextless" (it: ^Path_Events) -> (e: Path_Event, ok: bool) {
-	for it.verb < len(it.path.verbs) {
-		v := it.path.verbs[it.verb]
-		c := it.path.coords[it.coord:][:verb_num_coords(v)]
+	for it.verb < len(it.verbs) {
+		v := it.verbs[it.verb]
+		c := it.coords[it.coord:][:verb_num_coords(v)]
 		e.verb = u32(it.verb)
 		if (v == .Line_To || v == .Bezier_To) && !it.open {
 			if !it.moved {
