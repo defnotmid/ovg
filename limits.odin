@@ -38,6 +38,8 @@ Limit :: enum u8 {
 	Colr_Paints,
 	// Pixels of one decoded image.
 	Image_Pixels,
+	// Work of one path boolean: curve comparisons and snap rounds.
+	Boolean_Steps,
 }
 
 Limits :: [Limit]int
@@ -66,6 +68,7 @@ LIMIT_INFO :: [Limit]Limit_Info {
 	.Dash_Segments      = {"dashes per stroke", .Total},
 	.Colr_Paints        = {"COLR paints per glyph", .Total},
 	.Image_Pixels       = {"image pixels", .Max},
+	.Boolean_Steps      = {"boolean work", .Total},
 }
 
 // Far above what real files use; each bounds memory and time to what a
@@ -82,6 +85,7 @@ DEFAULT_LIMITS :: Limits {
 	.Dash_Segments      = 100_000,
 	.Colr_Paints        = 65_536,
 	.Image_Pixels       = 1 << 26,
+	.Boolean_Steps      = 4_000_000,
 }
 
 Budget :: struct {

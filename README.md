@@ -18,6 +18,8 @@ Added in ovg:
   paths (contours paired, resampled by arc length, holes kept; unpaired
   contours grow from or shrink to a point), with text (`text_layout_path`)
   and SVG geometry (`svg_element_path`) as paths to morph.
+- **Path booleans**: union, difference, intersection, xor and simplify of
+  filled paths, keeping their curves (see Path booleans below).
 - **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
   modes and patterns, each sized to its content.
 - **SVG filters**: every SVG 1.1 primitive (blur, drop shadow, offset, flood,
@@ -234,6 +236,51 @@ uploaded; the other primitives are filter passes. `Filter.region`
 filtering and every result after, on the whole device pixels of the region's
 bounding box (as resvg), and bounds the layer's window; the zero value is no
 region (the whole canvas). A primitive's `subregion` cuts its own result.
+
+## Path booleans
+
+`path_boolean(out, {a, rule}, {b, rule}, op, &scratch)` appends `a op b`
+(Union, Difference: a minus b, Intersection, Xor) to `out`;
+`path_simplify` resolves one path's overlaps and self-crossings under its
+fill rule, and `path_boolean_many` folds any number of operands. The
+result keeps the operands' own curves: each output segment is a range of
+an input line or cubic (a whole one copied bit for bit), cut where the
+operands meet, and `Bool_Scratch` records where each came from (the verb
+of its operand path and the t range on it) so an editor keeps its anchors.
+Output contours are Solid-wound with holes reversed and never cross, so
+either fill rule fills the result alike. On an error (non-finite input,
+the `.Boolean_Steps` work limit, or an arrangement that doesn't hold
+together) `out` is unchanged.
+
+- **How** (curves/bool.odin, curves/bool_kernel.odin): one arrangement of
+  every operand's pieces, monotone in x and y, in f64. Pieces are cut
+  wherever two come within eps = 8 f32 ulps of the largest coordinate (a
+  near-set search that drops a pair only when it has proved them farther
+  apart, so no crossing is missed); cut points within eps merge into
+  vertices, pieces are cut where a vertex lies within eps of them, edges
+  that share no vertex but still come within eps are cut and merged, until
+  nothing changes. Edges along the same curve between the same vertices
+  merge with their windings summed (abutting and identical shapes), edges
+  are ordered around each vertex, faces walked, and each face's winding
+  per operand propagated from each component's outer face; the edges
+  between kept and dropped faces are traced into contours. Shapes closer
+  than eps fuse; points farther from every outline are classified exactly.
+- **Shared data**: the operands become a `cv.Contours` table (the flat line
+  and cubic contours the Lottie renderer also draws from;
+  `contours_append_path` / `path_append_contours` convert Paths, the six
+  rules of how fill reads a path written once in `path_events`), and every
+  cubic evaluation, sub-range, extremum, bound and area comes from
+  curves/cubic.odin, as fills, strokes, dashes and flattening do.
+- **Checked** by `tools/bool_suite` (random polygons, self-crossing ones
+  included, cubic blobs, circles and grid-aligned rects with shared edges
+  and corners, tangent circles; every op under both rules, each result's
+  fill compared with the operands' on a grid away from the outlines, and
+  its winding at most 1): 2,000 cases, 16,000 results, none wrong. Area
+  identities (union + intersection = a + b), curve preservation and the
+  kernel's no-missed-crossing contract are tests.
+- **Cost** (-o:speed, median of 15): a rect minus a circle 29 us, two
+  overlapping glyphs 0.29 ms, a plate minus 30 holes 0.9 ms, two
+  64-rect grids sharing edges 8 ms; no allocation with a warm scratch.
 
 ## Colour fonts
 

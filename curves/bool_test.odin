@@ -35,10 +35,13 @@ test_monotone_pieces :: proc(t: ^testing.T) {
 	for p in pieces {
 		testing.expect_value(t, p.t0, prev)
 		prev = p.t1
-		// Monotone: the controls lie in the box of the ends.
-		for k in 1 ..= 2 {
-			testing.expect(t, p.p[k].x >= min(p.p[0].x, p.p[3].x) && p.p[k].x <= max(p.p[0].x, p.p[3].x))
-			testing.expect(t, p.p[k].y >= min(p.p[0].y, p.p[3].y) && p.p[k].y <= max(p.p[0].y, p.p[3].y))
+		// Monotone in x and y.
+		dx, dy := p.p[3].x - p.p[0].x, p.p[3].y - p.p[0].y
+		prev_pt := p.p[0]
+		for k in 1 ..= 64 {
+			c := cubic_at(p.p, f64(k) / 64)
+			testing.expect(t, (c.x - prev_pt.x) * dx >= -1e-9 && (c.y - prev_pt.y) * dy >= -1e-9)
+			prev_pt = c
 		}
 		// The piece is the source over its range.
 		d := cubic_at(p.p, 0.5) - cubic_at(q, (p.t0 + p.t1) / 2)

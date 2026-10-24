@@ -21,10 +21,9 @@ snap_epsilon :: proc "contextless" (M: f64) -> (eps, delta: f64) {
 	return eps, eps / 4
 }
 
-// A piece of a source segment, monotone in x and in y: its control points
-// lie in the box of its ends (so the box of its ends bounds it), and it
-// covers [t0, t1] of the segment's parameter. A line piece runs straight
-// from p[0] to p[3].
+// A piece of a source segment, monotone in x and in y (so it lies in the
+// box of its ends, though its controls needn't), covering [t0, t1] of the
+// segment's parameter. A line piece runs straight from p[0] to p[3].
 Piece :: struct {
 	p:       [4][2]f64,
 	t0, t1:  f64,
@@ -35,27 +34,39 @@ Piece :: struct {
 
 // Appends the pieces of segment q (row `row` of `operand`, a line when
 // `line`) to `out`: a line is one piece; a cubic is cut where it turns in x
-// or y, each piece's controls pinned into the box of its ends (exact, as
-// the derivative vanishes there); a cubic whose controls lie within `flat`
-// of its chord's line becomes line pieces.
+// or y, the control next to such a cut pinned to the cut's coordinate on
+// that axis (exact, as the derivative vanishes there); a cubic whose
+// controls lie within `flat` of its chord's line becomes line pieces.
 monotone_pieces :: proc(q: [4][2]f64, line: bool, row: u32, operand: u16, flat: f64, out: ^[dynamic]Piece) {
 	if line {
 		append(out, Piece{q, 0, 1, row, operand, true})
 		return
 	}
+	// Each cut and the axis it turns on (-1 for the ends).
 	cuts: [6]f64
+	axes: [6]int
 	n := 1
-	cuts[0] = 0
+	cuts[0], axes[0] = 0, -1
+	// A turning point within `flat` of an end (a tangent along an axis
+	// there, found a hair inside) cuts nothing but a sliver.
 	for axis in 0 ..< 2 {
 		ts, k := cubic_extrema(q, axis)
 		for t in ts[:k] {
-			cuts[n] = t
-			n += 1
+			p := cubic_at(q, t)
+			if length(p - q[0]) > flat && length(p - q[3]) > flat {
+				cuts[n], axes[n] = t, axis
+				n += 1
+			}
 		}
 	}
-	cuts[n] = 1
+	cuts[n], axes[n] = 1, -1
 	n += 1
-	slice.sort(cuts[1:n - 1])
+	for i in 2 ..< n - 1 {
+		for j := i; j > 1 && cuts[j] < cuts[j - 1]; j -= 1 {
+			cuts[j], cuts[j - 1] = cuts[j - 1], cuts[j]
+			axes[j], axes[j - 1] = axes[j - 1], axes[j]
+		}
+	}
 	straight := near_line(q, flat)
 	for i in 0 ..< n - 1 {
 		t0, t1 := cuts[i], cuts[i + 1]
@@ -63,9 +74,11 @@ monotone_pieces :: proc(q: [4][2]f64, line: bool, row: u32, operand: u16, flat: 
 			continue
 		}
 		p := cubic_range(q, t0, t1)
-		lo, hi := box_of_ends(p)
-		for k in 1 ..= 2 {
-			p[k] = {clamp(p[k].x, lo.x, hi.x), clamp(p[k].y, lo.y, hi.y)}
+		if a := axes[i]; a >= 0 {
+			p[1][a] = p[0][a]
+		}
+		if a := axes[i + 1]; a >= 0 {
+			p[2][a] = p[3][a]
 		}
 		if straight {
 			p[1], p[2] = p[0] + (p[3] - p[0]) / 3, p[0] + (p[3] - p[0]) * (2.0 / 3)
@@ -207,54 +220,70 @@ merge_runs :: proc(a, b: ^Piece, tol: f64, s: ^Kernel_Scratch, out: ^[dynamic]Ru
 }
 
 // Where segments a0 a1 and b0 b1 come within tol: the ranges of their
-// parameters (u on a, v on b) holding such a pair. The set is convex, so
-// each range is found from the nearest pair outwards by bisection.
+// parameters (u on a, v on b) holding such a pair.
 @(private = "file")
 segments_near :: proc "contextless" (a0, a1, b0, b1: [2]f64, tol: f64) -> (u0, u1, v0, v1: f64, near: bool) {
-	range :: proc "contextless" (a0, a1, b0, b1: [2]f64, tol: f64) -> (lo, hi: f64, ok: bool) {
-		// g(u): the distance from a(u) to segment b, convex in u.
-		g :: proc "contextless" (u: f64, a0, a1, b0, b1: [2]f64) -> f64 {
-			return point_segment_distance(a0 + (a1 - a0) * u, b0, b1)
-		}
-		// The minimum by golden-section search, then the edges of
-		// {g <= tol} by bisection.
-		x0, x1 := 0.0, 1.0
-		for _ in 0 ..< 80 {
-			m0, m1 := x0 + (x1 - x0) * 0.381966, x0 + (x1 - x0) * 0.618034
-			if g(m0, a0, a1, b0, b1) <= g(m1, a0, a1, b0, b1) {
-				x1 = m1
-			} else {
-				x0 = m0
-			}
-		}
-		um := (x0 + x1) / 2
-		if g(um, a0, a1, b0, b1) > tol {
-			return 0, 0, false
-		}
-		lo, hi = 0, 1
-		if g(0, a0, a1, b0, b1) > tol {
-			l, r := 0.0, um
-			for _ in 0 ..< 60 {
-				if m := (l + r) / 2; g(m, a0, a1, b0, b1) > tol {l = m} else {r = m}
-			}
-			lo = l
-		}
-		if g(1, a0, a1, b0, b1) > tol {
-			l, r := um, 1.0
-			for _ in 0 ..< 60 {
-				if m := (l + r) / 2; g(m, a0, a1, b0, b1) > tol {r = m} else {l = m}
-			}
-			hi = r
-		}
-		return lo, hi, true
-	}
 	ok: bool
-	u0, u1, ok = range(a0, a1, b0, b1, tol)
+	u0, u1, ok = capsule_range(a0, a1, b0, b1, tol)
 	if !ok {
 		return
 	}
-	v0, v1, ok = range(b0, b1, a0, a1, tol)
+	v0, v1, ok = capsule_range(b0, b1, a0, a1, tol)
 	return u0, u1, v0, v1, ok
+}
+
+// The range of u in [0, 1] where a0 + u (a1 - a0) lies within tol of
+// segment b0 b1: the line clipped by the capsule around the segment (its
+// rectangle and its end discs; convex, so one interval).
+@(private = "file")
+capsule_range :: proc "contextless" (a0, a1, b0, b1: [2]f64, tol: f64) -> (lo, hi: f64, ok: bool) {
+	d := a1 - a0
+	lo, hi = math.INF_F64, -math.INF_F64
+	dd := d.x * d.x + d.y * d.y
+	if dd == 0 {
+		// A point: all of [0, 1] or nothing.
+		if point_segment_distance(a0, b0, b1) <= tol {
+			return 0, 1, true
+		}
+		return 0, 0, false
+	}
+	// The end discs.
+	for c in ([2][2]f64{b0, b1}) {
+		w := a0 - c
+		b := d.x * w.x + d.y * w.y
+		disc := b * b - dd * (w.x * w.x + w.y * w.y - tol * tol)
+		if disc >= 0 {
+			r := math.sqrt(disc)
+			lo, hi = min(lo, (-b - r) / dd), max(hi, (-b + r) / dd)
+		}
+	}
+	// The rectangle: along the segment within its length, across it within
+	// tol, each a bound linear in u (alpha + beta u >= 0).
+	e := b1 - b0
+	ee := e.x * e.x + e.y * e.y
+	if ee > 0 {
+		w := a0 - b0
+		el := math.sqrt(ee)
+		along, along_d := w.x * e.x + w.y * e.y, d.x * e.x + d.y * e.y
+		across, across_d := e.x * w.y - e.y * w.x, e.x * d.y - e.y * d.x
+		bounds := [4][2]f64{{along, along_d}, {ee - along, -along_d}, {tol * el - across, -across_d}, {tol * el + across, across_d}}
+		r0, r1 := -math.INF_F64, math.INF_F64
+		for bd in bounds {
+			switch {
+			case bd[1] > 0:
+				r0 = max(r0, -bd[0] / bd[1])
+			case bd[1] < 0:
+				r1 = min(r1, -bd[0] / bd[1])
+			case bd[0] < 0:
+				r0, r1 = 1, 0
+			}
+		}
+		if r0 <= r1 {
+			lo, hi = min(lo, r0), max(hi, r1)
+		}
+	}
+	lo, hi = max(lo, 0), min(hi, 1)
+	return lo, hi, lo <= hi
 }
 
 @(private = "file")
@@ -304,11 +333,6 @@ box_of :: #force_inline proc "contextless" (p: [4][2]f64) -> (lo, hi: [2]f64) {
 	lo = {min(p[0].x, p[1].x, p[2].x, p[3].x), min(p[0].y, p[1].y, p[2].y, p[3].y)}
 	hi = {max(p[0].x, p[1].x, p[2].x, p[3].x), max(p[0].y, p[1].y, p[2].y, p[3].y)}
 	return
-}
-
-@(private = "file")
-box_of_ends :: #force_inline proc "contextless" (p: [4][2]f64) -> (lo, hi: [2]f64) {
-	return {min(p[0].x, p[3].x), min(p[0].y, p[3].y)}, {max(p[0].x, p[3].x), max(p[0].y, p[3].y)}
 }
 
 @(private = "file")
