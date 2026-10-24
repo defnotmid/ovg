@@ -262,9 +262,9 @@ destroy :: proc(b: ^SDL_Backend) {
 	stream_release(b, &b.vertex_stream)
 	stream_release(b, &b.paint_stream)
 	stream_release(b, &b.instance_stream)
-	if b.shapes.at != nil {
-		store_destroy(b)
-	}
+	// Always: the map allocates on its first shape, but a frame of only its
+	// own words still fills `pending` and makes the buffers.
+	store_destroy(b)
 	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag, b.shape_group_frag}) {
 		if s != nil {
 			sdl.ReleaseGPUShader(b.device, s)
