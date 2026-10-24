@@ -121,6 +121,8 @@ Plan :: struct {
 	has_stch:                bool,
 	// Indic: the font's lookups are for the original (not version 2) tags.
 	indic_old_spec:          bool,
+	// Indic: the GSUB stage of each form (-1 when the plan lacks it).
+	indic_form_stages:       [Indic_Form]i8,
 }
 
 // The global bit every on-by-default feature shares.
@@ -235,7 +237,7 @@ plan_init :: proc(p: ^Plan, layout: ^Layout, f: ^ft.Face, script: Script, direct
 	// The legacy kern table only for the shapers that position fallback
 	// marks (others' scripts have GPOS).
 	p.apply_kern = info.fallback_marks && layout.kern != 0 && (!has_gpos_kern || !p.apply_gpos) && ft.read_u16(d, layout.kern + 2) > 0
-	p.fallback_glyph_classes = layout.glyph_classes == 0
+	p.fallback_glyph_classes = layout.glyph_classes.table == 0
 	p.zero_marks = info.zero_marks
 	if p.apply_kern && kern_has_state_machine(layout) {
 		p.zero_marks = .None

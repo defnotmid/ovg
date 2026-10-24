@@ -126,7 +126,7 @@ shape :: proc(s: ^Shaper, plan: ^Plan, f: ^ft.Face, text: []rune, features: []Fe
 		d                 = plan.layout.data,
 		direction         = s.direction,
 		nesting_left      = MAX_NESTING,
-		has_glyph_classes = plan.layout.glyph_classes != 0,
+		has_glyph_classes = plan.layout.glyph_classes.table != 0,
 	}
 	gsub_start(&c)
 	apply_table(&c, .GSUB)

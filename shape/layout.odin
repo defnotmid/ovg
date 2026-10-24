@@ -1,14 +1,16 @@
 package shape
 
+import "base:intrinsics"
 import "base:runtime"
 import ft "../font"
 
 // A face's OpenType layout tables (GSUB, GPOS, GDEF and the legacy kern
 // table) prepared once: where each table's lists lie, every lookup's type,
-// flags and subtables with extensions resolved, each subtable's coverage.
-// Plans (plan.odin) pick lookups from it by index and the shaper applies
-// them reading the font's bytes, bounds-checked like ovg/font: a corrupt
-// table shapes wrongly, never out of bounds.
+// flags and subtables with extensions resolved, and the coverages and
+// class definitions read for every glyph shaped unpacked for lookup by
+// glyph. Plans (plan.odin) pick lookups from it by index and the shaper
+// applies them reading the font's bytes, bounds-checked like ovg/font: a
+// corrupt table shapes wrongly, never out of bounds.
 
 Table_Kind :: enum u8 {
 	GSUB,
@@ -128,10 +130,29 @@ digest_add_coverage :: proc(dg: ^Digest, d: []u8, t: int, budget: ^int) -> bool 
 
 Subtable :: struct {
 	// Where the subtable lies, and the coverage of the glyph it starts
-	// matching at (0 when it has none), with its digest.
+	// matching at, with its digest.
 	at:       i32,
-	coverage: i32,
+	coverage: Unpacked,
 	digest:   Digest,
+	// Class definitions: a pair adjustment's (format 2) first and second
+	// glyphs' at 0 and 1; a context rule set's (format 2) backtrack, input
+	// and lookahead at 0, 1 and 2.
+	classes:  [3]Unpacked,
+}
+
+// A coverage table or class definition at `table` in the font (0 for
+// none: covers nothing, every glyph class 0), unpacked over the glyphs it
+// lists (lo ..< lo + n): a coverage as a bit per glyph from
+// Layout.bits[at] with each 64 glyphs' coverage index from
+// Layout.ranks[at], a class definition as a class per glyph from
+// Layout.classes[at]. `at` < 0: read from the font instead (not well
+// formed for reading by glyph, a class array already, or past the
+// layout's budget).
+Unpacked :: struct {
+	table: i32,
+	at:    i32,
+	n:     i32,
+	lo:    u16,
 }
 
 Layout_Table :: struct {
@@ -147,15 +168,20 @@ Layout_Table :: struct {
 Layout :: struct {
 	data:                []u8,
 	tables:              [Table_Kind]Layout_Table,
-	// GDEF's class definitions, mark glyph sets and variation store
-	// (0 for each it lacks).
+	// GDEF's class definitions, mark glyph sets (each set's coverage) and
+	// variation store (0 for each it lacks).
 	gdef:                int,
-	glyph_classes:       int,
-	mark_attach_classes: int,
+	glyph_classes:       Unpacked,
+	mark_attach_classes: Unpacked,
 	mark_sets:           int,
+	mark_set_coverages:  []Unpacked,
 	var_store:           int,
 	// The legacy kern table (0 for none).
 	kern:                int,
+	// Unpacked coverages and class definitions (Unpacked).
+	bits:                []u64,
+	ranks:               []u16,
+	classes:             []u16,
 	allocator:           runtime.Allocator,
 }
 
@@ -183,11 +209,12 @@ layout_init :: proc(l: ^Layout, f: ^ft.Face, allocator := context.allocator) {
 	d := f.data
 	gsub, gsub_size := find_table(f, "GSUB")
 	gpos, gpos_size := find_table(f, "GPOS")
-	if gdef, _ := find_table(f, "GDEF"); gdef != 0 && ft.read_u16(d, gdef) == 1 {
+	gdef, gdef_size := find_table(f, "GDEF")
+	if gdef != 0 && ft.read_u16(d, gdef) == 1 {
 		l.gdef = gdef
 		minor := ft.read_u16(d, gdef + 2)
-		l.glyph_classes = offset16(d, gdef, gdef + 4)
-		l.mark_attach_classes = offset16(d, gdef, gdef + 10)
+		l.glyph_classes.table = i32(offset16(d, gdef, gdef + 4))
+		l.mark_attach_classes.table = i32(offset16(d, gdef, gdef + 10))
 		if minor >= 2 {
 			l.mark_sets = offset16(d, gdef, gdef + 12)
 		}
@@ -200,6 +227,8 @@ layout_init :: proc(l: ^Layout, f: ^ft.Face, allocator := context.allocator) {
 	if kern, _ := find_table(f, "kern"); kern != 0 {
 		l.kern = kern
 	}
+	// Unpacked, at most as many bytes as the tables hold.
+	layout_unpack(l, gsub_size + gpos_size + gdef_size)
 }
 
 layout_destroy :: proc(l: ^Layout) {
@@ -207,6 +236,10 @@ layout_destroy :: proc(l: ^Layout) {
 		delete(t.lookups, l.allocator)
 		delete(t.subtables, l.allocator)
 	}
+	delete(l.mark_set_coverages, l.allocator)
+	delete(l.bits, l.allocator)
+	delete(l.ranks, l.allocator)
+	delete(l.classes, l.allocator)
 	l^ = {}
 }
 
@@ -301,7 +334,7 @@ layout_table_init :: proc(l: ^Layout, kind: Table_Kind, at, size: int) {
 					continue
 				}
 			}
-			t.subtables[n] = {i32(sub), i32(subtable_coverage(d, kind, type, sub)), {}}
+			t.subtables[n] = {at = i32(sub), coverage = {table = i32(subtable_coverage(d, kind, type, sub))}}
 			n += 1
 		}
 		if lk.type == extension {
@@ -309,7 +342,7 @@ layout_table_init :: proc(l: ^Layout, kind: Table_Kind, at, size: int) {
 		}
 		lk.count = i32(n) - lk.first
 		for &sub in t.subtables[lk.first:n] {
-			if !digest_add_coverage(&sub.digest, d, int(sub.coverage), &budget) {
+			if !digest_add_coverage(&sub.digest, d, int(sub.coverage.table), &budget) {
 				sub.digest = {~u64(0), ~u64(0), ~u64(0)}
 			}
 			for k in 0 ..< 3 {
@@ -417,22 +450,236 @@ GLYPH_MULTIPLIED :: 0x40
 
 // The glyph's properties from GDEF's glyph classes.
 glyph_props :: proc(l: ^Layout, g: u16) -> u16 {
-	switch class_of(l.data, l.glyph_classes, g) {
+	switch unpacked_class(l, l.glyph_classes, g) {
 	case 1:
 		return GLYPH_BASE
 	case 2:
 		return GLYPH_LIGATURE
 	case 3:
-		return GLYPH_MARK | u16(class_of(l.data, l.mark_attach_classes, g)) << 8
+		return GLYPH_MARK | u16(unpacked_class(l, l.mark_attach_classes, g)) << 8
 	}
 	return 0
 }
 
 // Whether mark glyph set `set` holds the glyph.
 mark_set_covers :: proc(l: ^Layout, set: int, g: u16) -> bool {
-	d, at := l.data, l.mark_sets
-	if at == 0 || ft.read_u16(d, at) != 1 || set >= int(ft.read_u16(d, at + 2)) {
-		return false
+	return set < len(l.mark_set_coverages) && unpacked_coverage(l, l.mark_set_coverages[set], g) >= 0
+}
+
+// ---- unpacked coverages and classes -------------------------------------------------
+
+// The glyph's index in coverage `u`; -1 when not covered.
+unpacked_coverage :: #force_inline proc "contextless" (l: ^Layout, u: Unpacked, g: u16) -> int {
+	if u.at < 0 {
+		return coverage_index(l.data, int(u.table), g)
 	}
-	return coverage_index(d, offset32(d, at, at + 4 + 4 * set), g) >= 0
+	i := int(g) - int(u.lo)
+	if uint(i) >= uint(u.n) {
+		return -1
+	}
+	w := int(u.at) + i >> 6
+	bits, below := l.bits[w], u64(1) << uint(i & 63)
+	if bits & below == 0 {
+		return -1
+	}
+	return int(l.ranks[w]) + int(intrinsics.count_ones(bits & (below - 1)))
+}
+
+// The glyph's class in class definition `u` (0 when unlisted).
+unpacked_class :: #force_inline proc "contextless" (l: ^Layout, u: Unpacked, g: u16) -> int {
+	if u.at < 0 {
+		return class_of(l.data, int(u.table), g)
+	}
+	i := int(g) - int(u.lo)
+	if uint(i) >= uint(u.n) {
+		return 0
+	}
+	return int(l.classes[int(u.at) + i])
+}
+
+// Unpacks the coverages and class definitions read for every glyph
+// shaped: subtables' first coverages, pair adjustment and context class
+// definitions, GDEF's glyph classes and mark glyph sets. Each distinct
+// table once, in that order while `budget` bytes last (the rest are read
+// from the font): spans found, arrays allocated once, then filled.
+@(private)
+layout_unpack :: proc(l: ^Layout, budget: int) {
+	d := l.data
+	Slot :: struct {
+		u:     ^Unpacked,
+		class: bool,
+	}
+	slots := make([dynamic]Slot, context.temp_allocator)
+	add := proc(slots: ^[dynamic]Slot, u: ^Unpacked, class: bool) {
+		u.at = -1
+		if u.table != 0 {
+			append(slots, Slot{u, class})
+		}
+	}
+	add(&slots, &l.glyph_classes, true)
+	add(&slots, &l.mark_attach_classes, true)
+	if l.mark_sets != 0 && ft.read_u16(d, l.mark_sets) == 1 {
+		l.mark_set_coverages = make([]Unpacked, ft.read_u16(d, l.mark_sets + 2), l.allocator)
+		for &u, set in l.mark_set_coverages {
+			u.table = i32(offset32(d, l.mark_sets, l.mark_sets + 4 + 4 * set))
+			add(&slots, &u, false)
+		}
+	}
+	for kind in Table_Kind {
+		t := &l.tables[kind]
+		pair: u8 = GPOS_PAIR if kind == .GPOS else 0
+		rules: u8 = GSUB_CONTEXT if kind == .GSUB else GPOS_CONTEXT
+		chain: u8 = GSUB_CHAIN_CONTEXT if kind == .GSUB else GPOS_CHAIN_CONTEXT
+		for lk in t.lookups {
+			for &sub in t.subtables[lk.first:][:lk.count] {
+				add(&slots, &sub.coverage, false)
+				at := int(sub.at)
+				if ft.read_u16(d, at) != 2 {
+					continue
+				}
+				switch lk.type {
+				case pair:
+					sub.classes[0].table = i32(offset16(d, at, at + 8))
+					sub.classes[1].table = i32(offset16(d, at, at + 10))
+				case rules:
+					sub.classes[1].table = i32(offset16(d, at, at + 4))
+				case chain:
+					for &u, k in sub.classes {
+						u.table = i32(offset16(d, at, at + 4 + 2 * k))
+					}
+				}
+				for &u in sub.classes {
+					add(&slots, &u, true)
+				}
+			}
+		}
+	}
+	// Each distinct table's span and place, in slot order.
+	Key :: struct {
+		table: i32,
+		class: bool,
+	}
+	found := make(map[Key]Unpacked, allocator = context.temp_allocator)
+	unpacked := make([dynamic]Key, context.temp_allocator)
+	words, classes, bytes := 0, 0, 0
+	for slot in slots {
+		key := Key{slot.u.table, slot.class}
+		if key in found {
+			continue
+		}
+		u := Unpacked{table = key.table, at = -1}
+		lo, n, ok := unpacked_span(d, int(key.table), key.class)
+		size := n * 2 if key.class else (n + 63) / 64 * 10
+		if ok && bytes + size <= budget {
+			u.lo, u.n = u16(lo), i32(n)
+			bytes += size
+			if key.class {
+				u.at = i32(classes)
+				classes += n
+			} else {
+				u.at = i32(words)
+				words += (n + 63) / 64
+			}
+			append(&unpacked, key)
+		}
+		found[key] = u
+	}
+	l.bits = make([]u64, words, l.allocator)
+	l.ranks = make([]u16, words, l.allocator)
+	l.classes = make([]u16, classes, l.allocator)
+	for key in unpacked {
+		u := found[key]
+		if key.class {
+			unpack_classes(d, int(key.table), u, l.classes[u.at:][:u.n])
+		} else {
+			count := int(u.n + 63) / 64
+			unpack_coverage(d, int(key.table), u, l.bits[u.at:][:count], l.ranks[u.at:][:count])
+		}
+	}
+	for slot in slots {
+		slot.u^ = found[{slot.u.table, slot.class}]
+	}
+}
+
+// The glyphs the table at `t` lists, lo ..< lo + n; ok when it can be
+// unpacked: its glyphs (or ranges) in order without overlap, a coverage's
+// ranges numbering its glyphs in order (so a glyph's index is how many
+// covered glyphs precede it). A class definition's format 1 is a class
+// per glyph already.
+@(private)
+unpacked_span :: proc(d: []u8, t: int, class: bool) -> (lo, n: int, ok: bool) {
+	format := ft.read_u16(d, t)
+	prev, index := -1, 0
+	switch {
+	case format == 1 && !class:
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 2)
+		for i in 0 ..< count {
+			g := int(ft.read_u16(d, t + 4 + 2 * i))
+			if g <= prev {
+				return
+			}
+			if i == 0 {
+				lo = g
+			}
+			prev = g
+		}
+	case format == 2:
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 6)
+		for i in 0 ..< count {
+			r := t + 4 + 6 * i
+			a, b := int(ft.read_u16(d, r)), int(ft.read_u16(d, r + 2))
+			if a > b || a <= prev || (!class && int(ft.read_u16(d, r + 4)) != index) {
+				return
+			}
+			if i == 0 {
+				lo = a
+			}
+			prev = b
+			index += b - a + 1
+		}
+	case:
+		return
+	}
+	return lo, prev + 1 - lo, prev >= 0
+}
+
+// Sets a coverage's glyphs in `bits` (from u.lo) and each word's coverage
+// index of its first glyph in `ranks`.
+@(private)
+unpack_coverage :: proc(d: []u8, t: int, u: Unpacked, bits: []u64, ranks: []u16) {
+	lo := int(u.lo)
+	if ft.read_u16(d, t) == 1 {
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 2)
+		for i in 0 ..< count {
+			g := int(ft.read_u16(d, t + 4 + 2 * i)) - lo
+			bits[g >> 6] |= 1 << uint(g & 63)
+		}
+	} else {
+		count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 6)
+		for i in 0 ..< count {
+			r := t + 4 + 6 * i
+			for g in int(ft.read_u16(d, r)) - lo ..= int(ft.read_u16(d, r + 2)) - lo {
+				bits[g >> 6] |= 1 << uint(g & 63)
+			}
+		}
+	}
+	rank := 0
+	for w, i in bits {
+		ranks[i] = u16(rank)
+		rank += int(intrinsics.count_ones(w))
+	}
+}
+
+// Fills `classes` (from u.lo) from a class definition's ranges.
+@(private)
+unpack_classes :: proc(d: []u8, t: int, u: Unpacked, classes: []u16) {
+	lo := int(u.lo)
+	count := min(int(ft.read_u16(d, t + 2)), max(len(d) - t - 4, 0) / 6)
+	for i in 0 ..< count {
+		r := t + 4 + 6 * i
+		class := ft.read_u16(d, r + 4)
+		for g in int(ft.read_u16(d, r)) - lo ..= int(ft.read_u16(d, r + 2)) - lo {
+			classes[g] = class
+		}
+	}
 }

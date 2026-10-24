@@ -104,9 +104,10 @@ subst_replace :: proc(c: ^Apply_Context, g: u16) {
 }
 
 @(private)
-gsub_apply :: proc(c: ^Apply_Context, type: u8, at, covered: int) -> bool {
+gsub_apply :: proc(c: ^Apply_Context, type: u8, sub: ^Subtable, covered: int) -> bool {
 	d := c.d
 	s := c.s
+	at := int(sub.at)
 	switch type {
 	case GSUB_SINGLE:
 		g := s.info[s.idx].glyph
@@ -195,16 +196,17 @@ gsub_apply :: proc(c: ^Apply_Context, type: u8, at, covered: int) -> bool {
 				subst_replace(c, lig_glyph)
 				return true
 			}
-			m: Matched
-			if match_input(c, comps, {.Glyph, lig + 4, 0, 0}, &m) {
+			// Every field read is written by match_input.
+			m: Matched = ---
+			if match_input(c, comps, {.Glyph, lig + 4, {}, 0}, &m) {
 				ligate(c, comps, &m, lig_glyph)
 				return true
 			}
 		}
 	case GSUB_CONTEXT:
-		return apply_context(c, at, covered, false)
+		return apply_context(c, sub, covered, false)
 	case GSUB_CHAIN_CONTEXT:
-		return apply_context(c, at, covered, true)
+		return apply_context(c, sub, covered, true)
 	case GSUB_REVERSE_CHAIN:
 		// Never from within a context.
 		if c.nesting_left != MAX_NESTING || ft.read_u16(d, at) != 1 {
@@ -217,10 +219,10 @@ gsub_apply :: proc(c: ^Apply_Context, type: u8, at, covered: int) -> bool {
 		if covered >= int(ft.read_u16(d, subst_at)) {
 			return false
 		}
-		if _, ok := match_backtrack(c, backtrack, {.Coverage, at + 6, 0, at}); !ok {
+		if _, ok := match_backtrack(c, backtrack, {.Coverage, at + 6, {}, at}); !ok {
 			return false
 		}
-		if _, ok := match_lookahead(c, lookahead, {.Coverage, ahead_at + 2, 0, at}, s.idx + 1); !ok {
+		if _, ok := match_lookahead(c, lookahead, {.Coverage, ahead_at + 2, {}, at}, s.idx + 1); !ok {
 			return false
 		}
 		g := ft.read_u16(d, subst_at + 2 + 2 * covered)

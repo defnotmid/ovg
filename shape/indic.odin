@@ -138,6 +138,29 @@ indic_plan :: proc(p: ^Plan) {
 	for name, i in INDIC_FEATURES {
 		p.shaper_masks[i] = 0 if INDIC_GLOBAL[i] else one_mask(p, name)
 	}
+	for name, form in INDIC_FORMS {
+		p.indic_form_stages[form] = i8(feature_stage(p, name))
+	}
+}
+
+// The forms whose substitution decides a consonant's position or a reph:
+// their GSUB stages are found once per plan (Plan.indic_form_stages).
+@(private)
+Indic_Form :: enum u8 {
+	Blwf,
+	Vatu,
+	Pstf,
+	Pref,
+	Rphf,
+}
+
+@(private, rodata)
+INDIC_FORMS := [Indic_Form]string {
+	.Blwf = "blwf",
+	.Vatu = "vatu",
+	.Pstf = "pstf",
+	.Pref = "pref",
+	.Rphf = "rphf",
 }
 
 // Characters Indic shaping keeps whole, then Unicode's decompositions.
@@ -196,9 +219,9 @@ is_halant :: #force_inline proc "contextless" (info: Glyph_Info) -> bool {
 // Zero context for the new specs (and scripts with one spec), not the
 // old: Windows' behaviour (Malayalam allows context in both).
 @(private)
-indic_would_substitute :: proc(plan: ^Plan, feature: string, glyphs: []u16) -> bool {
+indic_would_substitute :: proc(plan: ^Plan, form: Indic_Form, glyphs: []u16) -> bool {
 	zero_context := !plan.indic_old_spec && plan.script != .Malayalam
-	return would_substitute(plan, feature_stage(plan, feature), glyphs, zero_context)
+	return would_substitute(plan, int(plan.indic_form_stages[form]), glyphs, zero_context)
 }
 
 // A consonant's position by the forms the font gives it with a virama
@@ -206,13 +229,13 @@ indic_would_substitute :: proc(plan: ^Plan, feature: string, glyphs: []u16) -> b
 @(private)
 consonant_position_from_face :: proc(plan: ^Plan, consonant, virama: u16) -> u8 {
 	glyphs := [3]u16{virama, consonant, virama}
-	if indic_would_substitute(plan, "blwf", glyphs[:2]) || indic_would_substitute(plan, "blwf", glyphs[1:]) || indic_would_substitute(plan, "vatu", glyphs[:2]) || indic_would_substitute(plan, "vatu", glyphs[1:]) {
+	if indic_would_substitute(plan, .Blwf, glyphs[:2]) || indic_would_substitute(plan, .Blwf, glyphs[1:]) || indic_would_substitute(plan, .Vatu, glyphs[:2]) || indic_would_substitute(plan, .Vatu, glyphs[1:]) {
 		return POS_BELOW_C
 	}
-	if indic_would_substitute(plan, "pstf", glyphs[:2]) || indic_would_substitute(plan, "pstf", glyphs[1:]) {
+	if indic_would_substitute(plan, .Pstf, glyphs[:2]) || indic_would_substitute(plan, .Pstf, glyphs[1:]) {
 		return POS_POST_C
 	}
-	if indic_would_substitute(plan, "pref", glyphs[:2]) || indic_would_substitute(plan, "pref", glyphs[1:]) {
+	if indic_would_substitute(plan, .Pref, glyphs[:2]) || indic_would_substitute(plan, .Pref, glyphs[1:]) {
 		return POS_POST_C
 	}
 	return POS_BASE_C
@@ -263,7 +286,7 @@ indic_initial_reorder_syllable :: proc(s: ^Shaper, plan: ^Plan, config: ^Indic_C
 	limit := start
 	if masks[INDIC_RPHF] != 0 && start + 3 <= end && ((config.reph_mode == .Implicit && !is_joiner(info[start + 2])) || (config.reph_mode == .Explicit && info[start + 2].category == INDIC_ZWJ)) {
 		glyphs := [3]u16{info[start].glyph, info[start + 1].glyph, info[start + 2].glyph if config.reph_mode == .Explicit else 0}
-		if indic_would_substitute(plan, "rphf", glyphs[:2]) || (config.reph_mode == .Explicit && indic_would_substitute(plan, "rphf", glyphs[:3])) {
+		if indic_would_substitute(plan, .Rphf, glyphs[:2]) || (config.reph_mode == .Explicit && indic_would_substitute(plan, .Rphf, glyphs[:3])) {
 			limit += 2
 			for limit < end && is_joiner(info[limit]) {
 				limit += 1
@@ -465,7 +488,7 @@ indic_initial_reorder_syllable :: proc(s: ^Shaper, plan: ^Plan, config: ^Indic_C
 	if masks[INDIC_PREF] != 0 && base + 2 < end {
 		for i := base + 1; i + 1 < end; i += 1 {
 			glyphs := [2]u16{info[i].glyph, info[i + 1].glyph}
-			if indic_would_substitute(plan, "pref", glyphs[:]) {
+			if indic_would_substitute(plan, .Pref, glyphs[:]) {
 				info[i].mask |= masks[INDIC_PREF]
 				info[i + 1].mask |= masks[INDIC_PREF]
 				break

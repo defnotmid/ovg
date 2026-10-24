@@ -8,9 +8,10 @@ import ft "../font"
 // the offsets of what they hang from.
 
 @(private)
-gpos_apply :: proc(c: ^Apply_Context, type: u8, at, covered: int) -> bool {
+gpos_apply :: proc(c: ^Apply_Context, type: u8, sub: ^Subtable, covered: int) -> bool {
 	d := c.d
 	s := c.s
+	at := int(sub.at)
 	switch type {
 	case GPOS_SINGLE:
 		format := ft.read_u16(d, at)
@@ -29,17 +30,17 @@ gpos_apply :: proc(c: ^Apply_Context, type: u8, at, covered: int) -> bool {
 		s.idx += 1
 		return true
 	case GPOS_PAIR:
-		return apply_pair(c, at, covered)
+		return apply_pair(c, sub, covered)
 	case GPOS_CURSIVE:
-		return apply_cursive(c, at, covered)
+		return apply_cursive(c, sub, covered)
 	case GPOS_MARK_BASE, GPOS_MARK_LIGATURE:
 		return apply_mark_base(c, at, covered, type == GPOS_MARK_LIGATURE)
 	case GPOS_MARK_MARK:
 		return apply_mark_mark(c, at, covered)
 	case GPOS_CONTEXT:
-		return apply_context(c, at, covered, false)
+		return apply_context(c, sub, covered, false)
 	case GPOS_CHAIN_CONTEXT:
-		return apply_context(c, at, covered, true)
+		return apply_context(c, sub, covered, true)
 	}
 	return false
 }
@@ -130,7 +131,8 @@ anchor :: proc(c: ^Apply_Context, at: int) -> (x, y: i32) {
 // Pair adjustment: the next glyph the lookup sees decides the values of
 // both; a second value moves past the second glyph.
 @(private)
-apply_pair :: proc(c: ^Apply_Context, at, covered: int) -> bool {
+apply_pair :: proc(c: ^Apply_Context, sub: ^Subtable, covered: int) -> bool {
+	at := int(sub.at)
 	d := c.d
 	s := c.s
 	it := skippy_init(c, s.idx, false)
@@ -169,8 +171,8 @@ apply_pair :: proc(c: ^Apply_Context, at, covered: int) -> bool {
 		apply_value(c, set, values, format1, s.idx)
 		apply_value(c, set, values + len1, format2, it.idx)
 	case 2:
-		c1 := class_of(d, offset16(d, at, at + 8), s.info[s.idx].glyph)
-		c2 := class_of(d, offset16(d, at, at + 10), second)
+		c1 := unpacked_class(c.layout, sub.classes[0], s.info[s.idx].glyph)
+		c2 := unpacked_class(c.layout, sub.classes[1], second)
 		n1, n2 := int(ft.read_u16(d, at + 12)), int(ft.read_u16(d, at + 14))
 		if c1 >= n1 || c2 >= n2 {
 			return false
@@ -190,7 +192,8 @@ apply_pair :: proc(c: ^Apply_Context, at, covered: int) -> bool {
 // that is the child (by the lookup's right-to-left flag) hangs off its
 // parent.
 @(private)
-apply_cursive :: proc(c: ^Apply_Context, at, covered: int) -> bool {
+apply_cursive :: proc(c: ^Apply_Context, sub: ^Subtable, covered: int) -> bool {
+	at := int(sub.at)
 	d := c.d
 	s := c.s
 	count := int(ft.read_u16(d, at + 4))
@@ -205,7 +208,7 @@ apply_cursive :: proc(c: ^Apply_Context, at, covered: int) -> bool {
 	if !skippy_prev(&it) {
 		return false
 	}
-	prev := coverage_index(d, offset16(d, at, at + 2), s.info[it.idx].glyph)
+	prev := unpacked_coverage(c.layout, sub.coverage, s.info[it.idx].glyph)
 	if prev < 0 || prev >= count {
 		return false
 	}

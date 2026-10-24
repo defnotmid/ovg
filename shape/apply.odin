@@ -49,7 +49,7 @@ Matcher :: struct {
 	kind:    Match_Kind,
 	// Where the rule's 16-bit values lie.
 	values:  int,
-	classes: int,
+	classes: Unpacked,
 	base:    int,
 }
 
@@ -62,7 +62,7 @@ match_value :: proc(c: ^Apply_Context, m: ^Matcher, i: int, g: u16) -> bool {
 	case .Glyph:
 		return g == v
 	case .Class:
-		return class_of(c.d, m.classes, g) == int(v)
+		return unpacked_class(c.layout, m.classes, g) == int(v)
 	case .Coverage:
 		return coverage_index(c.d, m.base + int(v), g) >= 0
 	}
@@ -330,7 +330,8 @@ Rule :: struct {
 // Applies a rule at the current glyph: matches it, then its lookups.
 @(private)
 apply_rule :: proc(c: ^Apply_Context, r: ^Rule) -> bool {
-	m: Matched
+	// Every field read is written by match_input.
+	m: Matched = ---
 	if !match_input(c, r.input_count, r.input, &m) {
 		return false
 	}
@@ -450,15 +451,15 @@ apply_at :: proc(c: ^Apply_Context, lookup: ^Lookup) -> bool {
 		if !digest_may_have(&sub.digest, g) {
 			continue
 		}
-		covered := coverage_index(c.d, int(sub.coverage), g)
+		covered := unpacked_coverage(c.layout, sub.coverage, g)
 		if covered < 0 {
 			continue
 		}
 		applied: bool
 		if c.kind == .GSUB {
-			applied = gsub_apply(c, lookup.type, int(sub.at), covered)
+			applied = gsub_apply(c, lookup.type, &sub, covered)
 		} else {
-			applied = gpos_apply(c, lookup.type, int(sub.at), covered)
+			applied = gpos_apply(c, lookup.type, &sub, covered)
 		}
 		if applied {
 			return true
@@ -470,29 +471,23 @@ apply_at :: proc(c: ^Apply_Context, lookup: ^Lookup) -> bool {
 // Context subtables (GSUB 5, GPOS 7) and chained ones (GSUB 6, GPOS 8);
 // `covered` is the first glyph's coverage index.
 @(private)
-apply_context :: proc(c: ^Apply_Context, at, covered: int, chain: bool) -> bool {
+apply_context :: proc(c: ^Apply_Context, sub: ^Subtable, covered: int, chain: bool) -> bool {
 	d := c.d
 	s := c.s
 	g := s.info[s.idx].glyph
+	at := int(sub.at)
 	switch ft.read_u16(d, at) {
 	case 1, 2:
 		format2 := ft.read_u16(d, at) == 2
 		// Format 1 rule sets by coverage index, glyph values; format 2 by
 		// the first glyph's class, class values.
 		set_index := covered
-		backtrack_classes, input_classes, lookahead_classes: int
+		backtrack_classes, input_classes, lookahead_classes: Unpacked
 		sets := at + 4
 		if format2 {
-			if chain {
-				backtrack_classes = offset16(d, at, at + 4)
-				input_classes = offset16(d, at, at + 6)
-				lookahead_classes = offset16(d, at, at + 8)
-				sets = at + 10
-			} else {
-				input_classes = offset16(d, at, at + 4)
-				sets = at + 6
-			}
-			set_index = class_of(d, input_classes, g)
+			backtrack_classes, input_classes, lookahead_classes = sub.classes[0], sub.classes[1], sub.classes[2]
+			sets = at + (10 if chain else 6)
+			set_index = unpacked_class(c.layout, input_classes, g)
 		}
 		if set_index >= int(ft.read_u16(d, sets)) {
 			return false
@@ -540,21 +535,21 @@ apply_context :: proc(c: ^Apply_Context, at, covered: int, chain: bool) -> bool 
 		if chain {
 			p := at + 2
 			r.backtrack_count = int(ft.read_u16(d, p))
-			r.backtrack = {.Coverage, p + 2, 0, at}
+			r.backtrack = {.Coverage, p + 2, {}, at}
 			p += 2 + 2 * r.backtrack_count
 			r.input_count = int(ft.read_u16(d, p))
 			// The first input coverage matched already.
-			r.input = {.Coverage, p + 4, 0, at}
+			r.input = {.Coverage, p + 4, {}, at}
 			p += 2 + 2 * r.input_count
 			r.lookahead_count = int(ft.read_u16(d, p))
-			r.lookahead = {.Coverage, p + 2, 0, at}
+			r.lookahead = {.Coverage, p + 2, {}, at}
 			p += 2 + 2 * r.lookahead_count
 			r.record_count = int(ft.read_u16(d, p))
 			r.records = p + 2
 		} else {
 			r.input_count = int(ft.read_u16(d, at + 2))
 			r.record_count = int(ft.read_u16(d, at + 4))
-			r.input = {.Coverage, at + 8, 0, at}
+			r.input = {.Coverage, at + 8, {}, at}
 			r.records = at + 6 + 2 * r.input_count
 		}
 		if r.input_count == 0 {
