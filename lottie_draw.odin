@@ -54,7 +54,7 @@ Lottie_Renderer :: struct {
 	copy_coords: [dynamic]Vec2,
 	// Merge paths: the operands' geometry, one input each, and the boolean's
 	// scratch; merges that fell back to concatenation (an inconsistent
-	// arrangement), which tests expect to be 0.
+	// arrangement) during the last draw, which tests expect to be 0.
 	merge_in:        cv.Contours,
 	merge_inputs:    [dynamic]cv.Bool_Input,
 	merge:           cv.Bool_Scratch,
@@ -160,6 +160,7 @@ lottie_draw :: proc(c: ^Canvas, ls: ^Layer_Stack, r: ^Lottie_Renderer, doc: ^Lot
 		}
 	}
 	clear(&r.missing)
+	r.merge_fallbacks = 0
 	d := Lottie_Draw{c = c, ls = ls, r = r, doc = doc, overrides = overrides}
 	budget_init(&d.budget, &doc.limits)
 	save(c)
