@@ -1090,9 +1090,10 @@ lottie_contour_length :: proc(r: ^Lottie_Renderer, ci: u32) -> f32 {
 	return total
 }
 
+// A cubic's length by LOTTIE_CHORDS chords, as lottie_cubic_param walks it.
 @(private)
 lottie_cubic_length :: proc "contextless" (p0, p1, p2, p3: Vec2) -> f32 {
-	N :: 12
+	N :: LOTTIE_CHORDS
 	total: f32
 	prev := p0
 	for i in 1 ..= N {
@@ -1103,7 +1104,11 @@ lottie_cubic_length :: proc "contextless" (p0, p1, p2, p3: Vec2) -> f32 {
 	return total
 }
 
-// The parameter at arc length `l` along a cubic of length `len`.
+@(private)
+LOTTIE_CHORDS :: 16
+
+// The parameter at arc length `l` along a cubic of length `total`
+// (lottie_cubic_length: the same chords, so l = total lands on t = 1).
 @(private)
 lottie_cubic_param :: proc "contextless" (p0, p1, p2, p3: Vec2, l, total: f32) -> f32 {
 	if l <= 0 || total <= 0 {
@@ -1112,7 +1117,7 @@ lottie_cubic_param :: proc "contextless" (p0, p1, p2, p3: Vec2, l, total: f32) -
 	if l >= total {
 		return 1
 	}
-	N :: 16
+	N :: LOTTIE_CHORDS
 	acc: f32
 	prev := p0
 	for i in 1 ..= N {
@@ -1126,28 +1131,6 @@ lottie_cubic_param :: proc "contextless" (p0, p1, p2, p3: Vec2, l, total: f32) -
 		prev = q
 	}
 	return 1
-}
-
-// The part of a cubic between parameters t0 and t1.
-@(private)
-lottie_cubic_sub :: proc "contextless" (p: [4]Vec2, t0, t1: f32) -> [4]Vec2 {
-	split :: proc "contextless" (p: [4]Vec2, t: f32) -> (left, right: [4]Vec2) {
-		ab := p[0] + (p[1] - p[0]) * t
-		bc := p[1] + (p[2] - p[1]) * t
-		cd := p[2] + (p[3] - p[2]) * t
-		abc := ab + (bc - ab) * t
-		bcd := bc + (cd - bc) * t
-		m := abc + (bcd - abc) * t
-		return {p[0], ab, abc, m}, {m, bcd, cd, p[3]}
-	}
-	q := p
-	if t1 < 1 {
-		q, _ = split(q, t1)
-	}
-	if t0 > 0 && t1 > 0 {
-		_, q = split(q, t0 / t1)
-	}
-	return q
 }
 
 // Appends the parts of contour `ci` inside the trim's windows.
@@ -1192,7 +1175,8 @@ lottie_trim_contour :: proc(r: ^Lottie_Renderer, ci: u32, tr: ^Lottie_Trim) {
 			p := [4]Vec2{src[0], src[1], src[2], src[3]}
 			t0 := lottie_cubic_param(p[0], p[1], p[2], p[3], a - s0, l) if a > s0 else 0
 			t1 := lottie_cubic_param(p[0], p[1], p[2], p[3], b - s0, l) if b < s1 else 1
-			q := lottie_cubic_sub(p, t0, t1)
+			// A whole segment is copied as it is.
+			q := p if t0 == 0 && t1 == 1 else cv.cubic_range(p, t0, t1)
 			if first && !cont {
 				r.pts[len(r.pts) - 1] = q[0]
 			}
