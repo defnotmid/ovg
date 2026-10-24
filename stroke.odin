@@ -71,42 +71,27 @@ stroke_outline :: proc(b: ^Shape_Builder, p: ^Path, t: Transform2D, s: Stroke_Se
 		return
 	}
 	clear(segs)
-	start, last: Vec2
-	moved := false
-	it := path_iter(p)
-	for verb, coords in path_iter_next(&it) {
-		switch verb {
-		case .Move_To:
+	it := path_events(p)
+	for e in path_events_next(&it) {
+		switch e.kind {
+		case .Begin:
 			outline_contour(&o, segs[:], false)
 			clear(segs)
-			start, last, moved = coords[0], coords[0], true
-		case .Line_To:
-			if moved {
-				add_line(&o, segs, last, coords[0], true)
-				last = coords[0]
-			}
-		case .Bezier_To:
-			if !moved {
-				continue
-			}
+		case .Line:
+			add_line(&o, segs, e.p[0], e.p[1], true)
+		case .Cubic:
 			// n quadratics, each the midpoint approximation of its piece.
-			cubic := [4]Vec2{last, coords[0], coords[1], coords[2]}
-			n := cv.cubic_quad_count(cubic, tol)
-			from := cubic[0]
+			n := cv.cubic_quad_count(e.p, tol)
+			from := e.p[0]
 			for i in 0 ..< n {
-				c, to := cv.cubic_quad(cubic, i, n)
+				c, to := cv.cubic_quad(e.p, i, n)
 				add_quad(&o, segs, from, c, to, i == 0)
 				from = to
 			}
-			last = cubic[3]
 		case .Close:
-			if moved {
-				add_line(&o, segs, last, start, true)
-				outline_contour(&o, segs[:], true)
-				clear(segs)
-				// A segment after a close starts where the contour started.
-				last = start
-			}
+			add_line(&o, segs, e.p[0], e.p[1], true)
+			outline_contour(&o, segs[:], true)
+			clear(segs)
 		case .Solid, .Hole:
 		}
 	}
@@ -447,15 +432,17 @@ stroke_dots :: proc(p: ^Path, s: Stroke_Settings, tol: f32, dots: ^Path) {
 		path_close(dots)
 		path_solidity(dots, .Hole)
 	}
-	it := path_iter(p)
-	for verb, coords in path_iter_next(&it) {
-		switch verb {
-		case .Move_To:
+	it := path_events(p)
+	for e in path_events_next(&it) {
+		switch e.kind {
+		case .Begin:
 			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-			start, last = coords[0], coords[0]
+			start, last = e.p[0], e.p[0]
 			length, dir = 0, {}
 			open, has_seg = true, false
-		case .Line_To, .Bezier_To:
+		case .Line, .Cubic:
+			pts := e.p
+			coords := pts[1:2] if e.kind == .Line else pts[1:4]
 			to := coords[len(coords) - 1]
 			d := coords[0] - last
 			if l := math.hypot(d.x, d.y); l > 0 && dir == {} {

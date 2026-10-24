@@ -71,26 +71,18 @@ shape_solidity :: proc(b: ^Shape_Builder, s: Solidity) {
 // does; segments before the first move go nowhere, and a segment after a
 // close starts a contour where the closed one started.
 shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
-	it := path_iter(p)
 	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
 		return transform_point(t, p.x, p.y)
 	}
-	moved := false
-	for verb, coords in path_iter_next(&it) {
-		if (verb == .Line_To || verb == .Bezier_To) && !b.open {
-			if !moved {
-				continue
-			}
-			shape_move_to(b, b.last)
-		}
-		switch verb {
-		case .Move_To:
-			shape_move_to(b, at(t, coords[0]))
-			moved = true
-		case .Line_To:
-			shape_line_to(b, at(t, coords[0]))
-		case .Bezier_To:
-			shape_cubic_to(b, at(t, coords[0]), at(t, coords[1]), at(t, coords[2]))
+	it := path_events(p)
+	for e in path_events_next(&it) {
+		switch e.kind {
+		case .Begin:
+			shape_move_to(b, at(t, e.p[0]))
+		case .Line:
+			shape_line_to(b, at(t, e.p[1]))
+		case .Cubic:
+			shape_cubic_to(b, at(t, e.p[1]), at(t, e.p[2]), at(t, e.p[3]))
 		case .Close:
 			shape_close(b)
 		case .Solid:
