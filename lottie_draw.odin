@@ -52,6 +52,13 @@ Lottie_Renderer :: struct {
 	// Repeater scratch: the geometry its copies repeat (lottie_gather).
 	copy_verbs:  [dynamic]Verb,
 	copy_coords: [dynamic]Vec2,
+	// Merge paths: the operands' geometry, one input each, and the boolean's
+	// scratch; merges that fell back to concatenation (an inconsistent
+	// arrangement), which tests expect to be 0.
+	merge_in:        cv.Contours,
+	merge_inputs:    [dynamic]cv.Bool_Input,
+	merge:           cv.Bool_Scratch,
+	merge_fallbacks: int,
 	// Trim scratch: segment lengths.
 	lengths:  [dynamic]f32,
 	values:   [dynamic]f32,
@@ -76,6 +83,9 @@ Lottie_Renderer :: struct {
 lottie_renderer_destroy :: proc(r: ^Lottie_Renderer, c: ^Canvas) {
 	path_destroy(&r.path)
 	cv.contours_destroy(&r.geo)
+	cv.contours_destroy(&r.merge_in)
+	delete(r.merge_inputs)
+	cv.bool_scratch_destroy(&r.merge)
 	delete(r.geometry)
 	delete(r.copy_verbs)
 	delete(r.copy_coords)
@@ -796,7 +806,80 @@ lottie_build_items :: proc(d: ^Lottie_Draw, items: Range, t: f32) {
 			r.geometry[i] = {first, u32(len(r.contours)) - first}
 		case .Trim:
 			lottie_trim(d, sh, {items.start, i - items.start}, t)
+		case .Merge:
+			first := u32(len(r.contours))
+			lottie_merge(d, sh, {items.start, i - items.start}, t)
+			r.geometry[i] = {first, u32(len(r.contours)) - first}
 		}
+	}
+}
+
+// Merge paths (as Skottie): each geometry item above the merge in its
+// scope (in file order, through visible groups under their transforms) is
+// an operand; mode 1 concatenates them, 2-5 combine them in one boolean
+// (union, the first minus the rest, intersection, odd count). The operands'
+// own geometry is cleared, so paints see only the result. A boolean that
+// runs out of budget or doesn't hold together falls back to concatenation.
+@(private)
+lottie_merge :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, items: Range, t: f32) {
+	r := d.r
+	cv.contours_clear(&r.merge_in)
+	clear(&r.merge_inputs)
+	collect :: proc(d: ^Lottie_Draw, items: Range, m: Transform2D, t: f32) {
+		doc, r := d.doc, d.r
+		for i in items.start ..< items.start + items.count {
+			s := &doc.shapes[i]
+			if .Hidden in s.flags {
+				continue
+			}
+			#partial switch s.kind {
+			case .Group:
+				g, _ := lottie_transform_matrix(doc, s.transform, t)
+				collect(d, s.children, transform_multiply(g, m), t)
+			case .Rect, .Ellipse, .Path, .Star, .Merge:
+				g := r.geometry[i]
+				first := u32(len(r.merge_in.contours))
+				for ci in g.start ..< g.start + g.count {
+					ct := r.contours[ci]
+					at :: proc(m: Transform2D, p: Vec2) -> Vec2 {return transform_point(m, p.x, p.y)}
+					cv.contours_begin(&r.merge_in, at(m, r.pts[ct.start]))
+					for k in 0 ..< ct.segs {
+						q := r.pts[ct.start + 3 * k:][:4]
+						cv.contours_segment(&r.merge_in, r.kinds[ct.seg + k], at(m, q[1]), at(m, q[2]), at(m, q[3]))
+					}
+					cv.contours_end(&r.merge_in, ct.closed, false)
+				}
+				append(&r.merge_inputs, cv.Bool_Input{first, u32(len(r.merge_in.contours)) - first, false})
+				r.geometry[i] = {}
+			}
+		}
+	}
+	collect(d, items, TRANSFORM_IDENTITY, t)
+	src := &r.merge_in
+	if mode := sh.stops; mode >= 2 && len(r.merge_inputs) > 0 {
+		ops := [5]cv.Bool_Op{.Union, .Union, .Difference, .Intersection, .Xor}
+		left := d.budget.limits[.Boolean_Steps] - d.budget.used[.Boolean_Steps]
+		steps := left
+		err := cv.bool_run(&r.merge, &r.merge_in, r.merge_inputs[:], ops[mode - 1], &steps)
+		d.budget.used[.Boolean_Steps] += left - max(steps, 0)
+		switch err {
+		case .None:
+			src = &r.merge.out
+		case .Limit:
+			d.budget.hit += {.Boolean_Steps}
+		case .Inconsistent:
+			r.merge_fallbacks += 1
+		case .Non_Finite:
+			return
+		}
+	}
+	for ct in src.contours {
+		cv.contours_begin(&r.geo, src.pts[ct.start])
+		for k in 0 ..< ct.segs {
+			q := src.pts[ct.start + 3 * k:][:4]
+			cv.contours_segment(&r.geo, src.kinds[ct.seg + k], q[1], q[2], q[3])
+		}
+		cv.contours_end(&r.geo, ct.closed, false)
 	}
 }
 
@@ -906,7 +989,7 @@ lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 		}
 		cv.contours_cubic(&r.geo, prev_out, first_in, first_v)
 		cv.contours_end(&r.geo, true, reversed)
-	case .Group, .Fill, .Stroke, .Gradient_Fill, .Gradient_Stroke, .Trim, .Repeater, .Ignored:
+	case .Group, .Fill, .Stroke, .Gradient_Fill, .Gradient_Stroke, .Trim, .Repeater, .Merge, .Ignored:
 	}
 }
 
@@ -921,7 +1004,7 @@ lottie_scope_each :: proc(d: ^Lottie_Draw, items: Range, data: rawptr, fn: proc(
 		#partial switch sh.kind {
 		case .Group:
 			lottie_scope_each(d, sh.children, data, fn)
-		case .Rect, .Ellipse, .Path, .Star:
+		case .Rect, .Ellipse, .Path, .Star, .Merge:
 			fn(d, i, data)
 		}
 	}
@@ -1401,7 +1484,7 @@ lottie_gather :: proc(d: ^Lottie_Draw, items: Range, k: u32, rel: Transform2D, t
 			// paint above it still fills its paths.
 			m, _ := lottie_transform_matrix(doc, sh.transform, t)
 			lottie_gather(d, sh.children, sh.children.count, transform_multiply(m, rel), t)
-		case .Rect, .Ellipse, .Path, .Star:
+		case .Rect, .Ellipse, .Path, .Star, .Merge:
 			g := r.geometry[i]
 			p := &r.path
 			identity := rel == TRANSFORM_IDENTITY

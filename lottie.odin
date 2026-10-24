@@ -28,7 +28,7 @@ import "core:strings"
 // baseline shift, box text) laid out with the host's fonts, and text
 // animators (range selectors; position, scale, rotation, skew, opacity,
 // fill / stroke colour and width, tracking). Other effects, layer styles,
-// merge paths and the other shape modifiers, text on a path, embedded
+// round corners and the other shape modifiers, text on a path, embedded
 // glyphs, 3D and expressions are skipped with a warning in
 // `Lottie_Document.warnings` (expressions keep their keyframed values).
 
@@ -95,6 +95,10 @@ Lottie_Shape_Kind :: enum u8 {
 	Gradient_Stroke,
 	Trim,
 	Repeater,
+	// Merge paths: the geometry above it in its scope combined into one
+	// (its mode in `stops`: 1 merge, 2 add, 3 subtract, 4 intersect, 5
+	// exclude intersections).
+	Merge,
 	// Skipped (warned) items.
 	Ignored,
 }
@@ -1178,8 +1182,8 @@ lottie_parse_shape :: proc(p: ^Lottie_Parser, o: json.Object) -> (sh: Lottie_Sha
 			sh.flags += {.Repeat_Below}
 		}
 	case "mm":
-		sh.kind = .Ignored
-		lottie_warn(p, "merge paths are not supported")
+		sh.kind = .Merge
+		sh.stops = u16(clamp(lj_num(o, "mm", 1), 1, 5))
 	case "rd":
 		sh.kind = .Ignored
 		lottie_warn(p, "round corners are not supported")

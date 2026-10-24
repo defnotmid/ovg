@@ -123,15 +123,16 @@ test_lottie_parse_tables :: proc(t: ^testing.T) {
 	testing.expect_value(t, st.cap, Line_Cap.Butt)
 	testing.expect_value(t, st.join, Line_Join.Bevel)
 	testing.expect_value(t, st.dash.count, 3)
-	testing.expect_value(t, d.shapes[sh.start + 1].kind, Lottie_Shape_Kind.Ignored)
+	testing.expect_value(t, d.shapes[sh.start + 1].kind, Lottie_Shape_Kind.Merge)
+	testing.expect_value(t, d.shapes[sh.start + 1].stops, 1)
 	tm := d.shapes[sh.start + 2]
 	testing.expect_value(t, tm.kind, Lottie_Shape_Kind.Trim)
 	testing.expect(t, .Trim_Sequential in tm.flags)
 	testing.expect_value(t, len(d.markers), 1)
 	testing.expect_value(t, d.markers[0].name, "intro")
 	testing.expect_value(t, d.markers[0].frame, 10)
-	// Warned once each: merge paths, the camera.
-	testing.expect_value(t, len(d.warnings), 2)
+	// Warned: the camera.
+	testing.expect_value(t, len(d.warnings), 1)
 
 	_, bad := lottie_parse(transmute([]u8)string(`{"v": 1}`))
 	testing.expect_value(t, bad, Lottie_Error.Not_Lottie)
@@ -751,4 +752,40 @@ test_lottie_text_stroke_width_animated :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expectf(t, red > 50, "stroked pixels: %d", red)
+}
+
+// Merge paths, each mode on two overlapping rects (A at x 0..20, B at
+// 10..30), filled after the merge: Skottie's left fold over the geometry
+// above, in file order. The operands' own paints draw nothing.
+@(test)
+test_lottie_merge_paths :: proc(t: ^testing.T) {
+	Want :: struct {
+		mode:    int,
+		a, ab, b: bool,
+	}
+	wants := [?]Want{{1, true, true, true}, {2, true, true, true}, {3, true, false, false}, {4, false, true, false}, {5, true, false, true}}
+	for w in wants {
+		s: Lottie_Fx
+		defer lottie_fx_close(&s)
+		json := fmt.tprintf(`{{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 40, "h": 20, "layers": [
+			{{"ty": 4, "ind": 1, "ip": 0, "op": 60, "ks": {{}}, "shapes": [
+				{{"ty": "rc", "p": {{"a": 0, "k": [10, 10]}}, "s": {{"a": 0, "k": [20, 20]}}, "r": {{"a": 0, "k": 0}}}},
+				{{"ty": "fl", "c": {{"a": 0, "k": [0, 0, 1, 1]}}, "o": {{"a": 0, "k": 100}}}},
+				{{"ty": "gr", "it": [
+					{{"ty": "rc", "p": {{"a": 0, "k": [0, 0]}}, "s": {{"a": 0, "k": [20, 20]}}, "r": {{"a": 0, "k": 0}}}},
+					{{"ty": "tr", "p": {{"a": 0, "k": [20, 10]}}}}]}},
+				{{"ty": "mm", "mm": %d}},
+				{{"ty": "fl", "c": {{"a": 0, "k": [1, 0, 0, 1]}}, "o": {{"a": 0, "k": 100}}}}]}}]}}`, w.mode)
+		testing.expect_value(t, lottie_fx_open(&s, json), Lottie_Error.None)
+		lottie_fx_draw(&s, 0)
+		for c in ([3]struct {
+				x:    int,
+				want: bool,
+			}{{5, w.a}, {15, w.ab}, {25, w.b}}) {
+			px := lottie_px(&s, c.x, 10)
+			testing.expectf(t, near(px, RED if c.want else PAPER), "mode %d at x %d: %v", w.mode, c.x, px)
+		}
+		testing.expect_value(t, s.r.merge_fallbacks, 0)
+		testing.expect_value(t, len(s.doc.warnings), 0)
+	}
 }
