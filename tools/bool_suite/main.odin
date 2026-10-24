@@ -273,15 +273,17 @@ winding :: proc(c: ^cv.Contours, q: [2]f64, near: f64, stack: ^[dynamic][2]f64) 
 	f :: proc(v: [2]f32) -> [2]f64 {return {f64(v.x), f64(v.y)}}
 	for ct in c.contours {
 		pts := c.pts[ct.start:][:3 * ct.segs + 1]
-		segs := [dynamic][4][2]f64{}
-		defer delete(segs)
-		for i in 0 ..< ct.segs {
-			append(&segs, [4][2]f64{f(pts[3 * i]), f(pts[3 * i + 1]), f(pts[3 * i + 2]), f(pts[3 * i + 3])})
-		}
-		if l, s := pts[len(pts) - 1], pts[0]; l != s {
-			append(&segs, [4][2]f64{f(l), f(l + (s - l) / 3), f(l + (s - l) * (2.0 / 3)), f(s)})
-		}
-		for g in segs {
+		// Its segments, then the line closing it when it is open.
+		l, s := pts[len(pts) - 1], pts[0]
+		for i in 0 ..= ct.segs {
+			g: [4][2]f64
+			if i < ct.segs {
+				g = {f(pts[3 * i]), f(pts[3 * i + 1]), f(pts[3 * i + 2]), f(pts[3 * i + 3])}
+			} else if l != s {
+				g = {f(l), f(l + (s - l) / 3), f(l + (s - l) * (2.0 / 3)), f(s)}
+			} else {
+				break
+			}
 			lo, hi := cv.box_of(g)
 			if q.x < lo.x - near || q.x > hi.x + near || q.y < lo.y - near || q.y > hi.y + near {
 				cw, _ := cv.curve_winding(g, q, 0, stack)

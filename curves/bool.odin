@@ -329,7 +329,7 @@ bool_arrange :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budge
 	bool_cuts(s, eps, delta, budget) or_return
 	bool_vertices(s, eps, delta, budget) or_return
 	bool_edges(s, k, eps, delta, budget) or_return
-	bool_faces(s, k, eps) or_return
+	bool_faces(s, k, eps)
 	bool_windings(s, k, eps) or_return
 	return true, nil
 }
@@ -1342,7 +1342,7 @@ merge_coincident :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int
 // curve's point at a radius past the vertex's cluster, and the faces they
 // bound (each on the left of its half-edges).
 @(private = "file")
-bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
+bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) {
 	ne := len(s.edges)
 	resize(&s.hdir, 2 * ne)
 	resize(&s.vstart, len(s.vpos) + 1)
@@ -1434,22 +1434,18 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 			if s.hface[h0] != max(u32) {
 				continue
 			}
+			// next is a permutation of the live half-edges (a twin, then
+			// a step around its vertex), so each walk closes on h0.
 			f := u32(len(s.farea))
 			area: f64
 			h := h0
-			for steps := 0; ; steps += 1 {
-				if steps > 2 * ne {
-					return .Inconsistent
-				}
+			for {
 				s.hface[h] = f
 				q := s.ecurve[h >> 1]
 				area -= cubic_area(q) if h & 1 == 0 else cubic_area([4][2]f64{q[3], q[2], q[1], q[0]})
 				h = s.hnext[h]
 				if h == h0 {
 					break
-				}
-				if s.hface[h] != max(u32) {
-					return .Inconsistent
 				}
 			}
 			append(&s.fhalf, h0)
@@ -1459,7 +1455,6 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 	s.stats.faces = len(s.farea)
 	resize(&s.fwind, len(s.farea) * k)
 	resize(&s.inside, len(s.farea))
-	return nil
 }
 
 // The direction from a vertex to its edge's curve at distance r (past the

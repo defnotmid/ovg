@@ -262,3 +262,27 @@ test_curve_winding_on_curve :: proc(t: ^testing.T) {
 	_, on = curve_winding({{0, 0}, {1, 2}, {3, 2}, {4, 0}}, {2, 1.5}, 0, &stack)
 	testing.expect(t, on)
 }
+
+// A straight cubic along a line, its controls uneven so only it is halved:
+// every leaf pairs the line's whole range with a stretch of the cubic, and
+// the leaves make one overlap run, whatever order the search left them in.
+@(test)
+test_near_runs_one_overlap :: proc(t: ^testing.T) {
+	s: Kernel_Scratch
+	defer kernel_scratch_destroy(&s)
+	runs: [dynamic]Run
+	defer delete(runs)
+	budget := max(int)
+	tol := 1e-6
+	line := piece_of(line_cubic({0, 0}, {10, 0}), true)
+	for c in ([?][2]f64{{0.5, 9.9}, {9.7, 0.2}, {3, 4}, {0.01, 0.02}}) {
+		cubic := piece_of({{0, 0}, {c[0], 0}, {c[1], 0}, {10, 0}}, false)
+		clear(&runs)
+		near_runs(&line, &cubic, tol, tol / 4, &s, &runs, &budget)
+		testing.expectf(t, len(runs) == 1 && !runs[0].point, "controls %v: %v", c, runs[:])
+		if len(runs) == 1 {
+			r := runs[0]
+			testing.expectf(t, r.s0 == 0 && r.s1 == 1 && r.t0 == 0 && r.t1 == 1, "controls %v: %v", c, r)
+		}
+	}
+}
