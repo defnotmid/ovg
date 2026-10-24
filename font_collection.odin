@@ -30,8 +30,9 @@ Font_Collection :: struct {
 	// The family text that names none is drawn in (borrowed); empty, or
 	// a family no face has: every face competes by weight and style.
 	default_family: string,
-	// Guards the shaping state below and each face's lazily parsed kb font,
-	// so layouts may run concurrently on one collection.
+	// Guards the shaping state below and each face's layout tables
+	// (prepared on first use), so layouts may run concurrently on one
+	// collection.
 	shape_lock: sync.Mutex,
 	// Idle shapers (text_shape.odin), one per concurrent layout.
 	shapers:    [dynamic]^Text_Shaper,
@@ -125,8 +126,8 @@ font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 	ordered_remove(&c.faces, i)
 }
 
-// Pooled shapers hold faces' kb fonts (configs, keyed by the data address,
-// which new data may reuse): a face going takes them with it.
+// Pooled shapers hold plans made for faces (keyed by the font's address,
+// which a new face may reuse): a face going takes them with it.
 @(private = "file")
 drop_shapers :: proc(c: ^Font_Collection) {
 	sync.mutex_lock(&c.shape_lock)
@@ -231,48 +232,6 @@ font_identity :: proc(data: []u8, font: ^Font, allocator := context.allocator) -
 		family = strings.clone("Unknown", allocator)
 	}
 	return
-}
-
-// Whether the GSUB / GPOS tables of a face hold together: kb_text_shape
-// trusts them, and lists pointing past a table's end (a header-only GSUB, as
-// in some color-font subsets) make it read and write out of bounds.
-font_layout_tables_ok :: proc(f: ^Font) -> bool {
-	d := f.data
-	for table in ([2]ft.Table{.GSUB, .GPOS}) {
-		span := f.face.tables[table]
-		if span.at == 0 {
-			continue
-		}
-		length := span.size
-		t := d[span.at:][:length]
-		if length < 10 {
-			return false
-		}
-		// ScriptList and FeatureList: a count of 6-byte records past the
-		// header (a null offset is read as the header itself).
-		for field in ([2]int{4, 6}) {
-			list := int(ft.read_u16(t, field))
-			if list < 10 || list + 2 > length || list + 2 + int(ft.read_u16(t, list)) * 6 > length {
-				return false
-			}
-		}
-		// LookupList: offsets to lookups, each with its subtable offsets.
-		list := int(ft.read_u16(t, 8))
-		if list < 10 || list + 2 > length {
-			return false
-		}
-		count := int(ft.read_u16(t, list))
-		if list + 2 + count * 2 > length {
-			return false
-		}
-		for i in 0 ..< count {
-			lookup := list + int(ft.read_u16(t, list + 2 + i * 2))
-			if lookup + 6 > length || lookup + 6 + int(ft.read_u16(t, lookup + 4)) * 2 > length {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // A `name` table string, preferring Windows Unicode English, as UTF-8.

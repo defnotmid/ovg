@@ -214,7 +214,7 @@ test_bidi_levels :: proc(t: ^testing.T) {
 		cls := make([]Bidi_Class, len(runes), context.temp_allocator)
 		lv := make([]u8, len(runes), context.temp_allocator)
 		for r, i in runes {
-			cls[i] = bidi_class(r, .ARABIC if r >= 0x600 && r < 0x700 else .LATIN)
+			cls[i] = bidi_class(r, .Arabic if r >= 0x600 && r < 0x700 else .Latin)
 		}
 		bidi_resolve(cls, lv)
 		out := make([]u8, len(lv), context.temp_allocator)

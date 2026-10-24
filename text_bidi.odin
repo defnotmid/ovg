@@ -1,7 +1,8 @@
 package ovg
 
 import "core:unicode"
-import kb "vendor:kb_text_shape"
+
+import sh "shape"
 
 // Bidi levels of a line in a left-to-right paragraph (UAX #9 without
 // explicit embeddings or bracket pairs): weak types resolved (W1-W7),
@@ -26,7 +27,7 @@ Bidi_Class :: enum u8 {
 
 // The class of `r`, whose letters' direction comes from their script.
 @(private)
-bidi_class :: proc(r: rune, script: kb.script) -> Bidi_Class {
+bidi_class :: proc(r: rune, script: sh.Script) -> Bidi_Class {
 	switch r {
 	case '0' ..= '9', 0xB2, 0xB3, 0xB9, 0x06F0 ..= 0x06F9, 0x2070, 0x2074 ..= 0x2079, 0x2080 ..= 0x2089, 0xFF10 ..= 0xFF19:
 		return .EN
@@ -52,11 +53,11 @@ bidi_class :: proc(r: rune, script: kb.script) -> Bidi_Class {
 		return .NSM
 	}
 	if unicode.is_letter(r) || unicode.is_spacing_mark(r) || unicode.is_digit(r) {
-		if kb.ScriptDirection(script) != .KBTS_DIRECTION_RTL {
+		if !sh.script_is_rtl(script) {
 			return .L
 		}
 		#partial switch script {
-		case .ARABIC, .SYRIAC, .THAANA, .HANIFI_ROHINGYA:
+		case .Arabic, .Syriac, .Thaana, .Hanifi_Rohingya:
 			return .AL
 		}
 		return .R

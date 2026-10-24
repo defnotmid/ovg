@@ -30,6 +30,27 @@ gc_is_letter :: #force_inline proc "contextless" (gc: General_Category) -> bool 
 	return gc >= .Ll && gc <= .Lu
 }
 
+// Each character's script for shaping (into `out`): its own, or for
+// characters of any script (Common, Inherited, unassigned) the script of
+// the text around them: the one before, else the first after.
+script_runs :: proc(text: []rune, out: []Script) {
+	last := Script.Common
+	first := len(text)
+	for r, i in text {
+		script := char_script(r)
+		if script == .Common || script == .Inherited || script == .Unknown {
+			script = last
+		} else if first == len(text) {
+			first = i
+		}
+		out[i] = script
+		last = script
+	}
+	for i in 0 ..< first {
+		out[i] = out[first] if first < len(text) else .Common
+	}
+}
+
 // Default ignorables (Unicode's Default_Ignorable_Code_Point, less the
 // ones shaping must see: Hangul fillers and such).
 is_default_ignorable :: proc "contextless" (r: rune) -> bool {

@@ -7,7 +7,7 @@ import "core:unicode"
 // list of positioned glyphs grouped into runs of one font, size and paint
 // tag, ready for `fill_glyph_outlines` / `stroke_glyph_outlines`. Each line
 // is split into segments of one font, size, script and direction, shaped
-// with kb_text_shape (text_shape.odin) and placed in bidi visual order.
+// with ovg/shape (text_shape.odin) and placed in bidi visual order.
 
 Text_Align :: enum u8 {
 	Left,
@@ -39,7 +39,7 @@ Text_Style :: struct {
 	// The caller's paint for these glyphs, carried into the runs.
 	paint:          u32,
 	// OpenType features turned on or off over the shaper's defaults, the
-	// first of a tag winning (CSS font-feature-settings). Letter spacing
+	// last of a tag winning (CSS font-feature-settings). Letter spacing
 	// turns liga, clig and dlig off unless these set them.
 	features:       []Font_Feature,
 }
@@ -132,8 +132,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	clear(&s.piece_font)
 	clear(&s.piece_size)
 	clear(&s.piece_features)
-	clear(&s.piece_config)
-	clear(&s.overrides)
+	clear(&s.features)
 	clear(&s.runes)
 	clear(&s.piece)
 	clear(&s.font)
@@ -315,7 +314,7 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 		i = j
 	}
 	for &seg in s.segs {
-		shaper_shape(fonts, s, &seg, pieces)
+		shaper_shape(fonts, s, &seg)
 	}
 	shaper_reorder(s)
 	for si in s.order {

@@ -173,9 +173,9 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, orange > 1000)
 }
 
-// Setting the emoji face again frees the old face's kb font: no pooled
-// shaper may keep a config for it (the same bytes reuse the old data
-// address, so the config key alone would match a dangling kb font).
+// Setting the emoji face again frees the old face's layout tables: no
+// pooled shaper may keep a plan for it (the new face takes the old one's
+// address, so the plan key alone would match freed tables).
 @(test)
 test_colr_emoji_reset :: proc(t: ^testing.T) {
 	fonts: Font_Collection
@@ -187,17 +187,17 @@ test_colr_emoji_reset :: proc(t: ^testing.T) {
 	emoji := EMOJI_FONT_DATA
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
 	text_layout(&fonts, {{text = "a\U0001F525", style = {size = 100}}}, {}, &l)
-	emoji_configs :: proc(fonts: ^Font_Collection) -> (n: int) {
+	emoji_plans :: proc(fonts: ^Font_Collection) -> (n: int) {
 		for s in fonts.shapers {
-			for cfg in s.configs {
-				n += int(cfg.data == raw_data(fonts.emoji.font.data))
+			for p in s.plans {
+				n += int(p.font == &fonts.emoji.font)
 			}
 		}
 		return
 	}
-	testing.expect(t, emoji_configs(&fonts) > 0)
+	testing.expect(t, emoji_plans(&fonts) > 0)
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
-	testing.expect_value(t, emoji_configs(&fonts), 0)
+	testing.expect_value(t, emoji_plans(&fonts), 0)
 	text_layout(&fonts, {{text = "a\U0001F600\U0001F44D\U0001F3FD", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 3)
 }

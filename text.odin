@@ -5,10 +5,10 @@ import "core:math"
 import "core:mem"
 import "core:sync"
 import "core:unicode/utf8"
-import kb "vendor:kb_text_shape"
 
 import cv "curves"
 import ft "font"
+import sh "shape"
 
 // Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
 // outlines; glyphs draw as shapes, and atlas bitmaps are the shapes'
@@ -21,10 +21,9 @@ Font :: struct {
 	data:           []u8,
 	// Face index in a collection file.
 	index:          i32,
-	// kb_text_shape's parse of the face, made by a Font_Collection on first
-	// shaping use and owned by it.
-	shaping:        ^kb.font,
-	shaping_failed: bool,
+	// The face's layout tables prepared for shaping (text_shape.odin), made
+	// by a Font_Collection on first use. Freed by `font_destroy`.
+	shaping:        ^sh.Layout,
 	// COLR / CPAL colour glyphs (colr.odin); nil without them. Freed by
 	// `font_destroy`.
 	colr:           ^Colr,
@@ -108,7 +107,7 @@ font_destroy :: proc(f: ^Font) {
 		free(fs, fs.allocator)
 		f.shapes = nil
 	}
-	font_kb_destroy(f)
+	font_shaping_destroy(f)
 }
 
 // The glyph's shape, built on first use (safe from several threads) and

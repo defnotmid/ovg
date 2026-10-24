@@ -61,10 +61,6 @@ jobs:
             "https://github.com/odin-lang/Odin/releases/download/$ODIN_VERSION/$asset"
           mkdir -p ~/.odin
           tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C ~/.odin --strip-components=1
-          # vendor:kb_text_shape comes as C source. ODIN_ROOT tells the
-          # script where.
-          export ODIN_ROOT="$HOME/.odin"
-          sh "$ODIN_ROOT/vendor/kb_text_shape/src/build_unix.sh"
 
       - name: Set up Odin
         run: |
@@ -85,6 +81,7 @@ jobs:
           odin test . -collection:deps=.. -vet -strict-style -out:build/ovg_test
           odin test curves -vet -strict-style -out:build/curves_test
           odin test font -vet -strict-style -out:build/font_test
+          odin test shape -vet -strict-style -out:build/shape_test
 
       - name: SVG and Lottie suites (Linux)
         # Renders vs resvg and lottie-web references; run.sh uses GNU timeout.

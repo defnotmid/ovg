@@ -33,8 +33,9 @@ Added in ovg:
   (Bodymovin) animations: precomps, mattes, masks, trim paths, eased
   keyframes, layer effects (blur, drop shadow, fill, tint, tritone) and
   text layers with text animators.
-- **Text**: shaping with kb_text_shape (ligatures, kerning, Arabic and Indic
-  scripts, bidi), per-glyph font fallback, multi-style layout and baselines,
+- **Text**: OpenType shaping with `ovg/shape`, written for ovg and checked
+  against HarfBuzz (ligatures, kerning, mark positioning, Arabic, Indic and
+  the other complex scripts, bidi), per-glyph font fallback, multi-style layout and baselines,
   drawn as vector outlines; colour emoji from COLR v0 / v1 fonts, also
   vectors (Noto Color Emoji bundled as an optional fallback).
 - **Custom shader programs**: register compiled shaders (oksl's SkSL or Shadertoy GLSL) and run them
@@ -51,7 +52,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8), `vendor:kb_text_shape` (prebuilt in the Odin install; on macOS run `vendor/kb_text_shape/src/build_unix.sh` once if the `.a` is missing) |
+| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
@@ -320,7 +321,7 @@ for run in layout.runs {
   bitmap colour face has no outline for.
 - **Fallback**: `font_collection_set_emoji` sets a face tried after the
   collection's faces (never matched by family). Emoji sequences stay in one
-  face so kb_text_shape forms their ligatures: a rune followed by U+FE0F (or
+  face so shaping forms their ligatures: a rune followed by U+FE0F (or
   after a joiner in a colour face) takes a colour face, and ZWJ, variation
   selectors, skin-tone modifiers, keycaps and tags follow the rune before
   them. Leftover invisible format characters draw nothing.
@@ -448,13 +449,14 @@ warning in `doc.warnings`, `Lottie_Renderer.limited` after a draw,
 the canvas's; a new limit is a row in the table and one `budget_take` (a
 running total) or `budget_cap` (one value) where the work happens.
 
-**Fonts are read safely, shaped unsafely.** `ovg/font` checks every read
-(a corrupt or truncated font gives wrong glyphs or a load error, never a
-read out of bounds), but kb_text_shape, which shapes text, parses GSUB
-and GPOS itself without such checks: `font_layout_tables_ok` rejects the
-malformed tables known to break it, and fonts from untrusted sources
-should still be validated (e.g. with [OTS](https://github.com/khaledhosny/ots))
-until shaping reads through `ovg/font` too.
+**Fonts are read and shaped safely.** `ovg/font` and `ovg/shape` check
+every read: a corrupt or truncated font gives wrong glyphs or a load error,
+never a read out of bounds. Their work is bounded by the font's own data
+(a table varying over another number of axes than fvar's is ignored, as
+the spec requires) and shaping by HarfBuzz's limits on buffer growth and
+lookup steps per character. `odin test shape` mutates the layout and
+variation tables of real fonts and shapes and draws them with bounds
+checks on.
 
 ## Lottie import
 
@@ -745,9 +747,10 @@ every part follows:
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set) and
-  shapes with `vendor:kb_text_shape`: each line is split into
+  shapes with `ovg/shape`: each line is split into
   segments of one font (per-glyph fallback picks the first face covering a
-  codepoint), size, script and bidi level (kb's Unicode script runs; levels
+  codepoint), size, script and bidi level (each character's Unicode script,
+  characters of every script taking the script around them; levels
   from UAX #9's weak and neutral rules for a left-to-right paragraph,
   `text_bidi.odin`: spaces, punctuation and emoji between right-to-left
   text join it, others keep the paragraph's direction), each segment is
@@ -756,36 +759,52 @@ every part follows:
   segments are placed in
   bidi visual order (right-to-left runs reversed, numbers after
   right-to-left letters kept in order inside them). Faces without GPOS
-  kern with their legacy `kern` table; faces kb cannot read (or whose
-  GSUB / GPOS lists point outside the table, which kb does not check) are
-  placed per codepoint with advances and kerning. `Text_Style.features`
+  kern with their legacy `kern` table. `Text_Style.features`
   turns OpenType features on or off per piece over the shaper's defaults
   (`{{"smcp", 1}, {"liga", 0}, {"salt", 2}}`: small caps, no ligatures,
-  the second alternate; the first of a tag wins, as CSS
-  font-feature-settings); each segment places its pieces' glyph configs in
-  the shaper's scratch, so overrides cost no allocation once warm. A
-  feature kb runs only on glyphs it flags (frac, numr and dnom around
-  U+2044; joining and Indic forms) applies to the whole piece when the
-  piece turns it on, as in HarfBuzz. Checked against `hb-shape` over every
-  feature of 15 fonts (Noto, DM Sans, JetBrains Mono, Bebas Neue,
-  Instrument Serif, Liberation, URW, Adwaita Sans): glyph ids agree but
-  for Adwaita Sans' ss07, subs, sups, tnum and zero (a variable font whose
-  feature variations kb does not apply).
+  the second alternate; the last of a tag wins, as CSS
+  font-feature-settings): a segment whose pieces all set the same
+  features shapes with them over all of it, else each piece's apply over
+  its own codepoints.
   Letter-spacing turns off liga / clig / dlig (CSS) unless the piece sets
   them, and is not added after attached marks. The
-  collection parses a face for kb on first use and pools `Text_Shaper`s
-  (shape configs, scratchpads, glyph storage, layout tables), so layouts
-  may run concurrently on one collection; a warm shaper does not allocate.
+  collection prepares a face's layout tables on first use and pools
+  `Text_Shaper`s (glyph buffer, plans per face, script, direction and
+  features, layout tables), so layouts may run concurrently on one
+  collection; a warm shaper does not allocate.
   Every call shapes what it is given: a `Text_Layout` is data out, kept
   by the caller and drawn again while its text is unchanged. Not handled:
-  explicit
-  bidi controls (U+202A..U+202E, U+2066..U+2069, unsupported by kb), a
-  right-to-left paragraph direction, vertical text, variable fonts (the
-  default instance is drawn). kb flags numerators wrongly when a U+2044
-  fraction slash follows earlier digits in a segment (its digit count is
-  not reset by other characters), so such text can take numerator forms
-  from the segment's first digit on. `layout_simple` still places plain
+  explicit bidi controls (U+202A..U+202E, U+2066..U+2069), a
+  right-to-left paragraph direction, vertical text, variable font
+  instances (the default instance is drawn; `ovg/font` and `ovg/shape`
+  read and shape instances). `layout_simple` still places plain
   left-to-right text with advances and kerning (UI labels).
+- **Shaping** (`ovg/shape`, core only) follows HarfBuzz, the reference it
+  is tested against: Unicode properties and normalization from the
+  Unicode 17 character database, HarfBuzz's shapers (default, Arabic,
+  Hebrew, Thai, Hangul, Indic, Khmer, Myanmar, the Universal Shaping
+  Engine) with its syllable machines, GSUB and GPOS lookups, the legacy
+  `kern` table, fallback mark positioning, and variable fonts'
+  FeatureVariations and device deltas. Three owners: a face's `Layout`
+  (its tables prepared once: lookups, subtables and the coverages and
+  class definitions read for every glyph unpacked into flat arrays, a bit
+  per glyph or a class per glyph, at most as many bytes as the tables
+  hold), a `Plan` per script, direction, language and features, and a
+  `Shaper` (the glyph buffer, kept warm). `tools/shape_corpus` compares
+  glyphs, clusters, advances and offsets with the system HarfBuzz
+  (14.6): 0 differences over its 1,043 curated cases, 27,118 feature-set
+  cases, 24,400 random strings and variable instances on the installed
+  fonts it picks, and 49,200 random strings over 43 downloaded fonts. An
+  independent run of 1.45 M random strings over 38 scripts (158 script /
+  face pairs) agreed on every glyph and cluster; what it found in fonts
+  with layout tables removed, with frac=0 and with the Syriac
+  abbreviation mark is fixed. Known differences: Arabic fonts without GSUB are not shaped from
+  presentation forms (HarfBuzz's fallback), Mongolian variation
+  selectors in text shaped as Arabic, and gvar advances near a half
+  unit, summed exactly where HarfBuzz rounds in single precision. Time
+  per sentence against HarfBuzz (same process, one core): Latin 1.5x,
+  Arabic 1.2x, Devanagari 1.2x; per word and on random strings 0.8-1.0x
+  (Devanagari 1.1-1.2x).
 - **Text on a path** (`text_path.odin`, SVG textPath): `text_path_set`
   measures a path (flattened, each point's distance along it) into a
   `Text_Path`; `text_layout_on_path` moves a layout made from x = 0, y = 0
@@ -822,7 +841,7 @@ every part follows:
 - Paths are plain data, read-only while drawn: `fill_path` builds the
   path's shape into the frame. Scratch and frame buffers reuse their
   allocations;
-  paints never allocate. Font variations are not read yet.
+  paints never allocate.
 
 ## Test
 
@@ -831,6 +850,8 @@ every part follows:
 odin test . -collection:deps=.. -vet -strict-style    # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
 odin test curves -vet -strict-style                   # the curves package alone (core only)
 odin test font -vet -strict-style                     # the font reader alone (core only)
+odin test shape -vet -strict-style                    # the shaper alone (core only)
+odin run tools/shape_corpus -o:speed -collection:deps=.. -- -quiet   # shaping vs the system libharfbuzz
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
 odin run tools/bench -collection:deps=.. -o:speed     # CPU time and allocations per warm frame, generated workloads

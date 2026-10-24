@@ -1,6 +1,6 @@
-// Compares ovg/shape with HarfBuzz (the system libharfbuzz) and
-// kb_text_shape over strings × fonts, counting where glyphs, clusters,
-// advances, offsets and pen positions differ.
+// Compares ovg/shape with HarfBuzz (the system libharfbuzz) over strings
+// × fonts, counting where glyphs, clusters, advances, offsets and pen
+// positions differ.
 //
 //   odin run tools/shape_corpus -o:speed -- [options] [font files...]
 //     -script:Latin        only cases of this script
@@ -9,8 +9,7 @@
 //     -features:liga=0,... features (HarfBuzz syntax)
 //     -var:wght=700,...    variation settings
 //     -show:N              print the first N mismatching cases in full
-//     -kb                  also compare kb_text_shape
-//     -bench               time ovg and kb on the matching cases
+//     -bench               time ovg and HarfBuzz on the cases
 //     -random:N            N random strings per script per font, from the
 //                          characters the font maps (marks included)
 //     -dir-fonts:PATH      every .ttf / .otf / .ttc under PATH
@@ -25,7 +24,6 @@
 // fonts.
 package shape_corpus
 
-import "base:runtime"
 import "core:c"
 import "core:fmt"
 import "core:os"
@@ -36,7 +34,6 @@ import "core:strings"
 import "core:time"
 import ft "../../font"
 import sh "../../shape"
-import kb "vendor:kb_text_shape"
 
 foreign import hb "system:harfbuzz"
 
@@ -122,7 +119,6 @@ Options :: struct {
 	features: string,
 	vars:     string,
 	show:     int,
-	kb:       bool,
 	bench:    bool,
 	random:   int,
 	quiet:    bool,
@@ -155,8 +151,6 @@ main :: proc() {
 			opts.vars = arg[len("-var:"):]
 		case strings.has_prefix(arg, "-show:"):
 			opts.show, _ = strconv.parse_int(arg[len("-show:"):])
-		case arg == "-kb":
-			opts.kb = true
 		case arg == "-bench":
 			opts.bench = true
 		case arg == "-quiet":
@@ -194,7 +188,7 @@ main :: proc() {
 	if opts.sets {
 		feature_sets = FEATURE_SETS[:]
 	}
-	total, total_kb: Counts
+	total: Counts
 	shown := 0
 	for set in feature_sets {
 		opts.features = set
@@ -229,14 +223,10 @@ main :: proc() {
 						opts.vars = random_instance(&face, inst)
 						name = fmt.tprintf("%s %s", name, opts.vars)
 					}
-					c, ckb := run_font(path, data, index, &face, font_cases, &shown)
+					c := run_font(path, data, index, &face, font_cases, &shown)
 					add(&set_total, c)
-					add(&total_kb, ckb)
 					if !opts.quiet || c.glyph_cases + c.cluster_cases + c.position_cases > 0 {
 						report(name, c)
-						if opts.kb {
-							report("  kb", ckb)
-						}
 					}
 				}
 				free_all(context.temp_allocator)
@@ -249,13 +239,10 @@ main :: proc() {
 	}
 	fmt.println("----")
 	report("total ovg vs hb", total)
-	if opts.kb {
-		report("total kb vs hb", total_kb)
-	}
 	if opts.bench {
 		fmt.printfln("bench over %d cases (sum of per-font medians / worst of 15 alternating runs):", bench_cases_total)
-		names := [3]string{"ovg/shape", "kb_text_shape", "harfbuzz"}
-		for k in 0 ..< 3 {
+		names := [2]string{"ovg/shape", "harfbuzz"}
+		for k in 0 ..< 2 {
 			fmt.printfln("  %-14s median %8.2f ms (%6.2f us/case)  worst %8.2f ms", names[k], time.duration_milliseconds(bench_median[k]), time.duration_microseconds(bench_median[k]) / f64(max(bench_cases_total, 1)), time.duration_milliseconds(bench_worst[k]))
 		}
 	}
@@ -289,7 +276,7 @@ hb_tag :: proc(s: string) -> u32 {
 	return u32(sh.tag(s))
 }
 
-run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []Case, shown: ^int) -> (counts, counts_kb: Counts) {
+run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []Case, shown: ^int) -> (counts: Counts) {
 	// HarfBuzz.
 	blob := hb_blob_create(raw_data(data), u32(len(data)), 0, nil, nil)
 	defer hb_blob_destroy(blob)
@@ -365,21 +352,7 @@ run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []
 		delete(plans)
 	}
 
-	// kb_text_shape.
-	kfont: kb.font
-	if opts.kb || opts.bench {
-		kfont = kb.FontFromMemory(data, c.int(index), kb_allocator, nil)
-	}
-	defer if opts.kb || opts.bench {
-		kb.FreeFont(&kfont)
-	}
-	storage: kb.glyph_storage
-	kb_configs: map[sh.Script]Kb_Config
-	if opts.kb || opts.bench {
-		_ = kb.InitializeGlyphStorage(&storage, kb_allocator, nil)
-	}
-
-	ours, theirs, kbs: [dynamic]sh.Glyph
+	ours, theirs: [dynamic]sh.Glyph
 	runes: [dynamic]rune
 	bench_cases: [dynamic]int
 	for cs, ci in cases {
@@ -429,22 +402,15 @@ run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []
 			dump("ovg", ours[:])
 			dump("hb ", theirs[:])
 		}
-		if opts.kb && kb.FontIsValid(&kfont) {
-			clear(&kbs)
-			kc := kb_config(&kb_configs, &kfont, cs.script)
-			kb_shape(kc, &kfont, &storage, cs, runes[:], &kbs)
-			counts_kb.cases += 1
-			compare(kbs[:], theirs[:], &counts_kb)
-		}
 	}
-	if opts.bench && kb.FontIsValid(&kfont) {
+	if opts.bench {
 		// Each shaper over every case the font shows, alternating, several
 		// times: medians and worst.
 		REPS :: 15
-		times: [3][REPS]time.Duration
+		times: [2][REPS]time.Duration
 		for rep in 0 ..< REPS {
-			for which in 0 ..< 3 {
-				k := (which + rep) % 3
+			for which in 0 ..< 2 {
+				k := (which + rep) % 2
 				start := time.tick_now()
 				for ci in bench_cases {
 					cs := cases[ci]
@@ -457,9 +423,6 @@ run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []
 						clear(&ours)
 						sh.shape(&shaper, plans[{int(cs.script), int(cs.dir)}], face, runes[:], features[:], &ours)
 					case 1:
-						clear(&kbs)
-						kb_shape(kb_config(&kb_configs, &kfont, cs.script), &kfont, &storage, cs, runes[:], &kbs)
-					case 2:
 						hb_buffer_clear_contents(buf)
 						hb_buffer_add_codepoints(buf, cast([^]u32)raw_data(runes), c.int(len(runes)), 0, c.int(len(runes)))
 						hb_buffer_set_direction(buf, HB_DIRECTION_RTL if cs.dir == .RTL else HB_DIRECTION_LTR)
@@ -470,43 +433,18 @@ run_font :: proc(path: string, data: []u8, index: int, face: ^ft.Face, cases: []
 				times[k][rep] = time.tick_since(start)
 			}
 		}
-		for k in 0 ..< 3 {
+		for k in 0 ..< 2 {
 			slice.sort(times[k][:])
 			bench_median[k] += times[k][REPS / 2]
 			bench_worst[k] += times[k][REPS - 1]
 		}
 		bench_cases_total += len(bench_cases)
 	}
-	for _, kc in kb_configs {
-		kb.DestroyShapeScratchpad(kc.scratch)
-		kb.DestroyShapeConfig(kc.config)
-	}
-	delete(kb_configs)
 	return
 }
 
-bench_median, bench_worst: [3]time.Duration
+bench_median, bench_worst: [2]time.Duration
 bench_cases_total: int
-
-Kb_Config :: struct {
-	config:  ^kb.shape_config,
-	scratch: ^kb.shape_scratchpad,
-}
-
-// kb's setup for a script, made once per font (as text_shape.odin keeps
-// it per face and script).
-kb_config :: proc(configs: ^map[sh.Script]Kb_Config, f: ^kb.font, script: sh.Script) -> Kb_Config {
-	if kc, ok := configs[script]; ok {
-		return kc
-	}
-	kc: Kb_Config
-	kc.config = kb.CreateShapeConfig(f, kb_script(script), .DONT_KNOW, kb_allocator, nil)
-	if kc.config != nil {
-		kc.scratch = kb_create_shape_scratchpad(kc.config)
-	}
-	configs[script] = kc
-	return kc
-}
 
 dump :: proc(name: string, glyphs: []sh.Glyph) {
 	b := strings.builder_make(context.temp_allocator)
@@ -568,57 +506,6 @@ compare :: proc(a, b: []sh.Glyph, counts: ^Counts) -> bool {
 	// Raw advances and offsets may differ where pen positions agree (the
 	// kern table: HarfBuzz splits each pair's value over both glyphs).
 	return glyph + cluster + position > 0
-}
-
-// ---- kb_text_shape ----------------------------------------------------------------
-
-kb_allocator :: proc "c" (data: rawptr, op: ^kb.allocator_op) {
-	#partial switch op.Kind {
-	case .ALLOCATE:
-		op.Allocate.Pointer = runtime.heap_alloc(max(int(op.Allocate.Size), 1), false)
-	case .FREE:
-		runtime.heap_free(op.Free.Pointer)
-	}
-}
-
-kb_create_shape_scratchpad :: proc(config: ^kb.shape_config) -> ^kb.shape_scratchpad {
-	Create :: #type proc "c" (config: ^kb.shape_config, allocator: kb.allocator_function, data: rawptr) -> ^kb.shape_scratchpad
-	return (Create)(rawptr(kb.CreateShapeScratchpad))(config, kb_allocator, nil)
-}
-
-kb_script :: proc(s: sh.Script) -> kb.script {
-	#partial switch s {
-	case .Han:
-		return .CJK_IDEOGRAPHIC
-	}
-	name := strings.to_upper(fmt.tprint(s), context.temp_allocator)
-	if v, ok := reflect.enum_from_name(kb.script, name); ok {
-		return v
-	}
-	return .DONT_KNOW
-}
-
-kb_shape :: proc(kc: Kb_Config, f: ^kb.font, storage: ^kb.glyph_storage, cs: Case, runes: []rune, out: ^[dynamic]sh.Glyph) {
-	if kc.scratch == nil {
-		return
-	}
-	scratch := kc.scratch
-	kb.ClearActiveGlyphs(storage)
-	for r, i in runes {
-		_ = kb.PushGlyph(storage, f, r, nil, c.int(i))
-	}
-	dir: kb.direction = .KBTS_DIRECTION_RTL if cs.dir == .RTL else .KBTS_DIRECTION_LTR
-	it, err := kb.ShapeDirect(scratch, storage, dir)
-	if err != .NONE {
-		return
-	}
-	for {
-		g, ok := kb.GlyphIteratorNext(&it)
-		if !ok {
-			break
-		}
-		append(out, sh.Glyph{u16(g.Id), i32(g.UserIdOrCodepointIndex), g.AdvanceX, {g.OffsetX, g.OffsetY}, g.AttachGlyph != nil})
-	}
 }
 
 // Every font file under `dir`, sorted.

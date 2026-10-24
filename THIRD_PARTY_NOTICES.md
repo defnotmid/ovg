@@ -7,7 +7,6 @@ separate file in [LICENSES/](LICENSES).
 | --- | --- | --- |
 | femtovg | ovg is a port of it (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/femtovg-MIT.txt` |
 | nanovg | femtovg's origin: the canvas API, paint and shader design ovg inherits through it | `LICENSES/nanovg-Zlib.txt` |
-| kb_text_shape | linked (text shaping) | `LICENSES/kb_text_shape-Zlib.txt` |
 | HarfBuzz 14.6 | `shape/`: the shapers, lookup application and fallbacks follow its code, and `shape/syllable_data.odin` and the Indic and USE categories in `shape/unicode_data.odin` are generated from its tables | `LICENSES/HarfBuzz-MIT.txt` |
 | Unicode Character Database 17.0.0 | `shape/unicode_data.odin`: generated from its data files (`tools/shape_unicode/gen.pl`) | `LICENSES/Unicode-3.0.txt` |
 | resvg test suite | `tools/svg_suite/tests` (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/resvg-MIT.txt` |
