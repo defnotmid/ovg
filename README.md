@@ -53,14 +53,14 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.1), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.3), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.1 https://github.com/defnotmid/oglyph
+git clone -b v0.0.3 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -785,7 +785,8 @@ every part follows:
   axis (wdth, opsz) are told apart. A font is one instance for its life
   (load another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it,
   and glyph atlases keep instances of one face apart (oglyph/font lists a
-  face's axes and named instances). Not handled: explicit bidi controls
+  face's axes and named instances, and `ft.name_string` names them:
+  "Weight", "Bold"). Not handled: explicit bidi controls
   (U+202A..U+202E, U+2066..U+2069), a right-to-left paragraph direction,
   vertical text, MVAR's varied line metrics (ascent and descent stay the
   default instance's). `layout_simple` still places plain left-to-right

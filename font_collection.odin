@@ -1,7 +1,6 @@
 package ovg
 
 import "core:math"
-import "core:mem"
 import "core:slice"
 import "core:strings"
 import "core:sync"
@@ -246,11 +245,9 @@ font_collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (^Font, Gly
 // italic bit of the face `font` was loaded from.
 font_identity :: proc(data: []u8, font: ^Font, allocator := context.allocator) -> (family: string, weight: int, italic: bool) {
 	weight = 400
-	if name := font.face.tables[.name].at; name != 0 {
-		family = read_name(data, name, 16, allocator)
-		if family == "" {
-			family = read_name(data, name, 1, allocator)
-		}
+	family = ft.name_string(&font.face, 16, allocator)
+	if family == "" {
+		family = ft.name_string(&font.face, 1, allocator)
 	}
 	if os2 := font.face.tables[.OS2]; os2.size >= 64 {
 		weight = int(ft.read_u16(data, os2.at + 4))
@@ -260,50 +257,4 @@ font_identity :: proc(data: []u8, font: ^Font, allocator := context.allocator) -
 		family = strings.clone("Unknown", allocator)
 	}
 	return
-}
-
-// A `name` table string, preferring Windows Unicode English, as UTF-8.
-@(private)
-read_name :: proc(d: []u8, table: int, name_id: u16, allocator: mem.Allocator) -> string {
-	if table + 6 > len(d) {
-		return ""
-	}
-	count := int(ft.read_u16(d, table + 2))
-	strings_at := table + int(ft.read_u16(d, table + 4))
-	mac := ""
-	for i in 0 ..< count {
-		rec := table + 6 + i * 12
-		if rec + 12 > len(d) {
-			break
-		}
-		platform, encoding, language := ft.read_u16(d, rec), ft.read_u16(d, rec + 2), ft.read_u16(d, rec + 4)
-		if ft.read_u16(d, rec + 6) != name_id {
-			continue
-		}
-		length := int(ft.read_u16(d, rec + 8))
-		at := strings_at + int(ft.read_u16(d, rec + 10))
-		if at + length > len(d) {
-			continue
-		}
-		raw := d[at:at + length]
-		if platform == 3 && (encoding == 1 || encoding == 10) && (language == 0x409 || language & 0xff == 0x09) {
-			b := strings.builder_make(allocator)
-			for j := 0; j + 1 < len(raw); j += 2 {
-				r := rune(u16(raw[j]) << 8 | u16(raw[j + 1]))
-				// A surrogate pair is one code point.
-				if r >= 0xd800 && r < 0xdc00 && j + 3 < len(raw) {
-					if lo := rune(u16(raw[j + 2]) << 8 | u16(raw[j + 3])); lo >= 0xdc00 && lo < 0xe000 {
-						r = 0x10000 + (r - 0xd800) << 10 + (lo - 0xdc00)
-						j += 2
-					}
-				}
-				strings.write_rune(&b, r)
-			}
-			return strings.to_string(b)
-		}
-		if platform == 1 && mac == "" {
-			mac = string(raw)
-		}
-	}
-	return strings.clone(mac, allocator) if mac != "" else ""
 }

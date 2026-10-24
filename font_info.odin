@@ -20,18 +20,16 @@ Font_Info :: struct {
 
 font_info :: proc(f: ^Font, allocator := context.allocator) -> (info: Font_Info) {
 	d := f.data
-	if name := f.face.tables[.name].at; name != 0 {
-		either :: proc(d: []u8, name: int, id, fallback: u16, allocator := context.allocator) -> string {
-			if s := read_name(d, name, id, allocator); s != "" {
-				return s
-			}
-			return read_name(d, name, fallback, allocator)
+	either :: proc(f: ^ft.Face, id, fallback: u16, allocator := context.allocator) -> string {
+		if s := ft.name_string(f, id, allocator); s != "" {
+			return s
 		}
-		info.family = either(d, name, 16, 1, allocator)
-		info.subfamily = either(d, name, 17, 2, allocator)
-		info.full_name = read_name(d, name, 4, allocator)
-		info.postscript_name = read_name(d, name, 6, allocator)
+		return ft.name_string(f, fallback, allocator)
 	}
+	info.family = either(&f.face, 16, 1, allocator)
+	info.subfamily = either(&f.face, 17, 2, allocator)
+	info.full_name = ft.name_string(&f.face, 4, allocator)
+	info.postscript_name = ft.name_string(&f.face, 6, allocator)
 	info.glyph_count = f.face.glyph_count
 
 	// FeatureList records: a tag and an offset each.
