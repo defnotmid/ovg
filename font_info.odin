@@ -2,7 +2,7 @@ package ovg
 
 import "core:slice"
 
-import ft "font"
+import ft "deps:oglyph/font"
 
 // What a font says about itself, for a font picker or a glyph browser.
 // `font_info` reads it once (name, GSUB and GPOS are walked).

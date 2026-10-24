@@ -2,7 +2,7 @@ package ovg
 
 import "core:unicode"
 
-import sh "shape"
+import sh "deps:oglyph/shape"
 
 // Bidi levels of a line in a left-to-right paragraph (UAX #9 without
 // explicit embeddings or bracket pairs): weak types resolved (W1-W7),

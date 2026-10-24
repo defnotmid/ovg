@@ -4,7 +4,7 @@ import "core:mem"
 import "core:sync"
 
 import cv "curves"
-import ft "font"
+import ft "deps:oglyph/font"
 
 // Shapes drawn by per-pixel coverage: ovg's handle on the curves package
 // (curves/curves.odin: the word layout, the coverage and winding

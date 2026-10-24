@@ -7,8 +7,8 @@ import "core:sync"
 import "core:unicode/utf8"
 
 import cv "curves"
-import ft "font"
-import sh "shape"
+import ft "deps:oglyph/font"
+import sh "deps:oglyph/shape"
 
 // Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
 // outlines; glyphs draw as shapes, and atlas bitmaps are the shapes'

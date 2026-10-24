@@ -5,7 +5,7 @@ import "core:slice"
 import "core:strings"
 import "core:sync"
 
-import ft "font"
+import ft "deps:oglyph/font"
 
 // A set of font faces found by family, weight and style (CSS font
 // matching), with per-glyph fallback through every face. Face data is

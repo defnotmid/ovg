@@ -3,7 +3,7 @@ package ovg
 import "base:runtime"
 import "core:sync"
 
-import sh "shape"
+import sh "deps:oglyph/shape"
 
 // OpenType shaping for `text_layout` with ovg/shape: GSUB (ligatures,
 // contextual forms, Arabic joining, Indic reordering) and GPOS (kerning,

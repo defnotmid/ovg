@@ -15,10 +15,11 @@ env:
   # The Odin nightly ovg is developed against (same pin as onimite).
   ODIN_VERSION: dev-2026-10
 
-# ovg reads odecs (image decoding and PNG writing) through
-# `-collection:deps=..`, so the job checks both out side by side:
-#   $GITHUB_WORKSPACE/{ovg,odecs}
-# odecs is pinned to the tag onimite builds with. The core package and the
+# ovg reads oglyph (fonts and shaping) and odecs (image decoding and PNG
+# writing) through `-collection:deps=..`, so the job checks them out side by
+# side:
+#   $GITHUB_WORKSPACE/{ovg,oglyph,odecs}
+# Both are pinned to the tags onimite builds with. The core package and the
 # software backend are tested; the SDL_GPU backend (sdlgpu/) is type-checked
 # only, since hosted runners have no GPU and `odin check` needs no SDL3 library.
 
@@ -37,6 +38,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: ovg
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/oglyph
+          ref: v0.0.1
+          path: oglyph
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/odecs
@@ -80,8 +86,6 @@ jobs:
           mkdir -p build
           odin test . -collection:deps=.. -vet -strict-style -out:build/ovg_test
           odin test curves -vet -strict-style -out:build/curves_test
-          odin test font -vet -strict-style -out:build/font_test
-          odin test shape -vet -strict-style -out:build/shape_test
 
       - name: SVG and Lottie suites (Linux)
         # Renders vs resvg and lottie-web references; run.sh uses GNU timeout.

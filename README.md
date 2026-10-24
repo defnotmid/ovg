@@ -33,8 +33,8 @@ Added in ovg:
   (Bodymovin) animations: precomps, mattes, masks, trim paths, eased
   keyframes, layer effects (blur, drop shadow, fill, tint, tritone) and
   text layers with text animators.
-- **Text**: OpenType shaping with `ovg/shape`, written for ovg and checked
-  against HarfBuzz (ligatures, kerning, mark positioning, Arabic, Indic and
+- **Text**: OpenType shaping with [oglyph](https://github.com/defnotmid/oglyph)
+  (Odin, MIT, written alongside ovg and checked against HarfBuzz) (ligatures, kerning, mark positioning, Arabic, Indic and
   the other complex scripts, bidi), per-glyph font fallback, multi-style layout and baselines,
   drawn as vector outlines; colour emoji from COLR v0 / v1 fonts, also
   vectors (Noto Color Emoji bundled as an optional fallback).
@@ -44,26 +44,28 @@ Added in ovg:
   them on the GPU thread, for parallel frame building.
 
 Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
-Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Images are
-decoded and PNGs written by [odecs](https://github.com/defnotmid/odecs)
-(Odin, MIT), read through the `deps` collection: clone it next to ovg and
-build with `-collection:deps=..` (the parent of both). The other
+Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Fonts are
+read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), images
+decoded and PNGs written by [odecs](https://github.com/defnotmid/odecs) (both
+Odin, MIT), read through the `deps` collection: clone them next to ovg and
+build with `-collection:deps=..` (the directory holding all three). The other
 dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.1), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
+git clone -b v0.0.1 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
 ```odin
-import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg and odecs)
+import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph and odecs)
 import image "deps:odecs/image"
 
 sw: vg.Software_Backend
@@ -449,12 +451,12 @@ warning in `doc.warnings`, `Lottie_Renderer.limited` after a draw,
 the canvas's; a new limit is a row in the table and one `budget_take` (a
 running total) or `budget_cap` (one value) where the work happens.
 
-**Fonts are read and shaped safely.** `ovg/font` and `ovg/shape` check
+**Fonts are read and shaped safely.** oglyph's `font` and `shape` check
 every read: a corrupt or truncated font gives wrong glyphs or a load error,
 never a read out of bounds. Their work is bounded by the font's own data
 (a table varying over another number of axes than fvar's is ignored, as
 the spec requires) and shaping by HarfBuzz's limits on buffer growth and
-lookup steps per character. `odin test shape` mutates the layout and
+lookup steps per character. oglyph's tests mutate the layout and
 variation tables of real fonts and shapes and draws them with bounds
 checks on.
 
@@ -723,7 +725,7 @@ every part follows:
   two-ray estimate (4K, Linux / M4): dense upright text costs 17% / 18%
   more, rotated text 50% / 26% more. The software backend evaluates the
   same coverage function (parity: max diff 1 in the `curves` scene).
-- **Text** reads fonts with `ovg/font` (core only: the table directory,
+- **Text** reads fonts with `oglyph/font` (core only: the table directory,
   cmap, hmtx, kern and GPOS pair kerning, glyf with composites, CFF Type 2
   charstrings; bounds-checked; outlines placed by hmtx's side bearing as
   HarfBuzz places them, and checked glyph by glyph against fontTools). `fill_glyph_outlines` fills each glyph as the
@@ -747,7 +749,7 @@ every part follows:
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set) and
-  shapes with `ovg/shape`: each line is split into
+  shapes with `oglyph/shape`: each line is split into
   segments of one font (per-glyph fallback picks the first face covering a
   codepoint), size, script and bidi level (each character's Unicode script,
   characters of every script taking the script around them; levels
@@ -776,35 +778,13 @@ every part follows:
   by the caller and drawn again while its text is unchanged. Not handled:
   explicit bidi controls (U+202A..U+202E, U+2066..U+2069), a
   right-to-left paragraph direction, vertical text, variable font
-  instances (the default instance is drawn; `ovg/font` and `ovg/shape`
-  read and shape instances). `layout_simple` still places plain
+  instances (the default instance is drawn; `oglyph/font` and
+  `oglyph/shape` read and shape instances). `layout_simple` still places plain
   left-to-right text with advances and kerning (UI labels).
-- **Shaping** (`ovg/shape`, core only) follows HarfBuzz, the reference it
-  is tested against: Unicode properties and normalization from the
-  Unicode 17 character database, HarfBuzz's shapers (default, Arabic,
-  Hebrew, Thai, Hangul, Indic, Khmer, Myanmar, the Universal Shaping
-  Engine) with its syllable machines, GSUB and GPOS lookups, the legacy
-  `kern` table, fallback mark positioning, and variable fonts'
-  FeatureVariations and device deltas. Three owners: a face's `Layout`
-  (its tables prepared once: lookups, subtables and the coverages and
-  class definitions read for every glyph unpacked into flat arrays, a bit
-  per glyph or a class per glyph, at most as many bytes as the tables
-  hold), a `Plan` per script, direction, language and features, and a
-  `Shaper` (the glyph buffer, kept warm). `tools/shape_corpus` compares
-  glyphs, clusters, advances and offsets with the system HarfBuzz
-  (14.6): 0 differences over its 1,043 curated cases, 27,118 feature-set
-  cases, 24,400 random strings and variable instances on the installed
-  fonts it picks, and 49,200 random strings over 43 downloaded fonts. An
-  independent run of 1.45 M random strings over 38 scripts (158 script /
-  face pairs) agreed on every glyph and cluster; what it found in fonts
-  with layout tables removed, with frac=0 and with the Syriac
-  abbreviation mark is fixed. Known differences: Arabic fonts without GSUB are not shaped from
-  presentation forms (HarfBuzz's fallback), Mongolian variation
-  selectors in text shaped as Arabic, and gvar advances near a half
-  unit, summed exactly where HarfBuzz rounds in single precision. Time
-  per sentence against HarfBuzz (same process, one core): Latin 1.5x,
-  Arabic 1.2x, Devanagari 1.2x; per word and on random strings 0.8-1.0x
-  (Devanagari 1.1-1.2x).
+- **Shaping** is oglyph's (`deps:oglyph/shape`; its README has the
+  details): HarfBuzz's shapers and lookups, checked against HarfBuzz with
+  no differences over its corpora, about HarfBuzz's speed (1.01-1.05x its
+  time on sentences, 0.70-0.89x on words and random strings).
 - **Text on a path** (`text_path.odin`, SVG textPath): `text_path_set`
   measures a path (flattened, each point's distance along it) into a
   `Text_Path`; `text_layout_on_path` moves a layout made from x = 0, y = 0
@@ -849,12 +829,10 @@ every part follows:
 ## Test
 
 ```sh
-# with odecs cloned next to ovg (see Use); every build takes -collection:deps=..
+# with oglyph and odecs cloned next to ovg (see Use); every build takes -collection:deps=..
+# (fonts and shaping are tested in oglyph: odin test font / shape there)
 odin test . -collection:deps=.. -vet -strict-style    # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
 odin test curves -vet -strict-style                   # the curves package alone (core only)
-odin test font -vet -strict-style                     # the font reader alone (core only)
-odin test shape -vet -strict-style                    # the shaper alone (core only)
-odin run tools/shape_corpus -o:speed -collection:deps=.. -- -quiet   # shaping vs the system libharfbuzz
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
 odin run tools/bench -collection:deps=.. -o:speed     # CPU time and allocations per warm frame, generated workloads

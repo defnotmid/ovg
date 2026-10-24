@@ -5,7 +5,7 @@ import "core:slice"
 import "core:testing"
 
 import cv "curves"
-import ft "font"
+import ft "deps:oglyph/font"
 
 @(private = "file")
 coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {

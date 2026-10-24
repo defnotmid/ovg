@@ -4,7 +4,7 @@ import "base:runtime"
 import "core:math"
 import "core:sync"
 
-import ft "font"
+import ft "deps:oglyph/font"
 
 // Colour glyphs from the COLR (v0 layers, v1 paint graphs) and CPAL tables,
 // drawn as vector fills at the output resolution like plain outlines.
