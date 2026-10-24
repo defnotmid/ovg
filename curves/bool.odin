@@ -8,7 +8,8 @@ import "core:slice"
 // operand under its fill rule). One arrangement of all operands' pieces:
 //
 //   pieces monotone in x and y, with their source segment and t range, and
-//     their ends at their contour's nodes (one point per joint);
+//     their ends at their contour's nodes (one point per joint); identical
+//     pieces one, their windings summed, and gone when they cancel;
 //   one point wherever two pieces come within eps (a crossing, a touch, an
 //     overlap's end), cut into both, or the node of an end within eps;
 //   vertices: points within eps merged, pieces cut where a vertex lies
@@ -65,6 +66,7 @@ Bool_Scratch :: struct {
 	rows:    [dynamic]Bool_Row,
 	pieces:  [dynamic]Piece,
 	pnode:   [dynamic][2]u32, // per piece: the points at its ends
+	pdelta:  [dynamic]i32, // per piece: its winding per operand
 	boxes:   [dynamic][2][2]f64,
 	eboxes:  [dynamic][2][2]f64,
 	order:   [dynamic]u32,
@@ -152,6 +154,7 @@ bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	delete(s.rows)
 	delete(s.pieces)
 	delete(s.pnode)
+	delete(s.pdelta)
 	delete(s.boxes)
 	delete(s.eboxes)
 	delete(s.order)
@@ -315,6 +318,7 @@ bool_arrange :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budge
 		return
 	}
 	bool_pieces(s, eps)
+	merge_identical(s, k)
 	bool_cuts(s, eps, delta, budget) or_return
 	bool_vertices(s, eps, delta, budget) or_return
 	bool_edges(s, k, eps, delta, budget) or_return
@@ -463,7 +467,85 @@ bool_pieces :: proc(s: ^Bool_Scratch, eps: f64) {
 		lo, hi := box_of(p.p)
 		s.boxes[i] = {lo - eps, hi + eps}
 	}
-	s.stats.pieces = len(s.pieces)
+}
+
+// Identical pieces (the same line, or the same cubic, either way round: the
+// shared sides of tiled shapes) are one: their windings per operand sum
+// into the first, and a piece whose windings cancel goes. Pieces are sorted
+// by their lesser end (a key of the top halves of its coordinates' keys, so
+// equal ends share one) and compared within each run of equal keys.
+@(private = "file")
+merge_identical :: proc(s: ^Bool_Scratch, k: int) {
+	n := len(s.pieces)
+	resize(&s.pdelta, n * k)
+	slice.fill(s.pdelta[:], 0)
+	for p, i in s.pieces {
+		s.pdelta[i * k + int(p.operand)] = 1
+	}
+	start :: proc(p: Piece) -> [2]f64 {
+		a, b := p.p[0], p.p[3]
+		return a if a.x < b.x || (a.x == b.x && a.y <= b.y) else b
+	}
+	resize(&s.order, n)
+	resize(&s.keys, n)
+	for p, i in s.pieces {
+		e := start(p)
+		s.order[i] = u32(i)
+		s.keys[i] = f64_key(e.x) >> 32 << 32 | f64_key(e.y) >> 32
+	}
+	sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
+	for i := 0; i < n; {
+		j := i + 1
+		for j < n && s.keys[j] == s.keys[i] {
+			j += 1
+		}
+		// Each piece into the first identical one before it (in index order
+		// within the group), which no earlier piece took.
+		for b in i + 1 ..< j {
+			for a in i ..< b {
+				pa, pb := int(s.order[a]), int(s.order[b])
+				if dir := same_piece(&s.pieces[pa], &s.pieces[pb]); dir != 0 {
+					for o in 0 ..< k {
+						s.pdelta[pa * k + o] += dir * s.pdelta[pb * k + o]
+						s.pdelta[pb * k + o] = 0
+					}
+					break
+				}
+			}
+		}
+		i = j
+	}
+	w := 0
+	for i in 0 ..< n {
+		if slice.all_of(s.pdelta[i * k:][:k], 0) {
+			continue
+		}
+		s.pieces[w], s.pnode[w], s.boxes[w] = s.pieces[i], s.pnode[i], s.boxes[i]
+		copy(s.pdelta[w * k:][:k], s.pdelta[i * k:][:k])
+		w += 1
+	}
+	resize(&s.pieces, w)
+	resize(&s.pnode, w)
+	resize(&s.boxes, w)
+	resize(&s.pdelta, w * k)
+	s.stats.pieces = w
+}
+
+// 1 when pieces a and b are the same, -1 when the same reversed, else 0: a
+// line by its ends, a cubic by its controls.
+@(private = "file")
+same_piece :: proc "contextless" (a, b: ^Piece) -> i32 {
+	if a.line != b.line {
+		return 0
+	}
+	p, q := a.p, b.p
+	switch {
+	case p[0] == q[0] && p[3] == q[3] && (a.line || (p[1] == q[1] && p[2] == q[2])):
+		return 1
+	case p[0] == q[3] && p[3] == q[0] && (a.line || (p[1] == q[2] && p[2] == q[1])):
+		return -1
+	}
+	return 0
 }
 
 // Calls `visit` for each pair of pieces whose grown boxes meet, by a sweep
@@ -1036,14 +1118,14 @@ cut_after :: #force_inline proc "contextless" (a, b: Bool_Cut) -> bool {
 @(private = "file")
 bool_edges :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int) -> Bool_Error {
 	build_edges(s)
-	clear(&s.edelta)
 	resize(&s.vout, len(s.vpos))
 	for v, i in s.vpos {
 		s.vout[i] = {f32(v.x), f32(v.y)}
 	}
-	for e in s.edges {
+	resize(&s.edelta, len(s.edges) * k)
+	for e, i in s.edges {
 		for o in 0 ..< k {
-			append(&s.edelta, 1 if int(s.pieces[e.piece].operand) == o else 0)
+			s.edelta[i * k + o] = s.pdelta[int(e.piece) * k + o]
 		}
 	}
 	// Coincident edges: grouped by their vertex pair, merged when their
