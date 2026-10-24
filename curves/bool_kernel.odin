@@ -122,7 +122,8 @@ curve_winding :: proc(p: [4][2]f64, q: [2]f64, on_tol: f64, stack: ^[dynamic][2]
 
 // A stretch where two pieces come within the tolerance: [s0, s1] of the
 // first piece's parameter against [t0, t1] of the second's; `point` when it
-// is small (a crossing or a touch) rather than an overlap.
+// is small (a crossing or a touch, its ends within the caller's `point`
+// distance of its middle) rather than an overlap.
 Run :: struct {
 	s0, s1, t0, t1: f64,
 	point:          bool,
@@ -150,9 +151,10 @@ kernel_scratch_destroy :: proc(s: ^Kernel_Scratch) {
 // the search found its pairs within tol + delta. Cell pairs are halved
 // until both are flat, then compared as segments in closed form; a pair is
 // dropped only when its boxes are proved farther apart than tol, so no
-// crossing is missed whatever the rounding. `budget` counts cell pairs
-// (false when it runs out).
-near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int) -> bool {
+// crossing is missed whatever the rounding. A run is a point when all its
+// ends lie within `point` of its middle. `budget` counts cell pairs (false
+// when it runs out).
+near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int) -> bool {
 	clear(&s.stack)
 	clear(&s.leaves)
 	append(&s.stack, Cell_Pair{{0, 1, 0, 1}, piece_range(a, 0, 1), piece_range(b, 0, 1)})
@@ -204,14 +206,14 @@ near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dyna
 			append(&s.stack, Cell_Pair{{cell[0], cell[1], m, cell[3]}, pa, piece_range(b, m, cell[3])})
 		}
 	}
-	merge_runs(a, b, tol, s, out)
+	merge_runs(a, b, point, s, out)
 	return true
 }
 
 // The leaves' connected stretches as runs, each a point run when all its
-// ends lie within 2 tol of its middle.
+// ends lie within `point` of its middle.
 @(private = "file")
-merge_runs :: proc(a, b: ^Piece, tol: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run) {
+merge_runs :: proc(a, b: ^Piece, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run) {
 	if len(s.leaves) == 0 {
 		return
 	}
@@ -235,7 +237,7 @@ merge_runs :: proc(a, b: ^Piece, tol: f64, s: ^Kernel_Scratch, out: ^[dynamic]Ru
 		ends := [4][2]f64{piece_at(a, r.s0), piece_at(a, r.s1), piece_at(b, r.t0), piece_at(b, r.t1)}
 		r.point = true
 		for e in ends {
-			if length(e - m) > 2 * tol {
+			if length(e - m) > point {
 				r.point = false
 			}
 		}

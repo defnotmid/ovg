@@ -127,18 +127,18 @@ test_near_runs_fixtures :: proc(t: ^testing.T) {
 	// (one run around x = 1) and misses the bar at y = 1.5.
 	bulge := piece_of({{0, 0}, {2.0 / 3, 4.0 / 3}, {4.0 / 3, 4.0 / 3}, {2, 0}}, false)
 	bar := piece_of(line_cubic({0, 1}, {2, 1}), true)
-	testing.expect(t, near_runs(&bulge, &bar, tol, tol / 4, &s, &runs, &budget))
+	testing.expect(t, near_runs(&bulge, &bar, tol, tol / 4, 2 * tol, &s, &runs, &budget))
 	testing.expect_value(t, len(runs), 1)
 	testing.expect(t, runs[0].s0 < 0.5 && runs[0].s1 > 0.5 && runs[0].t0 < 0.5 && runs[0].t1 > 0.5)
 	clear(&runs)
 	high := piece_of(line_cubic({0, 1.5}, {2, 1.5}), true)
-	near_runs(&bulge, &high, tol, tol / 4, &s, &runs, &budget)
+	near_runs(&bulge, &high, tol, tol / 4, 2 * tol, &s, &runs, &budget)
 	testing.expect_value(t, len(runs), 0)
 	// A crossing: one point run where the lines meet.
 	clear(&runs)
 	a := piece_of(line_cubic({0, 0}, {4, 4}), true)
 	b := piece_of(line_cubic({0, 3}, {4, -1}), true)
-	near_runs(&a, &b, tol, tol / 4, &s, &runs, &budget)
+	near_runs(&a, &b, tol, tol / 4, 2 * tol, &s, &runs, &budget)
 	testing.expect_value(t, len(runs), 1)
 	testing.expect(t, runs[0].point && abs((runs[0].s0 + runs[0].s1) / 2 - 0.375) < 1e-6)
 	// Collinear partial overlaps, either way round: one overlap run over
@@ -147,7 +147,7 @@ test_near_runs_fixtures :: proc(t: ^testing.T) {
 		clear(&runs)
 		c := piece_of(line_cubic({0, 0}, {10, 0}), true)
 		d := piece_of(line_cubic({4, 0}, {14, 0}) if !flip else line_cubic({14, 0}, {4, 0}), true)
-		near_runs(&c, &d, tol, tol / 4, &s, &runs, &budget)
+		near_runs(&c, &d, tol, tol / 4, 2 * tol, &s, &runs, &budget)
 		testing.expect_value(t, len(runs), 1)
 		testing.expect(t, !runs[0].point)
 		testing.expect(t, abs(runs[0].s0 - 0.4) < 1e-6 && abs(runs[0].s1 - 1) < 1e-6)
@@ -188,7 +188,7 @@ test_near_runs_fuzz :: proc(t: ^testing.T) {
 			pair[k] = pieces[0]
 		}
 		clear(&runs)
-		near_runs(&pair[0], &pair[1], tol, delta, &s, &runs, &budget)
+		near_runs(&pair[0], &pair[1], tol, delta, 2 * tol, &s, &runs, &budget)
 		for i in 0 ..= N {
 			for j in 0 ..= N {
 				u, v := f64(i) / N, f64(j) / N
@@ -234,13 +234,13 @@ test_near_runs_scale :: proc(t: ^testing.T) {
 		a := piece_of(q, false)
 		b := piece_of(l, true)
 		clear(&base)
-		near_runs(&a, &b, 1e-3, 1e-3 / 4, &s, &base, &budget)
+		near_runs(&a, &b, 1e-3, 1e-3 / 4, 2e-3, &s, &base, &budget)
 		for i in 0 ..< 4 {
 			a.p[i] *= f
 			b.p[i] *= f
 		}
 		clear(&scaled)
-		near_runs(&a, &b, 1e-3 * f, 1e-3 * f / 4, &s, &scaled, &budget)
+		near_runs(&a, &b, 1e-3 * f, 1e-3 * f / 4, 2e-3 * f, &s, &scaled, &budget)
 		testing.expect_value(t, len(scaled), len(base))
 		for r, i in base {
 			if i < len(scaled) {

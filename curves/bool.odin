@@ -7,9 +7,11 @@ import "core:slice"
 // intersection and xor of any number of operands, and simplify (one
 // operand under its fill rule). One arrangement of all operands' pieces:
 //
-//   pieces monotone in x and y, with their source segment and t range;
-//   cuts where pieces come within eps (crossings, touches, overlaps);
-//   vertices: cut points within eps merged, pieces cut where a vertex lies
+//   pieces monotone in x and y, with their source segment and t range, and
+//     their ends at their contour's nodes (one point per joint);
+//   one point wherever two pieces come within eps (a crossing, a touch, an
+//     overlap's end), cut into both, or the node of an end it reaches;
+//   vertices: points within eps merged, pieces cut where a vertex lies
 //     within eps of them, until nothing changes, so edges that share no
 //     vertex are more than eps apart;
 //   edges between consecutive cuts, their curves snapped to their vertices;
@@ -61,6 +63,7 @@ Bool_Scratch :: struct {
 	// Input segments, closing lines of open contours included.
 	rows:    [dynamic]Bool_Row,
 	pieces:  [dynamic]Piece,
+	pnode:   [dynamic][2]u32, // per piece: the points at its ends
 	boxes:   [dynamic][2][2]f64,
 	eboxes:  [dynamic][2][2]f64,
 	order:   [dynamic]u32,
@@ -71,7 +74,8 @@ Bool_Scratch :: struct {
 	cand:    [dynamic]u64, // hot pixel candidates: vertex << 32 | piece
 	kernel:  Kernel_Scratch,
 	runs:    [dynamic]Run,
-	// Cuts on pieces and their points; points merge into vertices.
+	// Cuts on pieces at points (several cuts can share one); points merge
+	// into vertices.
 	cuts:    [dynamic]Bool_Cut,
 	tcuts:   [dynamic]Bool_Cut,
 	pstart:  [dynamic]u32, // per piece: its cuts' span of plist
@@ -126,12 +130,14 @@ Bool_Row :: struct {
 	row:     u32,
 	operand: u16,
 	line:    bool,
+	first:   bool, // the first of its contour
 }
 
 Bool_Cut :: struct {
 	piece: u32,
 	t:     f64,
 	point: u32,
+	pos:   [2]f64, // the piece's point at t
 }
 
 Bool_Edge :: struct {
@@ -144,6 +150,7 @@ Bool_Edge :: struct {
 bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	delete(s.rows)
 	delete(s.pieces)
+	delete(s.pnode)
 	delete(s.boxes)
 	delete(s.eboxes)
 	delete(s.order)
@@ -395,13 +402,14 @@ bool_gather :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input) -> (ep
 		if src[0] == src[1] && src[1] == src[2] && src[2] == src[3] {
 			return
 		}
-		append(&s.rows, Bool_Row{{f(src[0]), f(src[1]), f(src[2]), f(src[3])}, src, row, operand, line})
+		append(&s.rows, Bool_Row{{f(src[0]), f(src[1]), f(src[2]), f(src[3])}, src, row, operand, line, false})
 	}
 	for in_, k in inputs {
 		for ct in c.contours[in_.first:][:in_.count] {
 			if ct.segs == 0 {
 				continue
 			}
+			first := len(s.rows)
 			pts := c.pts[ct.start:][:3 * ct.segs + 1]
 			for p in pts {
 				if math.is_nan(p.x) || math.is_nan(p.y) || math.is_inf(p.x) || math.is_inf(p.y) {
@@ -416,18 +424,38 @@ bool_gather :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input) -> (ep
 			if a, b := pts[len(pts) - 1], pts[0]; a != b {
 				add(s, {a, a + (b - a) / 3, a + (b - a) * (2.0 / 3), b}, max(u32), u16(k), true)
 			}
+			if first < len(s.rows) {
+				s.rows[first].first = true
+			}
 		}
 	}
 	eps, delta = snap_epsilon(M)
 	return
 }
 
-// S1: monotone pieces, and their boxes grown by eps.
+// S1: monotone pieces, their ends at their contour's nodes (consecutive
+// pieces share their joint's point bitwise, and a contour's last piece
+// ends at its first's start), and their boxes grown by eps.
 @(private = "file")
 bool_pieces :: proc(s: ^Bool_Scratch, eps: f64) {
 	clear(&s.pieces)
 	for r, i in s.rows {
 		monotone_pieces(r.p, r.line, u32(i), r.operand, eps / 16, &s.pieces)
+	}
+	clear(&s.pts)
+	clear(&s.input)
+	clear(&s.parent)
+	resize(&s.pnode, len(s.pieces))
+	start, prev: u32
+	for p, i in s.pieces {
+		if p.t0 == 0 && s.rows[p.row].first {
+			start = add_point(s, p.p[0], true)
+			prev = start
+		}
+		last := i + 1 == len(s.pieces) || (s.pieces[i + 1].t0 == 0 && s.rows[s.pieces[i + 1].row].first)
+		end := start if last else add_point(s, p.p[3], p.t1 == 1)
+		s.pnode[i] = {prev, end}
+		prev = end
 	}
 	resize(&s.boxes, len(s.pieces))
 	for p, i in s.pieces {
@@ -474,35 +502,41 @@ Cut_Pass :: struct {
 	budget:     ^int,
 }
 
-// S2-S3: cuts at piece ends and wherever two pieces come within eps.
+// How near its middle a run's ends lie when it can only be one vertex: an
+// edge needs 2 (vrad + 4 eps) to be told apart at both ends, and a meeting
+// of two pieces within eps + delta has a radius of half that.
+@(private = "file")
+meet_reach :: proc "contextless" (eps, delta: f64) -> f64 {
+	return 4 * eps + (eps + delta) / 2
+}
+
+// S2-S3: each piece cut at its ends' nodes, and one point wherever two
+// pieces come within eps.
 @(private = "file")
 bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error {
 	clear(&s.cuts)
-	clear(&s.pts)
-	clear(&s.input)
-	clear(&s.parent)
-	for p, i in s.pieces {
-		add_cut(s, u32(i), 0, p.t0 == 0)
-		add_cut(s, u32(i), 1, p.t1 == 1)
+	for n, i in s.pnode {
+		add_cut(s, u32(i), 0, n[0])
+		add_cut(s, u32(i), 1, n[1])
 	}
 	pass := Cut_Pass{eps, delta, budget}
 	ok := bool_pairs(s, s.boxes[:], proc(s: ^Bool_Scratch, a, b: u32, data: rawptr) -> bool {
 		pass := (^Cut_Pass)(data)
 		pa, pb := &s.pieces[a], &s.pieces[b]
 		clear(&s.runs)
-		if !near_runs(pa, pb, pass.eps, pass.delta, &s.kernel, &s.runs, pass.budget) {
+		if !near_runs(pa, pb, pass.eps, pass.delta, meet_reach(pass.eps, pass.delta), &s.kernel, &s.runs, pass.budget) {
 			return false
 		}
 		s.stats.pairs += 1
 		for r in s.runs {
 			if r.point {
-				run_cut(s, a, (r.s0 + r.s1) / 2)
-				run_cut(s, b, (r.t0 + r.t1) / 2)
-			} else {
-				run_cut(s, a, r.s0)
-				run_cut(s, a, r.s1)
-				run_cut(s, b, r.t0)
-				run_cut(s, b, r.t1)
+				ta, tb := run_at(r.s0, r.s1), run_at(r.t0, r.t1)
+				meet(s, a, ta, end_node(s, a, ta), b, tb, end_node(s, b, tb))
+				continue
+			}
+			ta, tb := overlap_ends(pa, pb, r)
+			for e in 0 ..< 2 {
+				meet(s, a, ta[e], end_node(s, a, ta[e]), b, tb[e], end_node(s, b, tb[e]))
 			}
 		}
 		return true
@@ -510,22 +544,71 @@ bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error
 	return nil if ok else .Limit
 }
 
-// A run's cut; one exactly at an end is that end's cut, already made.
+// Where a point run meets on one piece: an end it reaches, else its middle.
 @(private = "file")
-run_cut :: proc(s: ^Bool_Scratch, piece: u32, t: f64) {
-	if t != 0 && t != 1 {
-		add_cut(s, piece, t, false)
+run_at :: proc "contextless" (lo, hi: f64) -> f64 {
+	switch {
+	case lo == 0:
+		return 0
+	case hi == 1:
+		return 1
+	}
+	return (lo + hi) / 2
+}
+
+// An overlap's two ends on each piece, each paired with the nearer end on
+// the other.
+@(private = "file")
+overlap_ends :: proc(a, b: ^Piece, r: Run) -> (ta, tb: [2]f64) {
+	ta, tb = {r.s0, r.s1}, {r.t0, r.t1}
+	d :: proc(a, b: ^Piece, s, t: f64) -> f64 {
+		v := piece_at(a, s) - piece_at(b, t)
+		return v.x * v.x + v.y * v.y
+	}
+	if d(a, b, ta[0], tb[0]) + d(a, b, ta[1], tb[1]) > d(a, b, ta[0], tb[1]) + d(a, b, ta[1], tb[0]) {
+		tb = {tb[1], tb[0]}
+	}
+	return
+}
+
+// The node at piece's end t, or none.
+@(private = "file")
+end_node :: proc(s: ^Bool_Scratch, piece: u32, t: f64) -> u32 {
+	return s.pnode[piece][0] if t == 0 else s.pnode[piece][1] if t == 1 else max(u32)
+}
+
+// Pieces a and b meet at their parameters ta and tb: at the point ea or eb
+// where either has one there (both: the points are one), else at a new
+// point halfway between, cut into both.
+@(private = "file")
+meet :: proc(s: ^Bool_Scratch, a: u32, ta: f64, ea: u32, b: u32, tb: f64, eb: u32) {
+	switch {
+	case ea != max(u32) && eb != max(u32):
+		unite(s.parent[:], ea, eb)
+	case ea != max(u32):
+		add_cut(s, b, tb, ea)
+	case eb != max(u32):
+		add_cut(s, a, ta, eb)
+	case:
+		p := add_point(s, (piece_at(&s.pieces[a], ta) + piece_at(&s.pieces[b], tb)) / 2, false)
+		add_cut(s, a, ta, p)
+		add_cut(s, b, tb, p)
 	}
 }
 
 @(private = "file")
-add_cut :: proc(s: ^Bool_Scratch, piece: u32, t: f64, input: bool) {
-	p := &s.pieces[piece]
-	pt := p.p[0] if t == 0 else p.p[3] if t == 1 else piece_at(p, t)
-	append(&s.cuts, Bool_Cut{piece, t, u32(len(s.pts))})
-	append(&s.parent, u32(len(s.pts)))
-	append(&s.pts, pt)
+add_point :: proc(s: ^Bool_Scratch, p: [2]f64, input: bool) -> u32 {
+	i := u32(len(s.pts))
+	append(&s.pts, p)
+	append(&s.parent, i)
 	append(&s.input, input)
+	return i
+}
+
+@(private = "file")
+add_cut :: proc(s: ^Bool_Scratch, piece: u32, t: f64, point: u32) {
+	p := &s.pieces[piece]
+	append(&s.cuts, Bool_Cut{piece, t, point, p.p[0] if t == 0 else p.p[3] if t == 1 else piece_at(p, t)})
 }
 
 // Sorts keys (and idx with them, when given) stably: insertion for a few,
@@ -716,12 +799,16 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 				v := s.vpos[vi]
 				dot := Piece{p = {v, v, v, v}, line = true}
 				clear(&s.runs)
-				if !near_runs(&s.pieces[pi], &dot, eps, delta, &s.kernel, &s.runs, budget) {
+				if !near_runs(&s.pieces[pi], &dot, eps, delta, meet_reach(eps, delta), &s.kernel, &s.runs, budget) {
 					return .Limit
 				}
 				for r in s.runs {
-					add_cut(s, pi, (r.s0 + r.s1) / 2, false)
-					unite(s.parent[:], u32(len(s.pts) - 1), s.vfirst[vi])
+					t := run_at(r.s0, r.s1)
+					if n := end_node(s, pi, t); n != max(u32) {
+						unite(s.parent[:], n, s.vfirst[vi])
+					} else {
+						add_cut(s, pi, t, s.vfirst[vi])
+					}
 					changed = true
 				}
 			}
@@ -773,7 +860,7 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 
 // Numbers the union-find roots as vertices: each at the position of its
 // lowest-index source end if it has one (input points stay put), else of
-// its lowest-index point; its radius the farthest member.
+// its lowest-index point; its radius the farthest cut at it.
 @(private = "file")
 number_vertices :: proc(s: ^Bool_Scratch) {
 	resize(&s.vert, len(s.pts))
@@ -802,9 +889,9 @@ number_vertices :: proc(s: ^Bool_Scratch) {
 			s.vpos[v], s.placed[v] = s.pts[i], true
 		}
 	}
-	for i in 0 ..< len(s.pts) {
-		v := s.vert[i]
-		d := s.pts[i] - s.vpos[v]
+	for c in s.cuts {
+		v := s.vert[c.point]
+		d := c.pos - s.vpos[v]
 		s.vrad[v] = max(s.vrad[v], math.sqrt(d.x * d.x + d.y * d.y))
 	}
 }
@@ -968,9 +1055,9 @@ build_edges :: proc(s: ^Bool_Scratch) {
 	}
 }
 
-// Where two edges sharing no vertex come within eps, cuts both pieces there
-// and merges the cuts (a crossing's point; an overlap's ends, each with the
-// nearer end on the other). True when anything was cut.
+// Where two edges sharing no vertex come within eps, they meet there as
+// pieces do (at the vertex of an edge end reached, else at a new point).
+// True when anything was cut.
 @(private = "file")
 repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repaired: bool, err: Bool_Error) {
 	build_edges(s)
@@ -993,33 +1080,22 @@ repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repair
 		pa := Piece{p = s.ecurve[a], line = s.pieces[ea.piece].line}
 		pb := Piece{p = s.ecurve[b], line = s.pieces[eb.piece].line}
 		clear(&s.runs)
-		if !near_runs(&pa, &pb, r.pass.eps, r.pass.delta, &s.kernel, &s.runs, r.pass.budget) {
+		if !near_runs(&pa, &pb, r.pass.eps, r.pass.delta, meet_reach(r.pass.eps, r.pass.delta), &s.kernel, &s.runs, r.pass.budget) {
 			return false
 		}
-		at :: proc(e: Bool_Edge, t: f64) -> f64 {return e.t0 + (e.t1 - e.t0) * t}
+		// An edge's parameter on its piece, and the point at its end.
+		at :: proc(e: Bool_Edge, t: f64) -> f64 {return e.t0 if t == 0 else e.t1 if t == 1 else e.t0 + (e.t1 - e.t0) * t}
+		end :: proc(s: ^Bool_Scratch, e: Bool_Edge, t: f64) -> u32 {return s.vfirst[e.v0] if t == 0 else s.vfirst[e.v1] if t == 1 else max(u32)}
 		for run in s.runs {
 			r.repaired = true
 			if run.point {
-				add_cut(s, ea.piece, at(ea, (run.s0 + run.s1) / 2), false)
-				add_cut(s, eb.piece, at(eb, (run.t0 + run.t1) / 2), false)
-				unite(s.parent[:], u32(len(s.pts) - 2), u32(len(s.pts) - 1))
+				ta, tb := run_at(run.s0, run.s1), run_at(run.t0, run.t1)
+				meet(s, ea.piece, at(ea, ta), end(s, ea, ta), eb.piece, at(eb, tb), end(s, eb, tb))
 				continue
 			}
-			first := u32(len(s.pts))
-			add_cut(s, ea.piece, at(ea, run.s0), false)
-			add_cut(s, ea.piece, at(ea, run.s1), false)
-			add_cut(s, eb.piece, at(eb, run.t0), false)
-			add_cut(s, eb.piece, at(eb, run.t1), false)
-			d :: proc(s: ^Bool_Scratch, i, j: u32) -> f64 {
-				v := s.pts[i] - s.pts[j]
-				return v.x * v.x + v.y * v.y
-			}
-			if d(s, first, first + 2) + d(s, first + 1, first + 3) <= d(s, first, first + 3) + d(s, first + 1, first + 2) {
-				unite(s.parent[:], first, first + 2)
-				unite(s.parent[:], first + 1, first + 3)
-			} else {
-				unite(s.parent[:], first, first + 3)
-				unite(s.parent[:], first + 1, first + 2)
+			ta, tb := overlap_ends(&pa, &pb, run)
+			for e in 0 ..< 2 {
+				meet(s, ea.piece, at(ea, ta[e]), end(s, ea, ta[e]), eb.piece, at(eb, tb[e]), end(s, eb, tb[e]))
 			}
 		}
 		return true
@@ -1058,7 +1134,7 @@ merge_coincident :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int
 				pb := Piece{p = s.ecurve[eb], t0 = 0, t1 = 1}
 				pa.line, pb.line = s.pieces[s.edges[ea].piece].line, s.pieces[s.edges[eb].piece].line
 				clear(&s.runs)
-				if !near_runs(&pa, &pb, 2 * eps, delta, &s.kernel, &s.runs, budget) {
+				if !near_runs(&pa, &pb, 2 * eps, delta, meet_reach(eps, delta), &s.kernel, &s.runs, budget) {
 					return .Limit
 				}
 				if len(s.runs) != 1 || s.runs[0].s0 > 0 || s.runs[0].s1 < 1 || s.runs[0].t0 > 0 || s.runs[0].t1 < 1 {
