@@ -64,3 +64,27 @@ path_boolean_many :: proc(out: ^Path, operands: []Bool_Operand, op: Bool_Op, s: 
 	path_append_contours(out, &s.core.out, 0, u32(len(s.core.out.contours)))
 	return nil
 }
+
+// Appends every region the operands make (Illustrator's divide): each face
+// inside at least one operand, its outline Solid-wound with the shapes
+// nested directly in it as holes, curves kept; `faces` gets each region's
+// verbs in `out` (start, count), in arrangement order. On an error `out`
+// and `faces` are unchanged.
+path_divide :: proc(out: ^Path, faces: ^[dynamic]Range, operands: []Bool_Operand, s: ^Bool_Scratch, max_steps := DEFAULT_LIMITS[.Boolean_Steps]) -> Bool_Error {
+	cv.contours_clear(&s.input)
+	clear(&s.verbs)
+	clear(&s.inputs)
+	for o in operands {
+		first := u32(len(s.input.contours))
+		contours_append_path(&s.input, o.path, verbs = &s.verbs)
+		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule == .Even_Odd})
+	}
+	budget := max_steps
+	cv.bool_divide(&s.core, &s.input, s.inputs[:], &budget) or_return
+	for f in s.core.faces {
+		start := u32(len(out.verbs))
+		path_append_contours(out, &s.core.out, f[0], f[1])
+		append(faces, Range{start, u32(len(out.verbs)) - start})
+	}
+	return nil
+}

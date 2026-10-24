@@ -5,6 +5,9 @@
 // a point exactly when the op of the operands' fills does, with winding
 // at most 1 so no output contours overlap).
 //
+// path_divide is checked too: a point inside the union lies in exactly one
+// face, any other point in none.
+//
 //     odin run tools/bool_suite -collection:deps=.. -o:speed -- [-seed:1] [-cases:500] [-v]
 package bool_suite
 
@@ -33,7 +36,7 @@ main :: proc() {
 		}
 	}
 	s: vg.Bool_Scratch
-	errors, wrong, overlapping, checked := 0, 0, 0, 0
+	errors, wrong, overlapping, checked, divided := 0, 0, 0, 0, 0
 	for n in 0 ..< cases {
 		case_seed := seed * 1_000_003 + u64(n)
 		gen := rand.create(case_seed)
@@ -65,8 +68,29 @@ main :: proc() {
 				}
 			}
 		}
+		// Divide under non-zero.
+		{
+			out: vg.Path
+			defer vg.path_destroy(&out)
+			faces: [dynamic]vg.Range
+			defer delete(faces)
+			ops := [2]vg.Bool_Operand{{&a, .Non_Zero}, {&b, .Non_Zero}}
+			if err := vg.path_divide(&out, &faces, ops[:], &s); err != nil {
+				errors += 1
+				if verbose {
+					fmt.printfln("seed %d kind %d divide: %v", case_seed, kind, err)
+				}
+			} else {
+				w := check_divide(&a, &b, &out, faces[:])
+				divided += 1
+				wrong += int(w > 0)
+				if w > 0 && verbose {
+					fmt.printfln("seed %d kind %d divide: %d wrong samples", case_seed, kind, w)
+				}
+			}
+		}
 	}
-	fmt.printfln("%d cases, %d results checked: %d errors, %d wrong, %d overlapping", cases, checked, errors, wrong, overlapping)
+	fmt.printfln("%d cases, %d results and %d divides checked: %d errors, %d wrong, %d overlapping", cases, checked, divided, errors, wrong, overlapping)
 	if errors + wrong + overlapping > 0 {
 		os.exit(1)
 	}
@@ -158,6 +182,58 @@ check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong
 			}
 			wrong += int((wr != 0) != want)
 			overlapping += int(abs(wr) > 1)
+		}
+	}
+	return
+}
+
+// Samples of a divide where the count of faces holding the point isn't 1
+// inside the union and 0 outside it.
+check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range) -> (wrong: int) {
+	ca, cb, co: cv.Contours
+	defer cv.contours_destroy(&ca)
+	defer cv.contours_destroy(&cb)
+	defer cv.contours_destroy(&co)
+	vg.contours_append_path(&ca, a)
+	vg.contours_append_path(&cb, b)
+	// Each face's contours: the contours its verbs hold, in order.
+	firsts := make([dynamic][2]int)
+	defer delete(firsts)
+	for f in faces {
+		face: vg.Path
+		defer vg.path_destroy(&face)
+		at := 0
+		for v, i in out.verbs {
+			n := vg.verb_num_coords(v)
+			if u32(i) >= f.start && u32(i) < f.start + f.count {
+				vg.path_append(&face, {v}, out.coords[at:][:n])
+			}
+			at += n
+		}
+		first := len(co.contours)
+		vg.contours_append_path(&co, &face)
+		append(&firsts, [2]int{first, len(co.contours) - first})
+	}
+	stack: [dynamic][2]f64
+	defer delete(stack)
+	N :: 40
+	near := 0.15
+	for i in 0 ..< N {
+		for j in 0 ..< N {
+			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
+			wa, ona := winding(&ca, q, near, &stack)
+			wb, onb := winding(&cb, q, near, &stack)
+			_, ono := winding(&co, q, near, &stack)
+			if ona || onb || ono {
+				continue
+			}
+			holding := 0
+			for fr in firsts {
+				w, _ := cv.contours_winding(&co, fr[0], fr[1], q, &stack)
+				holding += int(w != 0)
+			}
+			want := 1 if wa != 0 || wb != 0 else 0
+			wrong += int(holding != want)
 		}
 	}
 	return

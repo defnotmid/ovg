@@ -242,7 +242,10 @@ region (the whole canvas). A primitive's `subregion` cuts its own result.
 `path_boolean(out, {a, rule}, {b, rule}, op, &scratch)` appends `a op b`
 (Union, Difference: a minus b, Intersection, Xor) to `out`;
 `path_simplify` resolves one path's overlaps and self-crossings under its
-fill rule, and `path_boolean_many` folds any number of operands. The
+fill rule, `path_boolean_many` folds any number of operands, and
+`path_divide` splits the operands into every region they make
+(Illustrator's divide: one Path, each face's verbs a `Range` of it, the
+shapes nested in a face as its holes). The
 result keeps the operands' own curves: each output segment is a range of
 an input line or cubic (a whole one copied bit for bit), cut where the
 operands meet, and `Bool_Scratch` records where each came from (the verb
@@ -275,7 +278,8 @@ together) `out` is unchanged.
   included, cubic blobs, circles and grid-aligned rects with shared edges
   and corners, tangent circles; every op under both rules, each result's
   fill compared with the operands' on a grid away from the outlines, and
-  its winding at most 1): 2,000 cases, 16,000 results, none wrong. Area
+  its winding at most 1; each divide's faces cover the union once):
+  2,000 cases, 16,000 results and 2,000 divides, none wrong. Area
   identities (union + intersection = a + b), curve preservation and the
   kernel's no-missed-crossing contract are tests.
 - **Cost** (-o:speed, median of 15): a rect minus a circle 29 us, two

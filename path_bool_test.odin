@@ -266,3 +266,64 @@ test_path_boolean_warm_no_alloc :: proc(t: ^testing.T) {
 	testing.expect_value(t, track.total_allocation_count, 0)
 	testing.expect_value(t, temp.total_allocation_count, 0)
 }
+
+// Divide: two crossing circles make three faces (each alone, and the
+// lens); a ring with a disc inside its hole makes two (the ring keeps its
+// hole); the faces' areas sum to the union's.
+@(test)
+test_path_divide :: proc(t: ^testing.T) {
+	s: Bool_Scratch
+	defer bool_scratch_destroy(&s)
+	a, b, out, face, union_: Path
+	defer path_destroy(&a)
+	defer path_destroy(&b)
+	defer path_destroy(&out)
+	defer path_destroy(&face)
+	defer path_destroy(&union_)
+	faces: [dynamic]Range
+	defer delete(faces)
+	check :: proc(t: ^testing.T, s: ^Bool_Scratch, a, b, out, face, union_: ^Path, faces: ^[dynamic]Range, want: int) {
+		path_reset(out)
+		path_reset(union_)
+		clear(faces)
+		ops := [2]Bool_Operand{{a, .Non_Zero}, {b, .Non_Zero}}
+		testing.expect_value(t, path_divide(out, faces, ops[:], s), nil)
+		testing.expect_value(t, len(faces), want)
+		testing.expect_value(t, path_boolean(union_, ops[0], ops[1], .Union, s), nil)
+		sum: f64
+		for f in faces {
+			path_reset(face)
+			path_append(face, out.verbs[f.start:][:f.count], face_coords(out, f))
+			fa := path_area(face)
+			testing.expectf(t, fa > 0, "face %v area %v not Solid", f, fa)
+			sum += fa
+		}
+		u := path_area(union_)
+		testing.expectf(t, abs(sum - u) <= 1e-4 * u, "faces %v vs union %v", sum, u)
+	}
+	path_circle(&a, 30, 30, 20)
+	path_circle(&b, 50, 30, 20)
+	check(t, &s, &a, &b, &out, &face, &union_, &faces, 3)
+	path_reset(&a)
+	path_reset(&b)
+	path_circle(&a, 30, 30, 25)
+	path_circle(&a, 30, 30, 15)
+	path_solidity(&a, .Hole)
+	path_circle(&b, 30, 30, 8)
+	check(t, &s, &a, &b, &out, &face, &union_, &faces, 2)
+}
+
+// The coordinates of verbs [f.start, f.start + f.count) of p.
+@(private = "file")
+face_coords :: proc(p: ^Path, f: Range) -> []Vec2 {
+	at, n := 0, 0
+	for v, i in p.verbs {
+		c := verb_num_coords(v)
+		if u32(i) < f.start {
+			at += c
+		} else if u32(i) < f.start + f.count {
+			n += c
+		}
+	}
+	return p.coords[at:][:n]
+}
