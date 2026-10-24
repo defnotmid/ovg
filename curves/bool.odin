@@ -945,7 +945,14 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 			}
 			sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
 			clear(&s.cand)
+			// Each piece's own vertices stamped with it first (counts, per
+			// vertex), so whether it has one is a lookup.
+			resize(&s.counts, len(s.vpos))
+			slice.fill(s.counts[:], 0)
 			for b, pi in s.boxes {
+				for c in s.plist[s.pstart[pi]:s.pstart[pi + 1]] {
+					s.counts[s.vert[s.cuts[c].point]] = u32(pi) + 1
+				}
 				x0, x1 := f64_key(b[0].x), f64_key(b[1].x)
 				lo, hi := 0, len(s.keys)
 				for lo < hi {
@@ -958,7 +965,7 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 				}
 				for i := lo; i < len(s.keys) && s.keys[i] <= x1; i += 1 {
 					vi := s.order[i]
-					if y := s.vpos[vi].y; y < b[0].y || y > b[1].y || piece_has_vertex(s, u32(pi), vi) {
+					if y := s.vpos[vi].y; y < b[0].y || y > b[1].y || s.counts[vi] == u32(pi) + 1 {
 						continue
 					}
 					append(&s.cand, u64(vi) << 32 | u64(pi))
@@ -992,7 +999,7 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 			return .Limit
 		}
 	}
-	number_vertices(s)
+	// The last repair found nothing to change: its edges stand.
 	s.stats.vertices = len(s.vpos)
 	return nil
 }
@@ -1073,16 +1080,6 @@ group_cuts :: proc(s: ^Bool_Scratch, n: int) {
 	s.pstart[0] = 0
 }
 
-@(private = "file")
-piece_has_vertex :: proc(s: ^Bool_Scratch, piece, v: u32) -> bool {
-	for c in s.plist[s.pstart[piece]:s.pstart[piece + 1]] {
-		if s.vert[s.cuts[c].point] == v {
-			return true
-		}
-	}
-	return false
-}
-
 // By piece, then t, then point: grouped by piece, each piece's few cuts
 // sorted by insertion.
 @(private = "file")
@@ -1113,11 +1110,11 @@ cut_after :: #force_inline proc "contextless" (a, b: Bool_Cut) -> bool {
 
 // S5: an edge between consecutive cuts of a piece at different vertices,
 // its curve the piece's range with its ends moved onto the vertices (the
-// first and last controls moving with them); edges along the same curve
-// between the same vertices merge, their windings summed.
+// first and last controls moving with them), as the snap loop's last
+// repair built them; edges along the same curve between the same vertices
+// merge, their windings summed.
 @(private = "file")
 bool_edges :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int) -> Bool_Error {
-	build_edges(s)
 	resize(&s.vout, len(s.vpos))
 	for v, i in s.vpos {
 		s.vout[i] = {f32(v.x), f32(v.y)}
@@ -1567,7 +1564,10 @@ bool_windings :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 			q := s.vpos[s.cleft[root]]
 			w := s.fwind[int(f) * k:][:k]
 			for e2, j in s.edges {
-				if !e2.alive || find(s.comp[:], e2.v0) == root {
+				// An edge whose box lies above, below or left of q can't
+				// cross the ray (curve_winding's own first test).
+				lo, hi := box_of(s.ecurve[j])
+				if !e2.alive || q.y < lo.y || q.y > hi.y || hi.x < q.x || find(s.comp[:], e2.v0) == root {
 					continue
 				}
 				cw, on := curve_winding(s.ecurve[j], q, eps / 64, &s.stack)
