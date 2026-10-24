@@ -5,6 +5,11 @@ import "core:slice"
 
 // CFF (OpenType's PostScript outlines): Type 2 charstrings, run for each
 // glyph. Hints are skipped; flex is drawn as its two curves.
+//
+// CFF2 (variable fonts) differs in its header and INDEX counts, has no
+// endchar or return (charstrings and subroutines end where their data
+// does), and adds blend: operands given as a default plus a delta per
+// region of its variation store, summed at the face's instance.
 
 // The face's CFF indexes, slices of the borrowed font data.
 Cff :: struct {
@@ -20,6 +25,10 @@ Cff :: struct {
 	// and 2 name the predefined ones): glyph names (names.odin).
 	strings:     []u8,
 	charset:     int,
+	// CFF2: INDEX counts are 32-bit; blends read the variation store at
+	// `vstore` in the table (0 for none).
+	cff2:        bool,
+	vstore:      int,
 }
 
 // A read position in a CFF structure; reads past the end give 0.
@@ -60,11 +69,12 @@ sub :: proc(d: []u8, o, size: int) -> []u8 {
 	return d[o:][:size]
 }
 
-// The INDEX at the read position (skipping it).
+// The INDEX at the read position (skipping it). `wide`: CFF2's, whose
+// count is 32-bit.
 @(private)
-index_at :: proc(b: ^Buf) -> []u8 {
+index_at :: proc(b: ^Buf, wide := false) -> []u8 {
 	start := b.pos
-	if count := get(b, 2); count > 0 {
+	if count := get(b, 4 if wide else 2); count > 0 {
 		size := get8(b)
 		if size < 1 || size > 4 {
 			return nil
@@ -78,22 +88,23 @@ index_at :: proc(b: ^Buf) -> []u8 {
 }
 
 @(private)
-index_count :: proc(index: []u8) -> int {
-	return int(read_u16(index, 0))
+index_count :: proc(index: []u8, wide := false) -> int {
+	return int(read_u32(index, 0)) if wide else int(read_u16(index, 0))
 }
 
 // Object `i` of an INDEX.
 @(private)
-index_get :: proc(index: []u8, i: int) -> []u8 {
-	count := index_count(index)
-	size := int(read_u8(index, 2))
+index_get :: proc(index: []u8, i: int, wide := false) -> []u8 {
+	count := index_count(index, wide)
+	head := 4 if wide else 2
+	size := int(read_u8(index, head))
 	if i < 0 || i >= count || size < 1 || size > 4 {
 		return nil
 	}
-	b := Buf{index, 3 + i * size}
+	b := Buf{index, head + 1 + i * size}
 	start := get(&b, size)
 	end := get(&b, size)
-	return sub(index, 2 + (count + 1) * size + start, end - start)
+	return sub(index, head + (count + 1) * size + start, end - start)
 }
 
 // A DICT or charstring integer operand.
@@ -159,22 +170,26 @@ dict_ints :: proc(dict: []u8, key: int, out: []int) {
 	}
 }
 
-// The local subroutines of a font dict's private dict.
+// The local subroutines of a font dict's private dict, and (CFF2) its
+// default variation store data index.
 @(private)
-private_subrs :: proc(cff, dict: []u8) -> []u8 {
+private_subrs :: proc(cff, dict: []u8, wide := false) -> (subrs: []u8, vsindex: int) {
 	private := [2]int{} // size, offset
 	dict_ints(dict, 18, private[:])
 	if private[0] == 0 || private[1] == 0 {
-		return nil
+		return nil, 0
 	}
-	subrs := [1]int{}
-	dict_ints(sub(cff, private[1], private[0]), 19, subrs[:])
-	if subrs[0] == 0 {
-		return nil
+	pd := sub(cff, private[1], private[0])
+	at := [1]int{}
+	dict_ints(pd, 19, at[:])
+	vs := [1]int{}
+	dict_ints(pd, 22, vs[:])
+	if at[0] == 0 {
+		return nil, vs[0]
 	}
 	b := Buf{cff, 0}
-	seek(&b, private[1] + subrs[0])
-	return index_at(&b)
+	seek(&b, private[1] + at[0])
+	return index_at(&b, wide), vs[0]
 }
 
 @(private)
@@ -200,7 +215,7 @@ cff_load :: proc(f: ^Face) -> Error {
 	dict_ints(top, 0x100 | 6, kind[:])
 	dict_ints(top, 0x100 | 36, fdarray[:])
 	dict_ints(top, 0x100 | 37, fdselect[:])
-	c.subrs = private_subrs(c.table, top)
+	c.subrs, _ = private_subrs(c.table, top)
 	if kind[0] != 2 {
 		return .Unsupported
 	}
@@ -220,6 +235,44 @@ cff_load :: proc(f: ^Face) -> Error {
 	return nil
 }
 
+// CFF2 (version 2): its top dict, global subroutines, charstrings, font
+// dicts (always) with their selector, and variation store.
+@(private)
+cff2_load :: proc(f: ^Face) -> Error {
+	t := f.tables[.CFF2]
+	c := &f.cff
+	c.table = f.data[t.at:][:t.size]
+	c.cff2 = true
+	if read_u8(c.table, 0) != 2 {
+		return .Unsupported
+	}
+	header := int(read_u8(c.table, 2))
+	top := sub(c.table, header, int(read_u16(c.table, 3)))
+	b := Buf{c.table, 0}
+	seek(&b, header + len(top))
+	c.gsubrs = index_at(&b, true)
+	charstrings, fdarray, fdselect, vstore: [1]int
+	dict_ints(top, 17, charstrings[:])
+	dict_ints(top, 0x100 | 36, fdarray[:])
+	dict_ints(top, 0x100 | 37, fdselect[:])
+	dict_ints(top, 24, vstore[:])
+	if charstrings[0] == 0 || fdarray[0] == 0 {
+		return .Bad_Table
+	}
+	seek(&b, fdarray[0])
+	c.fontdicts = index_at(&b, true)
+	if fdselect[0] != 0 {
+		c.fdselect = sub(c.table, fdselect[0], len(c.table) - fdselect[0])
+	}
+	if vstore[0] != 0 {
+		// After its 16-bit length.
+		c.vstore = vstore[0] + 2
+	}
+	seek(&b, charstrings[0])
+	c.charstrings = index_at(&b, true)
+	return nil
+}
+
 // FDSelect format 3's ranges: the first glyph each font dict serves from
 // (a 16-bit sentinel after them ends the last).
 @(private)
@@ -228,10 +281,12 @@ Fd_Range :: struct #packed {
 	fd:    u8,
 }
 
-// A CID-keyed font's local subroutines for glyph `g`.
+// A CID-keyed font's (or CFF2's) local subroutines for glyph `g`, and its
+// font dict's default variation store data index.
 @(private)
-glyph_subrs :: proc(c: ^Cff, g: Glyph) -> []u8 {
-	fd := -1
+glyph_subrs :: proc(c: ^Cff, g: Glyph) -> (subrs: []u8, vsindex: int) {
+	// CFF2 without a selector has one font dict.
+	fd := 0 if c.cff2 && len(c.fdselect) == 0 else -1
 	switch read_u8(c.fdselect, 0) {
 	case 0:
 		if int(g) + 1 < len(c.fdselect) {
@@ -250,46 +305,67 @@ glyph_subrs :: proc(c: ^Cff, g: Glyph) -> []u8 {
 		if i > 0 && g < read_u16(c.fdselect, 3 + 3 * count) {
 			fd = int(ranges[i - 1].fd)
 		}
+	case 4:
+		// CFF2: 32-bit ranges (first glyph, font dict), then a sentinel.
+		count := int(read_u32(c.fdselect, 1))
+		lo, hi := 0, min(count, max(len(c.fdselect) - 5, 0) / 6)
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if read_u32(c.fdselect, 5 + 6 * mid) <= u32(g) {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo > 0 && u32(g) < read_u32(c.fdselect, 5 + 6 * count) {
+			fd = int(read_u16(c.fdselect, 5 + 6 * (lo - 1) + 4))
+		}
 	}
-	return private_subrs(c.table, index_get(c.fontdicts, fd))
+	return private_subrs(c.table, index_get(c.fontdicts, fd, c.cff2), c.cff2)
 }
 
 @(private)
-subr :: proc(index: []u8, n: int) -> []u8 {
-	count := index_count(index)
+subr :: proc(index: []u8, n: int, wide := false) -> []u8 {
+	count := index_count(index, wide)
 	bias := 107
 	if count >= 33900 {
 		bias = 32768
 	} else if count >= 1240 {
 		bias = 1131
 	}
-	return index_get(index, n + bias)
+	return index_get(index, n + bias, wide)
 }
 
 // ---- charstrings ------------------------------------------------------------------
 
 // A charstring's pen: the points go to `out` (when not nil) and grow `box`.
+// Positions add up relative moves, in f64 so a contour's blended moves
+// come back exactly to its start (as HarfBuzz's doubles do).
 @(private)
 Pen :: struct {
 	out:      ^Outline,
 	started:  bool,
-	first, p: [2]f32,
+	first, p: [2]f64,
 	box:      [4]f32, // min x, min y, max x, max y
 	count:    int,
 }
 
 @(private)
-pen_emit :: proc(pen: ^Pen, v: Verb, pts: ..[2]f32) {
+pen_emit :: proc(pen: ^Pen, v: Verb, pts: ..[2]f64) {
 	pen.count += 1
-	for p in pts {
+	for q in pts {
+		p := [2]f32{f32(q.x), f32(q.y)}
 		if !pen.started {
 			pen.box = {p.x, p.y, p.x, p.y}
 			pen.started = true
 		}
 		pen.box = {min(pen.box[0], p.x), min(pen.box[1], p.y), max(pen.box[2], p.x), max(pen.box[3], p.y)}
+		if pen.out != nil {
+			append(&pen.out.points, p)
+		}
 	}
 	if pen.out != nil {
-		emit(pen.out, v, ..pts)
+		append(&pen.out.verbs, v)
 	}
 }
 
@@ -301,7 +377,7 @@ pen_close :: proc(pen: ^Pen) {
 }
 
 @(private)
-pen_move :: proc(pen: ^Pen, dx, dy: f32) {
+pen_move :: proc(pen: ^Pen, dx, dy: f64) {
 	pen_close(pen)
 	pen.p += {dx, dy}
 	pen.first = pen.p
@@ -309,13 +385,13 @@ pen_move :: proc(pen: ^Pen, dx, dy: f32) {
 }
 
 @(private)
-pen_line :: proc(pen: ^Pen, dx, dy: f32) {
+pen_line :: proc(pen: ^Pen, dx, dy: f64) {
 	pen.p += {dx, dy}
 	pen_emit(pen, .Line, pen.p)
 }
 
 @(private)
-pen_curve :: proc(pen: ^Pen, dx1, dy1, dx2, dy2, dx3, dy3: f32) {
+pen_curve :: proc(pen: ^Pen, dx1, dy1, dx2, dy2, dx3, dy3: f64) {
 	c1 := pen.p + {dx1, dy1}
 	c2 := c1 + {dx2, dy2}
 	pen.p = c2 + {dx3, dy3}
@@ -331,7 +407,7 @@ cff_outline :: proc(f: ^Face, g: Glyph, out: ^Outline) -> (box: [4]int, ok: bool
 	if out != nil {
 		verbs, points = len(out.verbs), len(out.points)
 	}
-	if !charstring(&f.cff, g, &pen) {
+	if !charstring(f, g, &pen) {
 		if out != nil {
 			resize(&out.verbs, verbs)
 			resize(&out.points, points)
@@ -342,9 +418,14 @@ cff_outline :: proc(f: ^Face, g: Glyph, out: ^Outline) -> (box: [4]int, ok: bool
 	return {int(math.floor(b[0])), int(math.floor(b[1])), int(math.ceil(b[2])), int(math.ceil(b[3]))}, pen.count > 0
 }
 
+// CFF2's operand stack holds 513 operands at most (CFF's 48).
 @(private)
-charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
-	s: [48]f32
+CFF_MAX_STACK :: 513
+
+@(private)
+charstring :: proc(f: ^Face, g: Glyph, pen: ^Pen) -> bool {
+	c := &f.cff
+	s: [CFF_MAX_STACK]f64
 	sp := 0
 	calls: [10]Buf
 	depth := 0
@@ -352,12 +433,68 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 	mask_bits := 0
 	subrs := c.subrs
 	have_subrs := false
-	b := Buf{index_get(c.charstrings, int(g)), 0}
-	for b.pos < len(b.d) {
+	// CFF2: the variation store data blends use (the font dict's default
+	// until vsindex), and its regions' scalars at the instance, found at
+	// the first blend.
+	vsindex := 0
+	if c.cff2 {
+		subrs, vsindex = glyph_subrs(c, g)
+		have_subrs = true
+	}
+	scalars: [CFF_MAX_STACK]f32
+	regions := -1
+	b := Buf{index_get(c.charstrings, int(g), c.cff2), 0}
+	for {
+		if b.pos >= len(b.d) {
+			// CFF2's charstrings and subroutines end with their data.
+			if !c.cff2 {
+				return false
+			}
+			if depth == 0 {
+				pen_close(pen)
+				return true
+			}
+			depth -= 1
+			b = calls[depth]
+			continue
+		}
 		i := 0
 		clear_stack := true
 		b0 := get8(&b)
 		switch b0 {
+		case 0x0f:
+			// vsindex
+			if !c.cff2 || sp < 1 {
+				return false
+			}
+			vsindex = int(s[sp - 1])
+			regions = -1
+		case 0x10:
+			// blend: n values, each a default and a delta per region.
+			if !c.cff2 || sp < 1 {
+				return false
+			}
+			if regions < 0 {
+				regions = blend_scalars(f, vsindex, scalars[:])
+				if regions < 0 {
+					return false
+				}
+			}
+			n := int(s[sp - 1])
+			sp -= 1
+			if n < 0 || n * (regions + 1) > sp {
+				return false
+			}
+			base := sp - n * (regions + 1)
+			for k in 0 ..< n {
+				v := s[base + k]
+				for r in 0 ..< regions {
+					v += s[base + n + k * regions + r] * f64(scalars[r])
+				}
+				s[base + k] = v
+			}
+			sp = base + n
+			clear_stack = false
 		case 0x13, 0x14:
 			// hintmask, cntrmask: the stems before them are implied vstems.
 			if in_header {
@@ -465,7 +602,7 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 			if sp < 4 {
 				return false
 			}
-			off: f32
+			off: f64
 			if sp & 1 != 0 {
 				off = s[i]
 				i += 1
@@ -482,7 +619,7 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 			// callsubr, callgsubr
 			if b0 == 0x0a && !have_subrs {
 				if len(c.fdselect) > 0 {
-					subrs = glyph_subrs(c, g)
+					subrs, _ = glyph_subrs(c, g)
 				}
 				have_subrs = true
 			}
@@ -493,7 +630,7 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 			v := int(s[sp])
 			calls[depth] = b
 			depth += 1
-			b = {subr(subrs if b0 == 0x0a else c.gsubrs, v), 0}
+			b = {subr(subrs if b0 == 0x0a else c.gsubrs, v, c.cff2), 0}
 			if len(b.d) == 0 {
 				return false
 			}
@@ -516,12 +653,12 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 			if b0 != 255 && b0 != 28 && b0 < 32 {
 				return false
 			}
-			v: f32
+			v: f64
 			if b0 == 255 {
-				v = f32(i32(u32(get(&b, 4)))) / 0x10000
+				v = f64(i32(u32(get(&b, 4)))) / 0x10000
 			} else {
 				b.pos -= 1
-				v = f32(i16(operand(&b)))
+				v = f64(i16(operand(&b)))
 			}
 			if sp >= len(s) {
 				return false
@@ -534,13 +671,37 @@ charstring :: proc(c: ^Cff, g: Glyph, pen: ^Pen) -> bool {
 			sp = 0
 		}
 	}
-	return false
+}
+
+// The scalars at the face's instance of the regions variation store data
+// `vsindex` blends over (into `out`); how many, -1 when it can't be read.
+@(private)
+blend_scalars :: proc(f: ^Face, vsindex: int, out: []f32) -> int {
+	c := &f.cff
+	d, store := c.table, c.vstore
+	if store == 0 || read_u16(d, store) != 1 || vsindex < 0 || vsindex >= int(read_u16(d, store + 6)) {
+		return -1
+	}
+	regions := store + int(read_u32(d, store + 2))
+	data := store + int(read_u32(d, store + 8 + 4 * vsindex))
+	count := int(read_u16(d, data + 4))
+	if count > len(out) {
+		return -1
+	}
+	// Regions that can't be read blend as the default instance.
+	coords := f.coords[:f.axis_count]
+	axes, list_count, ok := region_list(d, regions, coords)
+	for k in 0 ..< count {
+		r := int(read_u16(d, data + 6 + 2 * k))
+		out[k] = region_scalar(d, regions + 4 + r * axes * 6, axes, coords) if ok && r < list_count else 0
+	}
+	return count
 }
 
 // The two-byte operators: the flexes, each drawn as two curves (their
 // depth is ignored).
 @(private)
-flex :: proc(pen: ^Pen, op: int, s: []f32) -> bool {
+flex :: proc(pen: ^Pen, op: int, s: []f64) -> bool {
 	switch op {
 	case 0x22:
 		// hflex

@@ -21,6 +21,17 @@ Outline :: struct {
 	// contour's last point.
 	glyf:   #soa[dynamic]Glyf_Point,
 	ends:   [dynamic]int,
+	// A variable font's deltas (gvar.odin): per point of each glyph being
+	// read (a composite's, then its components' after them), and one
+	// tuple's at a time.
+	deltas:         [dynamic][2]f32,
+	tuple_dx:       [dynamic]f32,
+	tuple_dy:       [dynamic]f32,
+	touched:        [dynamic]bool,
+	listed_x:       [dynamic]f32,
+	listed_y:       [dynamic]f32,
+	shared_points:  [dynamic]u16,
+	private_points: [dynamic]u16,
 }
 
 Glyf_Point :: struct {
@@ -46,6 +57,14 @@ outline_destroy :: proc(o: ^Outline) {
 	delete(o.points)
 	delete(o.glyf)
 	delete(o.ends)
+	delete(o.deltas)
+	delete(o.tuple_dx)
+	delete(o.tuple_dy)
+	delete(o.touched)
+	delete(o.listed_x)
+	delete(o.listed_y)
+	delete(o.shared_points)
+	delete(o.private_points)
 	o^ = {}
 }
 
@@ -56,8 +75,10 @@ glyph_outline :: proc(f: ^Face, g: Glyph, o: ^Outline) -> bool {
 	clear(&o.points)
 	ok: bool
 	if f.tables[.glyf].at != 0 {
-		ok = glyf_outline(f, g, o, 0)
-		if shift := glyf_shift(f, g); ok && shift != 0 {
+		// Placed by the (varied) left phantom point.
+		left: f32
+		ok, left = glyf_outline(f, g, o, 0, 0)
+		if shift := -left; ok && shift != 0 {
 			for &p in o.points {
 				p.x += shift
 			}
@@ -145,25 +166,57 @@ glyf_range :: proc(f: ^Face, g: Glyph) -> (at, end: int) {
 	return glyf.at + a, glyf.at + b
 }
 
+// Reads glyph `g` into `o`. At a variable instance its points take their
+// gvar deltas, kept from o.deltas[first] on (a composite's components put
+// theirs after its own). `left` is its left phantom point, which the
+// outline is placed by (x 0): where hmtx's side bearing puts it, varied,
+// or a component's with USE_MY_METRICS.
 @(private)
-glyf_outline :: proc(f: ^Face, g: Glyph, o: ^Outline, depth: int) -> bool {
+glyf_outline :: proc(f: ^Face, g: Glyph, o: ^Outline, depth, first: int) -> (ok: bool, left: f32) {
 	at, end := glyf_range(f, g)
 	if at < 0 {
-		return true
+		return true, 0
 	}
 	d := f.data
+	vary := has_variation(f) && f.tables[.gvar].at != 0
+	left = -glyf_shift(f, g)
 	contours := int(read_i16(d, at))
 	if contours > 0 {
-		return glyf_points(f, at, end, contours, o) && glyf_contours(o)
+		if !glyf_points(f, at, end, contours, o) {
+			return false, 0
+		}
+		if vary {
+			n := len(o.glyf)
+			if glyph_deltas(f, g, o, first, n + PHANTOM_COUNT, true) {
+				xs, ys := o.glyf.x[:n], o.glyf.y[:n]
+				deltas := o.deltas[first:][:n + PHANTOM_COUNT]
+				for k in 0 ..< n {
+					xs[k] += deltas[k].x
+					ys[k] += deltas[k].y
+				}
+				left += deltas[n].x
+			}
+		}
+		return glyf_contours(o), left
 	}
 	if contours == 0 || depth >= GLYF_MAX_DEPTH {
-		return contours == 0
+		return contours == 0, left
 	}
-	// Components: each glyph under a transform.
+	// Components: each glyph under a transform, its offset varied.
+	count := 0
+	child_first := first
+	if vary {
+		n, _ := glyf_point_count(f, g)
+		if glyph_deltas(f, g, o, first, n + PHANTOM_COUNT, false) {
+			count = n
+			left += o.deltas[first + n].x
+		}
+		child_first = first + n + PHANTOM_COUNT
+	}
 	c := at + 10
-	for {
+	for component := 0; ; component += 1 {
 		if c + 4 > end {
-			return false
+			return false, 0
 		}
 		flags := transmute(Component_Flags)read_u16(d, c)
 		child := Glyph(read_u16(d, c + 2))
@@ -179,6 +232,10 @@ glyf_outline :: proc(f: ^Face, g: Glyph, o: ^Outline, depth: int) -> bool {
 				m[4], m[5] = f32(i8(read_u8(d, c))), f32(i8(read_u8(d, c + 1)))
 			}
 			c += 2
+		}
+		if component < count && .Args_Are_XY in flags {
+			m[4] += o.deltas[first + component].x
+			m[5] += o.deltas[first + component].y
 		}
 		if .Scale in flags {
 			m[0] = f2dot14(d, c)
@@ -196,15 +253,19 @@ glyf_outline :: proc(f: ^Face, g: Glyph, o: ^Outline, depth: int) -> bool {
 		if .Scaled_Component_Offset in flags && .Unscaled_Component_Offset not_in flags {
 			m[4], m[5] = m[0] * m[4] + m[2] * m[5], m[1] * m[4] + m[3] * m[5]
 		}
-		first := len(o.points)
-		if !glyf_outline(f, child, o, depth + 1) || len(o.points) > GLYF_MAX_POINTS {
-			return false
+		first_point := len(o.points)
+		child_ok, child_left := glyf_outline(f, child, o, depth + 1, child_first)
+		if !child_ok || len(o.points) > GLYF_MAX_POINTS {
+			return false, 0
 		}
-		for &p in o.points[first:] {
+		if .Use_My_Metrics in flags {
+			left = child_left
+		}
+		for &p in o.points[first_point:] {
 			p = {m[0] * p.x + m[2] * p.y + m[4], m[1] * p.x + m[3] * p.y + m[5]}
 		}
 		if .More not_in flags {
-			return true
+			return true, left
 		}
 	}
 }
@@ -220,6 +281,8 @@ Component_Flag :: enum u16 {
 	More = 5,
 	XY_Scale,
 	Two_By_Two,
+	Have_Instructions,
+	Use_My_Metrics,
 	Scaled_Component_Offset = 11,
 	Unscaled_Component_Offset,
 }
@@ -382,10 +445,4 @@ glyf_contours :: proc(o: ^Outline) -> bool {
 	resize(&o.verbs, v)
 	resize(&o.points, p)
 	return true
-}
-
-@(private)
-emit :: proc(o: ^Outline, v: Verb, p: ..[2]f32) {
-	append(&o.verbs, v)
-	append(&o.points, ..p)
 }

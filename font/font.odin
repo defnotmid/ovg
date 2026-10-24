@@ -22,11 +22,12 @@ Error :: enum u8 {
 	Not_A_Font,
 	// The collection has no face at that index.
 	No_Face,
-	// cmap, head, hhea or hmtx is missing, or both glyf (with loca) and CFF.
+	// cmap, head, hhea or hmtx is missing, or all of glyf (with loca), CFF
+	// and CFF2.
 	Missing_Table,
 	// No cmap subtable maps Unicode, or a table's header is cut short.
 	Bad_Table,
-	// CFF other than version 1 with Type 2 charstrings.
+	// CFF other than version 1 with Type 2 charstrings (or CFF2).
 	Unsupported,
 }
 
@@ -50,6 +51,11 @@ Table :: enum u8 {
 	name,
 	OS2,
 	post,
+	fvar,
+	avar,
+	gvar,
+	HVAR,
+	CFF2,
 }
 
 @(private)
@@ -72,6 +78,11 @@ TAGS := [Table]string {
 	.name = "name",
 	.OS2  = "OS/2",
 	.post = "post",
+	.fvar = "fvar",
+	.avar = "avar",
+	.gvar = "gvar",
+	.HVAR = "HVAR",
+	.CFF2 = "CFF2",
 }
 
 // The cmap subtables (platform, encoding) that map Unicode, most preferred
@@ -107,6 +118,10 @@ Face :: struct {
 	loca_long:                 []U32,
 	cmap:                      Cmap,
 	cff:                       Cff,
+	// A variable font's instance (var.odin): each axis's normalized
+	// coordinate (2.14 fixed point; all 0 is the default instance).
+	coords:                    [MAX_AXES]i16,
+	axis_count:                int,
 }
 
 // The cmap subtable used: its format's arrays, slices of the data.
@@ -288,12 +303,19 @@ load :: proc(data: []u8, index := 0) -> (f: Face, err: Error) {
 		if t[.loca].at == 0 {
 			return {}, .Missing_Table
 		}
+	} else if t[.CFF2].at != 0 {
+		cff2_load(&f) or_return
 	} else if t[.CFF].at == 0 {
 		return {}, .Missing_Table
 	} else {
 		cff_load(&f) or_return
 	}
 	f.glyph_count = int(read_u16(data, t[.maxp].at + 4)) if t[.maxp].at != 0 else 0xffff
+	if fvar := t[.fvar].at; fvar != 0 && read_u16(data, fvar) == 1 {
+		if n := int(read_u16(data, fvar + 8)); n <= MAX_AXES {
+			f.axis_count = n
+		}
+	}
 	head, hhea := t[.head].at, t[.hhea].at
 	f.units_per_em = int(read_u16(data, head + 18))
 	f.ascent = int(read_i16(data, hhea + 4))
