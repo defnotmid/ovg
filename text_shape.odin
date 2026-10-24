@@ -97,6 +97,39 @@ Piece_Features :: struct {
 	first, count: i32, // overrides
 	// No `kern` override of 0: the legacy kern table applies.
 	kern:         bool,
+	// Features kb runs only on glyphs flagged for them (fractions around
+	// U+2044, joining forms, Indic forms) that the piece turns on: its
+	// glyphs take the flags, so they apply to all of it, as in HarfBuzz.
+	flags:        kb.glyph_flags,
+}
+
+// The features kb gates by glyph flag (numr, frac and dnom flagged only
+// around a fraction slash), by tag.
+@(private, rodata)
+FLAGGED_FEATURES := [?]struct {
+	tag:  string,
+	flag: kb.glyph_flag,
+} {
+	{"isol", .ISOL},
+	{"fina", .FINA},
+	{"fin2", .FIN2},
+	{"fin3", .FIN3},
+	{"medi", .MEDI},
+	{"med2", .MED2},
+	{"init", .INIT},
+	{"ljmo", .LJMO},
+	{"vjmo", .VJMO},
+	{"tjmo", .TJMO},
+	{"rphf", .RPHF},
+	{"blwf", .BLWF},
+	{"half", .HALF},
+	{"pstf", .PSTF},
+	{"abvf", .ABVF},
+	{"pref", .PREF},
+	{"numr", .NUMR},
+	{"frac", .FRAC},
+	{"dnom", .DNOM},
+	{"cfar", .CFAR},
 }
 
 // One shaped glyph, in font units (y up). The layout reads every field per
@@ -331,7 +364,10 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 		shaper_place_configs(s, cfg, seg)
 		kb.ClearActiveGlyphs(&s.storage)
 		for i in seg.first ..< seg.first + seg.count {
-			_ = kb.PushGlyph(&s.storage, cfg.kb_font, s.runes[i], s.piece_config[s.piece[i]], c.int(i))
+			p := s.piece[i]
+			if g := kb.PushGlyph(&s.storage, cfg.kb_font, s.runes[i], s.piece_config[p], c.int(i)); g != nil {
+				g.Flags += s.piece_features[p].flags
+			}
 		}
 		dir: kb.direction = .KBTS_DIRECTION_RTL if seg.level & 1 == 1 else .KBTS_DIRECTION_LTR
 		it, err := kb.ShapeDirect(cfg.scratch, &s.storage, dir)
@@ -378,6 +414,13 @@ shaper_add_piece_features :: proc(s: ^Text_Shaper, st: Text_Style) {
 		append(&s.overrides, kb.feature_override{kb.feature_tag(transmute(u32)tag), c.int(f.value)})
 		if pf.kern && string(tag[:]) == "kern" && f.value == 0 {
 			pf.kern = false
+		}
+		if f.value != 0 {
+			for ff in FLAGGED_FEATURES {
+				if ff.tag == string(tag[:]) {
+					pf.flags += {ff.flag}
+				}
+			}
 		}
 	}
 	if st.letter_spacing != 0 {

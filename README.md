@@ -711,7 +711,14 @@ every part follows:
   (`{{"smcp", 1}, {"liga", 0}, {"salt", 2}}`: small caps, no ligatures,
   the second alternate; the first of a tag wins, as CSS
   font-feature-settings); each segment places its pieces' glyph configs in
-  the shaper's scratch, so overrides cost no allocation once warm.
+  the shaper's scratch, so overrides cost no allocation once warm. A
+  feature kb runs only on glyphs it flags (frac, numr and dnom around
+  U+2044; joining and Indic forms) applies to the whole piece when the
+  piece turns it on, as in HarfBuzz. Checked against `hb-shape` over every
+  feature of 15 fonts (Noto, DM Sans, JetBrains Mono, Bebas Neue,
+  Instrument Serif, Liberation, URW, Adwaita Sans): glyph ids agree but
+  for Adwaita Sans' ss07, subs, sups, tnum and zero (a variable font whose
+  feature variations kb does not apply).
   Letter-spacing turns off liga / clig / dlig (CSS) unless the piece sets
   them, and is not added after attached marks. The
   collection parses a face for kb on first use and pools `Text_Shaper`s
@@ -722,7 +729,10 @@ every part follows:
   explicit
   bidi controls (U+202A..U+202E, U+2066..U+2069, unsupported by kb), a
   right-to-left paragraph direction, vertical text, variable fonts (the
-  default instance is drawn). `layout_simple` still places plain
+  default instance is drawn). kb flags numerators wrongly when a U+2044
+  fraction slash follows earlier digits in a segment (its digit count is
+  not reset by other characters), so such text can take numerator forms
+  from the segment's first digit on. `layout_simple` still places plain
   left-to-right text with advances and kerning (UI labels).
 - **Text on a path** (`text_path.odin`, SVG textPath): `text_path_set`
   measures a path (flattened, each point's distance along it) into a

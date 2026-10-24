@@ -446,6 +446,15 @@ test_shape_features :: proc(t: ^testing.T) {
 	aalt1, aalt2 := [?]Font_Feature{{"aalt", 1}}, [?]Font_Feature{{"aalt", 2}}
 	testing.expect_value(t, layout(&s, "I", aalt1[:])[0].glyph, 1911)
 	testing.expect_value(t, layout(&s, "I", aalt2[:])[0].glyph, 1738)
+	// Fraction features apply to all the piece's glyphs (HarfBuzz's ids),
+	// not only around U+2044 as kb flags them by default.
+	ids3 :: proc(g: []Positioned_Glyph) -> [3]Glyph_Index {
+		return {g[0].glyph, g[1].glyph, g[2].glyph}
+	}
+	frac, numr, dnom := [?]Font_Feature{{"frac", 1}}, [?]Font_Feature{{"numr", 1}}, [?]Font_Feature{{"dnom", 1}}
+	testing.expect_value(t, ids3(layout(&s, "1/2", frac[:])), [3]Glyph_Index{2273, 533, 2264})
+	testing.expect_value(t, ids3(layout(&s, "1/2", numr[:])), [3]Glyph_Index{2273, 18, 2274})
+	testing.expect_value(t, ids3(layout(&s, "1/2", dnom[:])), [3]Glyph_Index{2263, 18, 2264})
 	// Off by default, on by default turned off, and a style's own setting
 	// over letter spacing's.
 	testing.expect_value(t, layout(&s, "a", nil)[0].glyph, 68)
@@ -502,4 +511,10 @@ test_font_info :: proc(t: ^testing.T) {
 	text_layout(&s.fonts, pieces[:], {}, &s.layout)
 	testing.expect_value(t, s.layout.glyphs[0].glyph, 536)
 	testing.expect_value(t, s.layout.glyphs[1].glyph, 546)
+	// frac forms the font's ½ (HarfBuzz: 568).
+	frac := [?]Font_Feature{{"frac", 1}}
+	half := [?]Text_Piece{{text = "1/2", style = {family = "JetBrains Mono", size = 10, features = frac[:]}}}
+	text_layout(&s.fonts, half[:], {}, &s.layout)
+	testing.expect_value(t, len(s.layout.glyphs), 1)
+	testing.expect_value(t, s.layout.glyphs[0].glyph, 568)
 }
