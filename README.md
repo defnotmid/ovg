@@ -775,12 +775,21 @@ every part follows:
   features, layout tables), so layouts may run concurrently on one
   collection; a warm shaper does not allocate.
   Every call shapes what it is given: a `Text_Layout` is data out, kept
-  by the caller and drawn again while its text is unchanged. Not handled:
-  explicit bidi controls (U+202A..U+202E, U+2066..U+2069), a
-  right-to-left paragraph direction, vertical text, variable font
-  instances (the default instance is drawn; `oglyph/font` and
-  `oglyph/shape` read and shape instances). `layout_simple` still places plain
-  left-to-right text with advances and kerning (UI labels).
+  by the caller and drawn again while its text is unchanged. Variable
+  fonts draw the instance they were loaded at:
+  `font_load(data, 0, variations = {{"wght", 700}})`, or
+  `font_collection_add(&fonts, data, variations = ...)`, which gives the
+  face the instance's weight (wght) and style (ital, slnt) so text picks it
+  by weight; `Text_Style.variations` (CSS font-variation-settings) picks
+  the face whose instance those settings select, so instances apart in any
+  axis (wdth, opsz) are told apart. A font is one instance for its life
+  (load another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it,
+  and glyph atlases keep instances of one face apart (oglyph/font lists a
+  face's axes and named instances). Not handled: explicit bidi controls
+  (U+202A..U+202E, U+2066..U+2069), a right-to-left paragraph direction,
+  vertical text, MVAR's varied line metrics (ascent and descent stay the
+  default instance's). `layout_simple` still places plain left-to-right
+  text with advances and kerning (UI labels).
 - **Shaping** is oglyph's (`deps:oglyph/shape`; its README has the
   details): HarfBuzz's shapers and lookups, checked against HarfBuzz with
   no differences over its corpora, about HarfBuzz's speed (1.01-1.05x its

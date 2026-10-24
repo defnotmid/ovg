@@ -1,5 +1,6 @@
 package ovg
 
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -89,21 +90,33 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 }
 
 // Adds every face of a TTF/OTF/TTC, in order before face `before` (at the
-// end when past the last). Family, weight and style come from the font's
-// tables. Returns the number of faces added. Not while layouts run on the
+// end when past the last), variable ones at the instance `variations` pick
+// (font_load). Family, weight and style come from the font's tables, the
+// weight from a wght setting and the style from ital or slnt when given.
+// Returns the number of faces added. Not while layouts run on the
 // collection (faces move).
-font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int)) -> int {
+font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int), variations: []Font_Variation = nil) -> int {
 	allocator := collection_allocator(c)
 	// A collection never initialized takes its allocator here, not from
 	// the first append.
 	c.faces.allocator = allocator
 	added := 0
 	for index in 0 ..< 64 {
-		font, err := font_load(data, i32(index), allocator)
+		font, err := font_load(data, i32(index), allocator, variations)
 		if err != nil {
 			break
 		}
 		family, weight, italic := font_identity(data, &font, allocator)
+		for v in variations {
+			switch v.tag {
+			case "wght":
+				weight = int(math.round(v.value))
+			case "ital":
+				italic = v.value >= 0.5
+			case "slnt":
+				italic = v.value != 0
+			}
+		}
 		append(&c.faces, Font_Face{family, weight, italic, font})
 		added += 1
 	}
@@ -138,14 +151,15 @@ drop_shapers :: proc(c: ^Font_Collection) {
 	sync.mutex_unlock(&c.shape_lock)
 }
 
-// The best face for `family` (case-insensitive): matching style first, then
-// the nearest weight (0 means 400). An empty family is `default_family`
+// The best face for `family` (case-insensitive): with `variations`, one
+// whose instance they pick first; matching style next, then the nearest
+// weight (0 means 400). An empty family is `default_family`
 // when the collection has it, else every face competes (earlier faces win
 // ties). `found = false` returns the fallback face, which is also found by
 // its own family (so `default_family` may name it).
-font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic := false) -> (font: ^Font, found: bool) {
+font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic := false, variations: []Font_Variation = nil) -> (font: ^Font, found: bool) {
 	if family == "" && c.default_family != "" {
-		if f, ok := font_collection_find(c, c.default_family, weight, italic); ok {
+		if f, ok := font_collection_find(c, c.default_family, weight, italic, variations); ok {
 			return f, true
 		}
 	}
@@ -157,6 +171,9 @@ font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, i
 			continue
 		}
 		score := abs(f.weight - want) * 2 + (0 if f.italic == italic else 10000)
+		if len(variations) > 0 && !picks_instance(&c.faces[i].font, variations) {
+			score += 1 << 30
+		}
 		if family == "" {
 			// No family asked for: the first face of the right style.
 			score += i
@@ -170,6 +187,15 @@ font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, i
 		return &c.fallback.font, family == "" || strings.equal_fold(family, c.fallback.family)
 	}
 	return &c.faces[best].font, true
+}
+
+// Whether `variations` pick the instance the font draws (a font without
+// axes is the one instance any settings pick).
+@(private = "file")
+picks_instance :: proc(f: ^Font, variations: []Font_Variation) -> bool {
+	face := f.face
+	ft.set_variations(&face, variations)
+	return face.coords == f.face.coords
 }
 
 // The first face (then the emoji face, then the fallback) with a glyph for

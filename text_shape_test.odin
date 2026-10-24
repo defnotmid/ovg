@@ -7,6 +7,8 @@ import "core:slice"
 import "core:testing"
 import "core:unicode/utf8"
 
+import ft "deps:oglyph/font"
+
 // Shaping tests use system fonts when present (Noto on most Linux systems)
 // and skip otherwise; the bundled Vera covers the legacy `kern` path.
 
@@ -546,4 +548,73 @@ test_fallback_family :: proc(t: ^testing.T) {
 	text_layout(&s.fonts, {{text = "a", style = {family = vera}}}, {}, &s.layout)
 	testing.expect_value(t, len(s.layout.missing), 0)
 	s.fonts.default_family = ""
+}
+
+// A variable font drawn at an instance: advances, glyph boxes and layout
+// follow it, the atlas keeps instances of one face apart, and a collection
+// gives the face the instance's weight.
+@(test)
+test_font_variation :: proc(t: ^testing.T) {
+	data, err := os.read_entire_file("/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf", context.allocator)
+	if err != nil {
+		log.info("AdwaitaSans-Regular.ttf not found: skipped")
+		return
+	}
+	defer delete(data)
+	heavy := [?]ft.Variation{{"wght", 800}}
+	plain, _ := font_load(data)
+	defer font_destroy(&plain)
+	bold, _ := font_load(data, 0, context.allocator, heavy[:])
+	defer font_destroy(&bold)
+	testing.expect(t, plain.instance == 0 && bold.instance != 0)
+	g := font_glyph_index(&bold, 'W')
+	plain_advance, _ := font_glyph_advance(&plain, g)
+	bold_advance, _ := font_glyph_advance(&bold, g)
+	testing.expect(t, bold_advance > plain_advance)
+	px0, py0, px1, py1, bx0, by0, bx1, by1: i32
+	testing.expect(t, font_glyph_box(&plain, g, &px0, &py0, &px1, &py1) && font_glyph_box(&bold, g, &bx0, &by0, &bx1, &by1))
+	testing.expect(t, bx1 - bx0 > px1 - px0)
+	// The box holds the varied outline.
+	o: ft.Outline
+	defer ft.outline_destroy(&o)
+	testing.expect(t, ft.glyph_outline(&bold.face, ft.Glyph(g), &o))
+	for p in o.points {
+		testing.expect(t, p.x >= f32(bx0) && p.x <= f32(bx1) && p.y >= f32(by0) && p.y <= f32(by1))
+	}
+	testing.expect(t, glyph_key(&plain, g, 1) != glyph_key(&bold, g, 1))
+
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	testing.expect_value(t, font_collection_add(&fonts, data), 1)
+	testing.expect_value(t, font_collection_add(&fonts, data, variations = heavy[:]), 1)
+	testing.expect_value(t, fonts.faces[0].weight, 400)
+	testing.expect_value(t, fonts.faces[1].weight, 800)
+	l: Text_Layout
+	defer text_layout_destroy(&l)
+	width :: proc(fonts: ^Font_Collection, l: ^Text_Layout, weight: int) -> f32 {
+		text_layout(fonts, {{text = "Wave", style = {family = "Adwaita Sans", size = 100, weight = weight}}}, {}, l)
+		return l.max.x - l.min.x
+	}
+	testing.expect(t, width(&fonts, &l, 800) > width(&fonts, &l, 400))
+
+	// Two instances apart only in optical size: text picks each by its
+	// variations (weight and style can't tell them apart).
+	opsz: ft.Axis
+	for i in 0 ..< plain.face.axis_count {
+		if a, ok := ft.axis(&plain.face, i); ok && a.tag == "opsz" {
+			opsz = a
+		}
+	}
+	testing.expect_value(t, opsz.tag, "opsz")
+	small, large := [?]Font_Variation{{"opsz", opsz.min}}, [?]Font_Variation{{"opsz", opsz.max}}
+	testing.expect_value(t, font_collection_add(&fonts, data, variations = small[:]), 1)
+	testing.expect_value(t, font_collection_add(&fonts, data, variations = large[:]), 1)
+	pick :: proc(fonts: ^Font_Collection, l: ^Text_Layout, v: []Font_Variation) -> ^Font {
+		text_layout(fonts, {{text = "a", style = {family = "Adwaita Sans", size = 50, variations = v}}}, {}, l)
+		return l.runs[0].font
+	}
+	// The smallest size is the default instance's or the third face.
+	testing.expect(t, pick(&fonts, &l, small[:]) == (&fonts.faces[0].font if opsz.min == opsz.default else &fonts.faces[2].font))
+	testing.expect(t, pick(&fonts, &l, large[:]) == &fonts.faces[3].font)
 }

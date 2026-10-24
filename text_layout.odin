@@ -2,6 +2,8 @@ package ovg
 
 import "core:unicode"
 
+import ft "deps:oglyph/font"
+
 // Text layout over a Font_Collection: styled pieces (SVG text + tspans),
 // lines, baselines, alignment and per-glyph font fallback. The result is a
 // list of positioned glyphs grouped into runs of one font, size and paint
@@ -42,7 +44,15 @@ Text_Style :: struct {
 	// last of a tag winning (CSS font-feature-settings). Letter spacing
 	// turns liga, clig and dlig off unless these set them.
 	features:       []Font_Feature,
+	// The variable font instance to draw (CSS font-variation-settings):
+	// the family's face whose instance these settings pick (added with
+	// them, font_collection_add), else the face weight and style pick.
+	variations:     []Font_Variation,
 }
+
+// A variable font axis's four-character tag ("wght", "wdth", "opsz") and
+// value in the axis's own units.
+Font_Variation :: ft.Variation
 
 // A feature's four-character tag ("smcp", "ss01"; shorter tags are padded
 // with spaces) and value: 0 off, 1 on, n > 1 the nth alternate (salt, cv01).
@@ -285,7 +295,7 @@ text_layout_path :: proc(l: ^Text_Layout, out: ^Path) {
 @(private = "file")
 resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (font: ^Font, size: f32) {
 	found: bool
-	font, found = font_collection_find(fonts, st.family, st.weight, st.italic)
+	font, found = font_collection_find(fonts, st.family, st.weight, st.italic, st.variations)
 	if !found {
 		append(&l.missing, st.family)
 	}

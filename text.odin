@@ -1,6 +1,7 @@
 package ovg
 
 import "base:runtime"
+import "core:hash"
 import "core:math"
 import "core:mem"
 import "core:sync"
@@ -38,6 +39,10 @@ Font :: struct {
 	// shapes), whatever allocator the drawing code runs under: the
 	// context's at `font_load`; the heap for a font made otherwise.
 	allocator:      mem.Allocator,
+	// The variable font instance it draws, as a key: 0 for the default,
+	// else a hash of the face's coordinates (glyph atlases tell instances
+	// of one face apart by it).
+	instance:       u64,
 }
 
 @(private)
@@ -72,11 +77,20 @@ Font_V_Metrics :: struct {
 }
 
 // Reads face `index` of a font or collection; .Font_Parse when it isn't
-// one or lacks what drawing text needs (ft.load says which).
-font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator) -> (font: Font, err: Error) {
+// one or lacks what drawing text needs (ft.load says which). A variable
+// font draws the instance `variations` pick (user values per axis tag,
+// `{{"wght", 700}}`; axes not named keep their default): outlines,
+// advances, glyph boxes and shaping follow it, for the font's life.
+font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator, variations: []Font_Variation = nil) -> (font: Font, err: Error) {
 	face, face_err := ft.load(data, int(index))
 	if face_err != nil {
 		return {}, .Font_Parse
+	}
+	if len(variations) > 0 {
+		ft.set_variations(&face, variations)
+		if ft.has_variation(&face) {
+			font.instance = hash.fnv64a(mem.slice_to_bytes(face.coords[:face.axis_count])) | 1
+		}
 	}
 	font.face = face
 	font.data = data
@@ -184,9 +198,11 @@ font_glyph_index :: proc(f: ^Font, r: rune) -> Glyph_Index {
 	return Glyph_Index(ft.glyph_index(&f.face, r))
 }
 
+// The glyph's advance at the font's instance, and its left side bearing as
+// hmtx stores it (the default instance's).
 font_glyph_advance :: proc(f: ^Font, g: Glyph_Index) -> (advance, left_side_bearing: i32) {
-	a, b := ft.h_metrics(&f.face, ft.Glyph(g))
-	return i32(a), i32(b)
+	_, b := ft.h_metrics(&f.face, ft.Glyph(g))
+	return i32(ft.advance(&f.face, ft.Glyph(g))), i32(b)
 }
 
 font_glyph_kern :: proc(f: ^Font, a, b: Glyph_Index) -> i32 {
@@ -304,19 +320,20 @@ Cached_Glyph :: struct {
 	visible:          bool,
 }
 
-// A glyph at one scale in one face. Faces are told apart by their data
-// address and face index, so fonts from a Font_Store or a Font_Collection
-// (text_layout's runs) share an atlas; reset it when font data is freed, as
-// new data may reuse the address.
+// A glyph at one scale in one face and instance. Faces are told apart by
+// their data address, face index and instance, so fonts from a Font_Store
+// or a Font_Collection (text_layout's runs) share an atlas; reset it when
+// font data is freed, as new data may reuse the address.
 Glyph_Key :: struct {
 	data:       rawptr,
 	index:      i32,
 	glyph:      Glyph_Index,
 	scale_bits: u32,
+	instance:   u64,
 }
 
 glyph_key :: proc "contextless" (f: ^Font, g: Glyph_Index, scale: f32) -> Glyph_Key {
-	return {raw_data(f.data), f.index, g, transmute(u32)scale}
+	return {raw_data(f.data), f.index, g, transmute(u32)scale, f.instance}
 }
 
 // Rasterized glyph coverage packed into one Gray8 bitmap, `pixels` (row-major,
@@ -379,7 +396,7 @@ glyph_atlas_get :: proc(a: ^Glyph_Atlas, f: ^Font, g: Glyph_Index, scale: f32) -
 	}
 	// The pixels the glyph's box touches (y down).
 	x0, y0, x1, y1: i32
-	if bx0, by0, bx1, by1, ok := ft.glyph_box(&f.face, ft.Glyph(g)); ok {
+	if bx0, by0, bx1, by1, ok := glyph_box_at_instance(f, g); ok {
 		x0, y0 = i32(math.floor(f32(bx0) * scale)), i32(math.floor(f32(-by1) * scale))
 		x1, y1 = i32(math.ceil(f32(bx1) * scale)), i32(math.ceil(f32(-by0) * scale))
 	}
@@ -570,9 +587,31 @@ stroke_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, 
 	stroke_path(c, scratch, paint)
 }
 
-// The glyph's bounding box in font units (y up). False for empty glyphs.
+// The glyph's bounding box in font units (y up) at the font's instance.
+// False for empty glyphs.
 font_glyph_box :: proc(f: ^Font, g: Glyph_Index, x0, y0, x1, y1: ^i32) -> bool {
-	bx0, by0, bx1, by1, ok := ft.glyph_box(&f.face, ft.Glyph(g))
+	bx0, by0, bx1, by1, ok := glyph_box_at_instance(f, g)
 	x0^, y0^, x1^, y1^ = i32(bx0), i32(by0), i32(bx1), i32(by1)
 	return ok
+}
+
+// The glyph's box (font units, y up): the face's stored box at the default
+// instance; at another, its varied outline's points' box (rounded out),
+// read with the font's outline scratch.
+@(private)
+glyph_box_at_instance :: proc(f: ^Font, g: Glyph_Index) -> (x0, y0, x1, y1: int, ok: bool) {
+	if f.instance == 0 {
+		return ft.glyph_box(&f.face, ft.Glyph(g))
+	}
+	fs := font_shapes(f)
+	sync.mutex_lock(&fs.lock)
+	defer sync.mutex_unlock(&fs.lock)
+	if !ft.glyph_outline(&f.face, ft.Glyph(g), &fs.outline) || len(fs.outline.points) == 0 {
+		return
+	}
+	lo, hi := fs.outline.points[0], fs.outline.points[0]
+	for p in fs.outline.points {
+		lo, hi = {min(lo.x, p.x), min(lo.y, p.y)}, {max(hi.x, p.x), max(hi.y, p.y)}
+	}
+	return int(math.floor(lo.x)), int(math.floor(lo.y)), int(math.ceil(hi.x)), int(math.ceil(hi.y)), true
 }
