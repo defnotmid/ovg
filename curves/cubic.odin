@@ -47,6 +47,35 @@ cubic_quad :: #force_inline proc "contextless" (p: [4]Vec2, i, n: int) -> (c, en
 	return
 }
 
+// The parameters in (0, 1) where the cubic turns along `axis` (the roots
+// of its derivative), ascending.
+cubic_extrema :: proc "contextless" (p: [4][2]$T, axis: int) -> (ts: [2]T, n: int) {
+	p0, p1, p2, p3 := p[0][axis], p[1][axis], p[2][axis], p[3][axis]
+	r1, r2 := roots_between(-p0 + 3 * p1 - 3 * p2 + p3, 2 * (p0 - 2 * p1 + p2), p1 - p0, 0, 1)
+	for r in ([2]T{min(r1, r2), max(r1, r2)}) {
+		if r < 1 {
+			ts[n] = r
+			n += 1
+		}
+	}
+	return
+}
+
+// The cubic's exact bounding box: its ends and its turning points.
+cubic_bounds :: proc "contextless" (p: [4][2]$T) -> (lo, hi: [2]T) {
+	lo = {min(p[0].x, p[3].x), min(p[0].y, p[3].y)}
+	hi = {max(p[0].x, p[3].x), max(p[0].y, p[3].y)}
+	for axis in 0 ..< 2 {
+		ts, n := cubic_extrema(p, axis)
+		for t in ts[:n] {
+			v := cubic_at(p, t)[axis]
+			lo[axis] = min(lo[axis], v)
+			hi[axis] = max(hi[axis], v)
+		}
+	}
+	return
+}
+
 // Whether a winding number is inside under a fill rule.
 fill_inside :: #force_inline proc "contextless" (w: i32, even_odd: bool) -> bool {
 	return w & 1 != 0 if even_odd else w != 0

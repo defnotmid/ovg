@@ -2075,44 +2075,25 @@ svg_path_bbox :: proc(verbs: []Verb, coords: []Vec2) -> Rect {
 		lo^ = {min(lo.x, q.x), min(lo.y, q.y)}
 		hi^ = {max(hi.x, q.x), max(hi.y, q.y)}
 	}
+	// Drawing before the first Move_To draws nothing (as fill skips it).
 	ci := 0
 	cur: Vec2
+	moved := false
 	for v in verbs {
 		switch v {
 		case .Move_To, .Line_To:
 			cur = coords[ci]
-			add(&lo, &hi, cur)
+			moved ||= v == .Move_To
+			if moved {
+				add(&lo, &hi, cur)
+			}
 			ci += 1
 		case .Bezier_To:
-			c1, c2, to := coords[ci], coords[ci + 1], coords[ci + 2]
-			add(&lo, &hi, to)
-			// Roots of the derivative per axis.
-			for axis in 0 ..< 2 {
-				p0, p1, p2, p3 := cur[axis], c1[axis], c2[axis], to[axis]
-				a := -p0 + 3 * p1 - 3 * p2 + p3
-				b := 2 * (p0 - 2 * p1 + p2)
-				c := p1 - p0
-				ts: [2]f32
-				nt := 0
-				if abs(a) < 1e-12 {
-					if abs(b) > 1e-12 {
-						ts[0] = -c / b
-						nt = 1
-					}
-				} else {
-					disc := b * b - 4 * a * c
-					if disc >= 0 {
-						sq := math.sqrt(disc)
-						ts[0] = (-b + sq) / (2 * a)
-						ts[1] = (-b - sq) / (2 * a)
-						nt = 2
-					}
-				}
-				for t in ts[:nt] {
-					if t > 0 && t < 1 {
-						add(&lo, &hi, cv.cubic_at([4]Vec2{cur, c1, c2, to}, t))
-					}
-				}
+			to := coords[ci + 2]
+			if moved {
+				blo, bhi := cv.cubic_bounds([4]Vec2{cur, coords[ci], coords[ci + 1], to})
+				add(&lo, &hi, blo)
+				add(&lo, &hi, bhi)
 			}
 			cur = to
 			ci += 3

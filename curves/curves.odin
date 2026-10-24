@@ -1010,7 +1010,7 @@ sort4 :: #force_inline proc "contextless" (w, x, y, z: f32) -> (f32, f32, f32, f
 // The real roots of a t^2 + b t + c in (lo, hi); `hi` stands for each one
 // missing.
 @(private)
-roots_between :: proc "contextless" (a, b, c, lo, hi: f32) -> (r1, r2: f32) {
+roots_between :: proc "contextless" (a, b, c, lo, hi: $T) -> (r1, r2: T) {
 	r1, r2 = hi, hi
 	// No sign change between the ends and no turn between them: no root.
 	glo := (a * lo + b) * lo + c
