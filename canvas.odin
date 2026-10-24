@@ -327,11 +327,13 @@ filter_image :: proc(c: ^Canvas, target: Image_Id, filter: Image_Filter, source:
 // ---- paths ----------------------------------------------------------------------
 
 // Whether drawing coordinates (x, y) are inside `p` (under the current
-// transform) by `rule`.
+// transform) by `rule`: the winding of the point about the path's exact
+// curves, Solid / Hole winding its contours as fill does.
 contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool {
-	words, origin, extent := path_words(c, p, state(c).transform) or_return
-	defer resize(&c.shape_words, len(c.shape_words) - len(words))
-	w := cv.winding(words, (Vec2{x, y} - origin) / extent)
+	h := &c.scratch.hit
+	cv.contours_clear(h)
+	contours_append_path(h, p, state(c).transform)
+	w, _ := cv.contours_winding(h, 0, len(h.contours), {f64(x), f64(y)}, &c.scratch.stack)
 	return cv.fill_inside(w, rule == .Even_Odd)
 }
 
@@ -340,29 +342,35 @@ path_bounds :: proc(c: ^Canvas, p: ^Path) -> Bounds {
 	return path_device_bounds(c, p, state(c).transform)
 }
 
-// Bounds of `p` under `t`: its curves', exactly.
-@(private)
+// The exact bounds of what `p` draws under `t`: each segment's ends and
+// turning points (a lone Move_To and zero-length segments draw nothing).
 path_device_bounds :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> Bounds {
-	words, origin, extent, ok := path_words(c, p, t)
-	if !ok {
-		return EMPTY_BOUNDS
+	b := EMPTY_BOUNDS
+	add :: proc(b: ^Bounds, lo, hi: Vec2) {
+		b^ = {min(b.minx, lo.x), min(b.miny, lo.y), max(b.maxx, hi.x), max(b.maxy, hi.y)}
 	}
-	defer resize(&c.shape_words, len(c.shape_words) - len(words))
-	x0, y0, x1, y1 := cv.bounds(words)
-	return {origin.x + x0 * extent, origin.y + y0 * extent, origin.x + x1 * extent, origin.y + y1 * extent}
-}
-
-// `p` under `t` as shape words at the end of the frame's, for a query to
-// read and drop.
-@(private = "file")
-path_words :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> (words: []u32, origin: Vec2, extent: f32, ok: bool) {
-	b := &c.scratch.builder
-	shape_builder_reset(b)
-	b.tol = 1.0 / 16
-	shape_add_path(b, p, t)
-	start := len(c.shape_words)
-	origin, extent = cv.build_append(b, &c.shape_words, search = false) or_return
-	return c.shape_words[start:], origin, extent, true
+	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
+		return transform_point(t, p.x, p.y)
+	}
+	it := path_events(p)
+	for e in path_events_next(&it) {
+		switch e.kind {
+		case .Line, .Close:
+			if e.p[0] == e.p[1] {
+				continue
+			}
+			a, z := at(t, e.p[0]), at(t, e.p[1])
+			add(&b, {min(a.x, z.x), min(a.y, z.y)}, {max(a.x, z.x), max(a.y, z.y)})
+		case .Cubic:
+			if e.p[0] == e.p[1] && e.p[1] == e.p[2] && e.p[2] == e.p[3] {
+				continue
+			}
+			lo, hi := cv.cubic_bounds([4]Vec2{at(t, e.p[0]), at(t, e.p[1]), at(t, e.p[2]), at(t, e.p[3])})
+			add(&b, lo, hi)
+		case .Begin, .Solid, .Hole:
+		}
+	}
+	return b
 }
 
 @(private)

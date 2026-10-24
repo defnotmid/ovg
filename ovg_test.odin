@@ -155,6 +155,32 @@ test_path_queries :: proc(t: ^testing.T) {
 	testing.expect(t, !contains_point(&c, &p, 20, 20, .Even_Odd))
 	// Queries leave nothing in the frame.
 	testing.expect_value(t, len(c.shape_words), 0)
+	// A circle's bounds are exact (its turning points, not its controls).
+	path_reset(&p)
+	path_circle(&p, 50, 50, 10)
+	testing.expect_value(t, path_bounds(&c, &p), Bounds{40, 40, 60, 60})
+	// Two squares both drawn the Solid way round, the inner marked Hole:
+	// Hole winds it the other way, so the middle is out under either rule.
+	path_reset(&p)
+	path_move_to(&p, 0, 0)
+	path_line_to(&p, 0, 30)
+	path_line_to(&p, 30, 30)
+	path_line_to(&p, 30, 0)
+	path_close(&p)
+	path_move_to(&p, 10, 10)
+	path_line_to(&p, 10, 20)
+	path_line_to(&p, 20, 20)
+	path_line_to(&p, 20, 10)
+	path_close(&p)
+	path_solidity(&p, .Hole)
+	for rule in Fill_Rule {
+		testing.expect(t, contains_point(&c, &p, 5, 5, rule))
+		testing.expect(t, !contains_point(&c, &p, 15, 15, rule))
+	}
+	// Under the transform.
+	translate(&c, 100, 0)
+	testing.expect(t, contains_point(&c, &p, 105, 5, .Non_Zero))
+	testing.expect(t, !contains_point(&c, &p, 5, 5, .Non_Zero))
 }
 
 @(test)

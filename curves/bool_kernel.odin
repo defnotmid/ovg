@@ -106,11 +106,12 @@ curve_winding :: proc(p: [4][2]f64, q: [2]f64, on_tol: f64, stack: ^[dynamic][2]
 			}
 			continue
 		}
-		if max(hi.x - lo.x, hi.y - lo.y) <= on_tol {
+		// A cell this small, or one f64 can't halve any more, holds q.
+		m := (r[0] + r[1]) / 2
+		if max(hi.x - lo.x, hi.y - lo.y) <= on_tol || m <= r[0] || m >= r[1] {
 			on = true
 			continue
 		}
-		m := (r[0] + r[1]) / 2
 		append(stack, [2]f64{r[0], m}, [2]f64{m, r[1]})
 	}
 	return
@@ -171,8 +172,18 @@ near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dyna
 			}
 			continue
 		}
-		// Halve the larger cell that isn't flat.
+		// Halve the larger cell that isn't flat; cells f64 can't halve any
+		// more are compared as they are.
 		split_a := !fa && (fb || box_size(alo, ahi) >= box_size(blo, bhi))
+		ma, mb := (cell[0] + cell[1]) / 2, (cell[2] + cell[3]) / 2
+		if (split_a && (ma <= cell[0] || ma >= cell[1])) || (!split_a && (mb <= cell[2] || mb >= cell[3])) {
+			u0, u1, v0, v1, near := segments_near(pa[0], pa[3], pb[0], pb[3], tol)
+			if near {
+				ds, dt := cell[1] - cell[0], cell[3] - cell[2]
+				append(&s.leaves, Run{cell[0] + u0 * ds, cell[0] + u1 * ds, cell[2] + v0 * dt, cell[2] + v1 * dt, false})
+			}
+			continue
+		}
 		if split_a {
 			m := (cell[0] + cell[1]) / 2
 			append(&s.stack, [4]f64{cell[0], m, cell[2], cell[3]}, [4]f64{m, cell[1], cell[2], cell[3]})

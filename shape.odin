@@ -140,6 +140,9 @@ Shape_Scratch :: struct {
 	dashed:  Path,
 	flat:    Flat_Path,
 	dots:    Path,
+	// Hit tests: the path as contours, and the winding's cells.
+	hit:     cv.Contours,
+	stack:   [dynamic][2]f64,
 }
 
 // A scratch allocating from `allocator`.
@@ -150,6 +153,8 @@ shape_scratch_init :: proc(s: ^Shape_Scratch, allocator := context.allocator) {
 	path_init(&s.dashed, allocator)
 	path_init(&s.dots, allocator)
 	flat_path_init(&s.flat, allocator)
+	cv.contours_init(&s.hit, allocator)
+	s.stack.allocator = allocator
 }
 
 shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
@@ -158,6 +163,8 @@ shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
 	path_destroy(&s.dashed)
 	flat_path_destroy(&s.flat)
 	path_destroy(&s.dots)
+	cv.contours_destroy(&s.hit)
+	delete(s.stack)
 	s^ = {}
 }
 

@@ -76,6 +76,30 @@ contours_end :: proc(c: ^Contours, closed, reversed: bool) {
 	}
 }
 
+// The winding of q about contours [first, first + count), an open contour
+// closed by a line (as fills close it): exact, by curve_winding. `on`
+// reports q on an outline.
+contours_winding :: proc(c: ^Contours, first, count: int, q: [2]f64, stack: ^[dynamic][2]f64) -> (w: i32, on: bool) {
+	f :: #force_inline proc "contextless" (v: Vec2) -> [2]f64 {
+		return {f64(v.x), f64(v.y)}
+	}
+	for ct in c.contours[first:][:count] {
+		pts := c.pts[ct.start:][:3 * ct.segs + 1]
+		for i in 0 ..< ct.segs {
+			s := pts[3 * i:][:4]
+			cw, con := curve_winding({f(s[0]), f(s[1]), f(s[2]), f(s[3])}, q, 0, stack)
+			w += cw
+			on ||= con
+		}
+		if a, b := pts[len(pts) - 1], pts[0]; a != b {
+			cw, con := curve_winding({f(a), f(a + (b - a) / 3), f(a + (b - a) * (2.0 / 3)), f(b)}, q, 0, stack)
+			w += cw
+			on ||= con
+		}
+	}
+	return
+}
+
 // Reverses contour i in place: its points and its segments' kinds.
 contours_reverse :: proc(c: ^Contours, i: int) {
 	ct := c.contours[i]

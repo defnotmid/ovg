@@ -250,3 +250,15 @@ test_near_runs_scale :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, len(base) > 0)
 }
+
+// A point exactly on the curve with no tolerance: the halving stops where
+// f64 can't split a cell and reports it on the curve.
+@(test)
+test_curve_winding_on_curve :: proc(t: ^testing.T) {
+	stack: [dynamic][2]f64
+	defer delete(stack)
+	_, on := curve_winding(line_cubic({0, 0}, {2, 2}), {1, 1}, 0, &stack)
+	testing.expect(t, on)
+	_, on = curve_winding({{0, 0}, {1, 2}, {3, 2}, {4, 0}}, {2, 1.5}, 0, &stack)
+	testing.expect(t, on)
+}
