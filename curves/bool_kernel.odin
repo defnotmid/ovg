@@ -112,7 +112,10 @@ curve_winding :: proc(p: [4][2]f64, q: [2]f64, on_tol: f64, stack: ^[dynamic][2]
 			on = true
 			continue
 		}
-		append(stack, [2]f64{r[0], m}, [2]f64{m, r[1]})
+		// One at a time: a single append stores in place, two copy
+		// through memmove.
+		append(stack, [2]f64{r[0], m})
+		append(stack, [2]f64{m, r[1]})
 	}
 	return
 }
@@ -125,8 +128,15 @@ Run :: struct {
 	point:          bool,
 }
 
+// A pair of cells: [s0, s1] of the first piece and [t0, t1] of the
+// second, with the pieces' controls over them.
+Cell_Pair :: struct {
+	r:      [4]f64, // s0, s1, t0, t1
+	pa, pb: [4][2]f64,
+}
+
 Kernel_Scratch :: struct {
-	stack:  [dynamic][4]f64, // cell pairs: s0, s1, t0, t1
+	stack:  [dynamic]Cell_Pair,
 	leaves: [dynamic]Run,
 }
 
@@ -145,16 +155,15 @@ kernel_scratch_destroy :: proc(s: ^Kernel_Scratch) {
 near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int) -> bool {
 	clear(&s.stack)
 	clear(&s.leaves)
-	append(&s.stack, [4]f64{0, 1, 0, 1})
+	append(&s.stack, Cell_Pair{{0, 1, 0, 1}, piece_range(a, 0, 1), piece_range(b, 0, 1)})
 	reach := tol + delta / 2
 	flat := tol / 16
 	for len(s.stack) > 0 {
 		if budget^ -= 1; budget^ < 0 {
 			return false
 		}
-		cell := pop(&s.stack)
-		pa := piece_range(a, cell[0], cell[1])
-		pb := piece_range(b, cell[2], cell[3])
+		top := pop(&s.stack)
+		cell, pa, pb := top.r, top.pa, top.pb
 		alo, ahi := box_of(pa)
 		blo, bhi := box_of(pb)
 		dx := max(alo.x - bhi.x, blo.x - ahi.x, 0)
@@ -172,8 +181,9 @@ near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dyna
 			}
 			continue
 		}
-		// Halve the larger cell that isn't flat; cells f64 can't halve any
-		// more are compared as they are.
+		// Halve the larger cell that isn't flat (only its controls are new);
+		// cells f64 can't halve any more are compared as they are. Pushed
+		// one at a time, as in curve_winding.
 		split_a := !fa && (fb || box_size(alo, ahi) >= box_size(blo, bhi))
 		ma, mb := (cell[0] + cell[1]) / 2, (cell[2] + cell[3]) / 2
 		if (split_a && (ma <= cell[0] || ma >= cell[1])) || (!split_a && (mb <= cell[2] || mb >= cell[3])) {
@@ -186,10 +196,12 @@ near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dyna
 		}
 		if split_a {
 			m := (cell[0] + cell[1]) / 2
-			append(&s.stack, [4]f64{cell[0], m, cell[2], cell[3]}, [4]f64{m, cell[1], cell[2], cell[3]})
+			append(&s.stack, Cell_Pair{{cell[0], m, cell[2], cell[3]}, piece_range(a, cell[0], m), pb})
+			append(&s.stack, Cell_Pair{{m, cell[1], cell[2], cell[3]}, piece_range(a, m, cell[1]), pb})
 		} else {
 			m := (cell[2] + cell[3]) / 2
-			append(&s.stack, [4]f64{cell[0], cell[1], cell[2], m}, [4]f64{cell[0], cell[1], m, cell[3]})
+			append(&s.stack, Cell_Pair{{cell[0], cell[1], cell[2], m}, pa, piece_range(b, cell[2], m)})
+			append(&s.stack, Cell_Pair{{cell[0], cell[1], m, cell[3]}, pa, piece_range(b, m, cell[3])})
 		}
 	}
 	merge_runs(a, b, tol, s, out)

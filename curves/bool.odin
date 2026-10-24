@@ -64,14 +64,23 @@ Bool_Scratch :: struct {
 	boxes:   [dynamic][2][2]f64,
 	eboxes:  [dynamic][2][2]f64,
 	order:   [dynamic]u32,
+	keys:    [dynamic]u64, // sort keys of order, reused by stages
+	tkeys:   [dynamic]u64,
+	torder:  [dynamic]u32,
+	cells:   [dynamic]u32, // starts of runs of points in one eps cell
+	cand:    [dynamic]u64, // hot pixel candidates: vertex << 32 | piece
 	kernel:  Kernel_Scratch,
 	runs:    [dynamic]Run,
 	// Cuts on pieces and their points; points merge into vertices.
 	cuts:    [dynamic]Bool_Cut,
+	tcuts:   [dynamic]Bool_Cut,
+	pstart:  [dynamic]u32, // per piece: its cuts' span of plist
+	plist:   [dynamic]u32,
 	pts:     [dynamic][2]f64,
 	input:   [dynamic]bool, // the point is a source segment's end
 	parent:  [dynamic]u32,
 	vert:    [dynamic]u32, // point -> vertex
+	vfirst:  [dynamic]u32, // vertex -> its lowest-index point (its root)
 	vpos:    [dynamic][2]f64,
 	vrad:    [dynamic]f64,
 	vout:    [dynamic]Vec2, // vertex positions rounded to f32, once
@@ -85,11 +94,13 @@ Bool_Scratch :: struct {
 	hpos:    [dynamic]u32,
 	hnext:   [dynamic]u32,
 	hface:   [dynamic]u32,
+	fhalf:   [dynamic]u32, // per face: its lowest-index half-edge
 	farea:   [dynamic]f64,
 	fwind:   [dynamic]i32, // operands per face
 	fdone:   [dynamic]bool,
 	inside:  [dynamic]bool,
 	comp:    [dynamic]u32,
+	cleft:   [dynamic]u32, // per component root: its leftmost vertex
 	queue:   [dynamic]u32,
 	stack:   [dynamic][2]f64,
 	keep:    [dynamic]bool,
@@ -136,13 +147,22 @@ bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	delete(s.boxes)
 	delete(s.eboxes)
 	delete(s.order)
+	delete(s.keys)
+	delete(s.tkeys)
+	delete(s.torder)
+	delete(s.cells)
+	delete(s.cand)
 	kernel_scratch_destroy(&s.kernel)
 	delete(s.runs)
 	delete(s.cuts)
+	delete(s.tcuts)
+	delete(s.pstart)
+	delete(s.plist)
 	delete(s.pts)
 	delete(s.input)
 	delete(s.parent)
 	delete(s.vert)
+	delete(s.vfirst)
 	delete(s.vpos)
 	delete(s.vrad)
 	delete(s.vout)
@@ -155,11 +175,13 @@ bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	delete(s.hpos)
 	delete(s.hnext)
 	delete(s.hface)
+	delete(s.fhalf)
 	delete(s.farea)
 	delete(s.fwind)
 	delete(s.fdone)
 	delete(s.inside)
 	delete(s.comp)
+	delete(s.cleft)
 	delete(s.queue)
 	delete(s.stack)
 	delete(s.keep)
@@ -219,28 +241,25 @@ bool_divide :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budget
 		if s.farea[f] >= 0 {
 			continue
 		}
-		lv := max(u32)
-		for v in 0 ..< len(s.vpos) {
-			if find(s.comp[:], u32(v)) == s.fcomp[f] && (lv == max(u32) || s.vpos[v].x < s.vpos[lv].x || (s.vpos[v].x == s.vpos[lv].x && s.vpos[v].y < s.vpos[lv].y)) {
-				lv = u32(v)
-			}
-		}
+		lv := s.cleft[s.fcomp[f]]
 		best := math.INF_F64
 		for g in 0 ..< nf {
 			if s.farea[g] <= 0 || s.fcomp[g] == s.fcomp[f] || s.farea[g] >= best {
 				continue
 			}
 			w: i32
-			for h in 0 ..< 2 * len(s.edges) {
-				if !s.edges[h >> 1].alive || s.hface[h] != u32(g) {
-					continue
-				}
+			h := s.fhalf[g]
+			for {
 				q := s.ecurve[h >> 1]
 				if h & 1 == 1 {
 					q = {q[3], q[2], q[1], q[0]}
 				}
 				cw, _ := curve_winding(q, s.vpos[lv], 0, &s.stack)
 				w += cw
+				h = s.hnext[h]
+				if h == s.fhalf[g] {
+					break
+				}
 			}
 			if w != 0 {
 				best, s.cparent[f] = s.farea[g], u32(g)
@@ -301,21 +320,13 @@ bool_arrange :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budge
 @(private = "file")
 emit_face_reversed :: proc(s: ^Bool_Scratch, f: u32) {
 	clear(&s.queue)
-	for h in 0 ..< 2 * len(s.edges) {
-		if s.edges[h >> 1].alive && s.hface[h] == f {
-			x := u32(h)
-			for {
-				append(&s.queue, x)
-				x = s.hnext[x]
-				if x == u32(h) {
-					break
-				}
-			}
+	he := s.fhalf[f]
+	for {
+		append(&s.queue, he)
+		he = s.hnext[he]
+		if he == s.fhalf[f] {
 			break
 		}
-	}
-	if len(s.queue) == 0 {
-		return
 	}
 	// Backwards: the twins, last first.
 	begun := false
@@ -431,15 +442,12 @@ bool_pieces :: proc(s: ^Bool_Scratch, eps: f64) {
 @(private = "file")
 bool_pairs :: proc(s: ^Bool_Scratch, boxes: [][2][2]f64, visit: proc(s: ^Bool_Scratch, a, b: u32, data: rawptr) -> bool, data: rawptr) -> bool {
 	resize(&s.order, len(boxes))
+	resize(&s.keys, len(boxes))
 	for &o, i in s.order {
 		o = u32(i)
+		s.keys[i] = f64_key(boxes[i][0].x)
 	}
-	boxes := boxes
-	context.user_ptr = &boxes
-	slice.sort_by(s.order[:], proc(x, y: u32) -> bool {
-		b := (^[][2][2]f64)(context.user_ptr)
-		return b[x][0].x < b[y][0].x || (b[x][0].x == b[y][0].x && x < y)
-	})
+	sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
 	for i in 0 ..< len(s.order) {
 		a := s.order[i]
 		ba := boxes[a]
@@ -488,18 +496,26 @@ bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error
 		s.stats.pairs += 1
 		for r in s.runs {
 			if r.point {
-				add_cut(s, a, (r.s0 + r.s1) / 2, false)
-				add_cut(s, b, (r.t0 + r.t1) / 2, false)
+				run_cut(s, a, (r.s0 + r.s1) / 2)
+				run_cut(s, b, (r.t0 + r.t1) / 2)
 			} else {
-				add_cut(s, a, r.s0, false)
-				add_cut(s, a, r.s1, false)
-				add_cut(s, b, r.t0, false)
-				add_cut(s, b, r.t1, false)
+				run_cut(s, a, r.s0)
+				run_cut(s, a, r.s1)
+				run_cut(s, b, r.t0)
+				run_cut(s, b, r.t1)
 			}
 		}
 		return true
 	}, &pass)
 	return nil if ok else .Limit
+}
+
+// A run's cut; one exactly at an end is that end's cut, already made.
+@(private = "file")
+run_cut :: proc(s: ^Bool_Scratch, piece: u32, t: f64) {
+	if t != 0 && t != 1 {
+		add_cut(s, piece, t, false)
+	}
 }
 
 @(private = "file")
@@ -510,6 +526,80 @@ add_cut :: proc(s: ^Bool_Scratch, piece: u32, t: f64, input: bool) {
 	append(&s.parent, u32(len(s.pts)))
 	append(&s.pts, pt)
 	append(&s.input, input)
+}
+
+// Sorts keys (and idx with them, when given) stably: insertion for a few,
+// else LSD radix over the bytes where the keys differ.
+@(private = "file")
+sort_keyed :: proc(keys: []u64, idx: []u32, tkeys: ^[dynamic]u64, tidx: ^[dynamic]u32) {
+	n := len(keys)
+	with_idx := len(idx) == n
+	if n < 64 {
+		for i in 1 ..< n {
+			k := keys[i]
+			x := idx[i] if with_idx else 0
+			j := i
+			for j > 0 && keys[j - 1] > k {
+				keys[j] = keys[j - 1]
+				if with_idx {
+					idx[j] = idx[j - 1]
+				}
+				j -= 1
+			}
+			keys[j] = k
+			if with_idx {
+				idx[j] = x
+			}
+		}
+		return
+	}
+	resize(tkeys, n)
+	resize(tidx, n if with_idx else 0)
+	ka, kb, ia, ib := keys, tkeys[:], idx, tidx[:]
+	for shift := u64(0); shift < 64; shift += 8 {
+		count: [257]int
+		for k in ka {
+			count[((k >> shift) & 0xff) + 1] += 1
+		}
+		if count[((ka[0] >> shift) & 0xff) + 1] == n {
+			continue
+		}
+		for b in 1 ..< 257 {
+			count[b] += count[b - 1]
+		}
+		for k, i in ka {
+			d := (k >> shift) & 0xff
+			kb[count[d]] = k
+			if with_idx {
+				ib[count[d]] = ia[i]
+			}
+			count[d] += 1
+		}
+		ka, kb, ia, ib = kb, ka, ib, ia
+	}
+	if raw_data(ka) != raw_data(keys) {
+		copy(keys, ka)
+		if with_idx {
+			copy(idx, ia)
+		}
+	}
+}
+
+// A key ordering f64s as numbers (-0 with +0).
+@(private = "file")
+f64_key :: #force_inline proc "contextless" (x: f64) -> u64 {
+	if x == 0 {
+		return 1 << 63
+	}
+	b := transmute(u64)x
+	return ~b if b >> 63 == 1 else b | 1 << 63
+}
+
+// The key of the eps-wide cell holding p, ordered by column then row.
+@(private = "file")
+cell_key :: #force_inline proc "contextless" (p: [2]f64, eps: f64) -> u64 {
+	cx, cy := i64(math.floor(p.x / eps)), i64(math.floor(p.y / eps))
+	return u64(cx + 1 << 31) << 32 | u64(cy + 1 << 31)
 }
 
 @(private = "file")
@@ -547,26 +637,40 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 		if budget^ -= len(s.pts); budget^ < 0 {
 			return .Limit
 		}
-		// Points within eps, by a sweep over x.
+		// Points within eps, by cells eps wide: each cell against itself
+		// and the four after it of its eight neighbours.
 		resize(&s.order, len(s.pts))
-		for &o, i in s.order {
-			o = u32(i)
+		resize(&s.keys, len(s.pts))
+		for p, i in s.pts {
+			s.order[i] = u32(i)
+			s.keys[i] = cell_key(p, eps)
 		}
-		pts := s.pts[:]
-		context.user_ptr = &pts
-		slice.sort_by(s.order[:], proc(x, y: u32) -> bool {
-			p := (^[][2]f64)(context.user_ptr)
-			return p[x].x < p[y].x || (p[x].x == p[y].x && x < y)
-		})
-		for i in 0 ..< len(s.order) {
-			a := s.order[i]
-			for j in i + 1 ..< len(s.order) {
-				b := s.order[j]
-				if s.pts[b].x - s.pts[a].x > eps {
-					break
+		sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
+		clear(&s.cells)
+		for i in 0 ..< len(s.keys) {
+			if i == 0 || s.keys[i] != s.keys[i - 1] {
+				append(&s.cells, u32(i))
+			}
+		}
+		nc := len(s.cells)
+		append(&s.cells, u32(len(s.keys)))
+		for c in 0 ..< nc {
+			a0, a1 := s.cells[c], s.cells[c + 1]
+			near_points(s, a0, a1, a0, a1, eps)
+			cx, cy := i64(s.keys[a0] >> 32), i64(s.keys[a0] & 0xffff_ffff)
+			for d in ([4][2]i64{{0, 1}, {1, -1}, {1, 0}, {1, 1}}) {
+				key := u64(cx + d[0]) << 32 | u64(cy + d[1])
+				lo, hi := c + 1, nc
+				for lo < hi {
+					m := (lo + hi) / 2
+					if s.keys[s.cells[m]] < key {
+						lo = m + 1
+					} else {
+						hi = m
+					}
 				}
-				if d := s.pts[a] - s.pts[b]; d.x * d.x + d.y * d.y <= eps * eps {
-					unite(s.parent[:], a, b)
+				if lo < nc && s.keys[s.cells[lo]] == key {
+					near_points(s, a0, a1, s.cells[lo], s.cells[lo + 1], eps)
 				}
 			}
 		}
@@ -575,28 +679,50 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 			changed := false
 			number_vertices(s)
 			// Hot pixels: a vertex within eps of a piece it isn't a cut of
-			// cuts it there.
+			// cuts it there. Candidates by a sweep of the pieces' boxes over
+			// the vertices sorted by x, then taken vertex by vertex.
 			n := len(s.cuts)
-			for vi in 0 ..< len(s.vpos) {
+			group_cuts(s, n)
+			resize(&s.order, len(s.vpos))
+			resize(&s.keys, len(s.vpos))
+			for v, i in s.vpos {
+				s.order[i] = u32(i)
+				s.keys[i] = f64_key(v.x)
+			}
+			sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
+			clear(&s.cand)
+			for b, pi in s.boxes {
+				x0, x1 := f64_key(b[0].x), f64_key(b[1].x)
+				lo, hi := 0, len(s.keys)
+				for lo < hi {
+					m := (lo + hi) / 2
+					if s.keys[m] < x0 {
+						lo = m + 1
+					} else {
+						hi = m
+					}
+				}
+				for i := lo; i < len(s.keys) && s.keys[i] <= x1; i += 1 {
+					vi := s.order[i]
+					if y := s.vpos[vi].y; y < b[0].y || y > b[1].y || piece_has_vertex(s, u32(pi), vi) {
+						continue
+					}
+					append(&s.cand, u64(vi) << 32 | u64(pi))
+				}
+			}
+			sort_keyed(s.cand[:], nil, &s.tkeys, &s.torder)
+			for c in s.cand {
+				vi, pi := u32(c >> 32), u32(c & 0xffff_ffff)
 				v := s.vpos[vi]
-				for &p, pi in s.pieces {
-					b := s.boxes[pi]
-					if v.x < b[0].x || v.x > b[1].x || v.y < b[0].y || v.y > b[1].y {
-						continue
-					}
-					if piece_has_vertex(s, u32(pi), u32(vi), n) {
-						continue
-					}
-					dot := Piece{p = {v, v, v, v}, line = true}
-					clear(&s.runs)
-					if !near_runs(&p, &dot, eps, delta, &s.kernel, &s.runs, budget) {
-						return .Limit
-					}
-					for r in s.runs {
-						add_cut(s, u32(pi), (r.s0 + r.s1) / 2, false)
-						unite(s.parent[:], u32(len(s.pts) - 1), first_point_of_vertex(s, u32(vi)))
-						changed = true
-					}
+				dot := Piece{p = {v, v, v, v}, line = true}
+				clear(&s.runs)
+				if !near_runs(&s.pieces[pi], &dot, eps, delta, &s.kernel, &s.runs, budget) {
+					return .Limit
+				}
+				for r in s.runs {
+					add_cut(s, pi, (r.s0 + r.s1) / 2, false)
+					unite(s.parent[:], u32(len(s.pts) - 1), s.vfirst[vi])
+					changed = true
 				}
 			}
 			if !changed {
@@ -651,6 +777,7 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 @(private = "file")
 number_vertices :: proc(s: ^Bool_Scratch) {
 	resize(&s.vert, len(s.pts))
+	clear(&s.vfirst)
 	clear(&s.vpos)
 	clear(&s.vrad)
 	for i in 0 ..< len(s.pts) {
@@ -660,6 +787,7 @@ number_vertices :: proc(s: ^Bool_Scratch) {
 		r := find(s.parent[:], u32(i))
 		if s.vert[r] == max(u32) {
 			s.vert[r] = u32(len(s.vpos))
+			append(&s.vfirst, r)
 			append(&s.vpos, s.pts[r])
 			append(&s.vrad, 0)
 		}
@@ -681,31 +809,80 @@ number_vertices :: proc(s: ^Bool_Scratch) {
 	}
 }
 
+// Unites the points of order[a0:a1] with those of order[b0:b1] within eps
+// (with the later ones of the same span when they are one).
 @(private = "file")
-piece_has_vertex :: proc(s: ^Bool_Scratch, piece, v: u32, n: int) -> bool {
+near_points :: proc(s: ^Bool_Scratch, a0, a1, b0, b1: u32, eps: f64) {
+	for i in a0 ..< a1 {
+		a := s.order[i]
+		for j in (i + 1 if a0 == b0 else b0) ..< b1 {
+			b := s.order[j]
+			if d := s.pts[a] - s.pts[b]; d.x * d.x + d.y * d.y <= eps * eps {
+				unite(s.parent[:], a, b)
+			}
+		}
+	}
+}
+
+// Each piece's cuts among the first n, as its span of plist.
+@(private = "file")
+group_cuts :: proc(s: ^Bool_Scratch, n: int) {
+	resize(&s.pstart, len(s.pieces) + 1)
+	slice.fill(s.pstart[:], 0)
 	for c in s.cuts[:n] {
-		if c.piece == piece && s.vert[c.point] == v {
+		s.pstart[c.piece + 1] += 1
+	}
+	for i in 1 ..< len(s.pstart) {
+		s.pstart[i] += s.pstart[i - 1]
+	}
+	// Fill with the starts as cursors, then shift them back.
+	resize(&s.plist, n)
+	for c, i in s.cuts[:n] {
+		s.plist[s.pstart[c.piece]] = u32(i)
+		s.pstart[c.piece] += 1
+	}
+	for i := len(s.pstart) - 1; i > 0; i -= 1 {
+		s.pstart[i] = s.pstart[i - 1]
+	}
+	s.pstart[0] = 0
+}
+
+@(private = "file")
+piece_has_vertex :: proc(s: ^Bool_Scratch, piece, v: u32) -> bool {
+	for c in s.plist[s.pstart[piece]:s.pstart[piece + 1]] {
+		if s.vert[s.cuts[c].point] == v {
 			return true
 		}
 	}
 	return false
 }
 
-@(private = "file")
-first_point_of_vertex :: proc(s: ^Bool_Scratch, v: u32) -> u32 {
-	for i in 0 ..< len(s.vert) {
-		if s.vert[i] == v {
-			return u32(i)
-		}
-	}
-	return 0
-}
-
+// By piece, then t, then point: grouped by piece, each piece's few cuts
+// sorted by insertion.
 @(private = "file")
 sort_cuts :: proc(s: ^Bool_Scratch) {
-	slice.sort_by(s.cuts[:], proc(a, b: Bool_Cut) -> bool {
-		return a.piece < b.piece || (a.piece == b.piece && (a.t < b.t || (a.t == b.t && a.point < b.point)))
-	})
+	n := len(s.cuts)
+	group_cuts(s, n)
+	resize(&s.tcuts, n)
+	for pi in 0 ..< len(s.pieces) {
+		a0, a1 := int(s.pstart[pi]), int(s.pstart[pi + 1])
+		for i in a0 ..< a1 {
+			x := s.cuts[s.plist[i]]
+			j := i
+			for j > a0 && cut_after(s.tcuts[j - 1], x) {
+				s.tcuts[j] = s.tcuts[j - 1]
+				j -= 1
+			}
+			s.tcuts[j] = x
+		}
+	}
+	s.cuts, s.tcuts = s.tcuts, s.cuts
+}
+
+// Whether a comes after b on their piece.
+@(private = "file")
+cut_after :: #force_inline proc "contextless" (a, b: Bool_Cut) -> bool {
+	return a.t > b.t || (a.t == b.t && a.point > b.point)
 }
 
 // S5: an edge between consecutive cuts of a piece at different vertices,
@@ -762,7 +939,17 @@ build_edges :: proc(s: ^Bool_Scratch) {
 				c.t = 1
 			}
 		}
-		slice.sort_by(s.cuts[i:j], proc(a, b: Bool_Cut) -> bool {return a.t < b.t || (a.t == b.t && a.point < b.point)})
+		// Back in order by t (only the moved ends are out of it).
+		cs := s.cuts[i:j]
+		for a in 1 ..< len(cs) {
+			x := cs[a]
+			b := a
+			for b > 0 && cut_after(cs[b - 1], x) {
+				cs[b] = cs[b - 1]
+				b -= 1
+			}
+			cs[b] = x
+		}
 		prev := i
 		for c in i + 1 ..< j {
 			a, b := s.cuts[prev], s.cuts[c]
@@ -846,22 +1033,15 @@ repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repair
 @(private = "file")
 merge_coincident :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int) -> Bool_Error {
 	resize(&s.order, len(s.edges))
-	for &o, i in s.order {
-		o = u32(i)
+	resize(&s.keys, len(s.edges))
+	for e, i in s.edges {
+		s.order[i] = u32(i)
+		s.keys[i] = u64(min(e.v0, e.v1)) << 32 | u64(max(e.v0, e.v1))
 	}
-	edges := s.edges[:]
-	context.user_ptr = &edges
-	slice.sort_by(s.order[:], proc(x, y: u32) -> bool {
-		e := (^[]Bool_Edge)(context.user_ptr)
-		ax, bx := min(e[x].v0, e[x].v1), max(e[x].v0, e[x].v1)
-		ay, by := min(e[y].v0, e[y].v1), max(e[y].v0, e[y].v1)
-		return ax < ay || (ax == ay && (bx < by || (bx == by && x < y)))
-	})
+	sort_keyed(s.keys[:], s.order[:], &s.tkeys, &s.torder)
 	for i := 0; i < len(s.order); {
-		e := s.edges[s.order[i]]
-		lo, hi := min(e.v0, e.v1), max(e.v0, e.v1)
 		j := i + 1
-		for j < len(s.order) && min(s.edges[s.order[j]].v0, s.edges[s.order[j]].v1) == lo && max(s.edges[s.order[j]].v0, s.edges[s.order[j]].v1) == hi {
+		for j < len(s.order) && s.keys[j] == s.keys[i] {
 			j += 1
 		}
 		for a in i ..< j {
@@ -916,15 +1096,11 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 	resize(&s.hdir, 2 * ne)
 	resize(&s.vstart, len(s.vpos) + 1)
 	slice.fill(s.vstart[:], 0)
-	for e, i in s.edges {
-		if !e.alive {
-			continue
+	for e in s.edges {
+		if e.alive {
+			s.vstart[e.v0 + 1] += 1
+			s.vstart[e.v1 + 1] += 1
 		}
-		q := s.ecurve[i]
-		s.hdir[2 * i] = edge_direction(q, s.vpos[e.v0], s.vrad[e.v0] + 4 * eps, false)
-		s.hdir[2 * i + 1] = edge_direction(q, s.vpos[e.v1], s.vrad[e.v1] + 4 * eps, true)
-		s.vstart[e.v0 + 1] += 1
-		s.vstart[e.v1 + 1] += 1
 	}
 	for v in 1 ..< len(s.vstart) {
 		s.vstart[v] += s.vstart[v - 1]
@@ -941,29 +1117,44 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 		s.vlist[s.vstart[e.v1] + s.counts[e.v1]] = u32(2 * i + 1)
 		s.counts[e.v1] += 1
 	}
-	dirs := s.hdir[:]
-	context.user_ptr = &dirs
 	resize(&s.hpos, 2 * ne)
 	for v in 0 ..< len(s.vpos) {
 		out := s.vlist[s.vstart[v]:s.vstart[v + 1]]
-		slice.sort_by(out, proc(a, b: u32) -> bool {
-			d := (^[][2]f64)(context.user_ptr)
-			da, db := d[a], d[b]
-			sa, sb := sector(da), sector(db)
-			if sa != sb {
-				return sa < sb
+		// One or two half-edges are in either order; more by direction,
+		// sorted by insertion (a vertex has few).
+		if len(out) > 2 {
+			for h in out {
+				e := s.edges[h >> 1]
+				w := e.v0 if h & 1 == 0 else e.v1
+				s.hdir[h] = edge_direction(s.ecurve[h >> 1], s.vpos[w], s.vrad[w] + 4 * eps, s.pieces[e.piece].line, h & 1 == 1)
 			}
-			c := da.x * db.y - da.y * db.x
-			return c > 0 || (c == 0 && a < b)
-		})
-		for h, i in out {
-			s.hpos[h] = u32(i)
-			if i > 0 && sector(s.hdir[out[i - 1]]) == sector(s.hdir[h]) {
-				p, q := s.hdir[out[i - 1]], s.hdir[h]
-				if p.x * q.y - p.y * q.x == 0 {
+			before :: proc(d: [][2]f64, a, b: u32) -> bool {
+				da, db := d[a], d[b]
+				sa, sb := sector(da), sector(db)
+				if sa != sb {
+					return sa < sb
+				}
+				c := da.x * db.y - da.y * db.x
+				return c > 0 || (c == 0 && a < b)
+			}
+			for i in 1 ..< len(out) {
+				x := out[i]
+				j := i
+				for j > 0 && before(s.hdir[:], x, out[j - 1]) {
+					out[j] = out[j - 1]
+					j -= 1
+				}
+				out[j] = x
+			}
+			for i in 1 ..< len(out) {
+				p, q := s.hdir[out[i - 1]], s.hdir[out[i]]
+				if sector(p) == sector(q) && p.x * q.y - p.y * q.x == 0 {
 					s.stats.ties += 1
 				}
 			}
+		}
+		for h, i in out {
+			s.hpos[h] = u32(i)
 		}
 	}
 	// next(h): at h's end, the outgoing half-edge just before h's twin
@@ -982,6 +1173,7 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 	}
 	resize(&s.hface, 2 * ne)
 	slice.fill(s.hface[:], max(u32))
+	clear(&s.fhalf)
 	clear(&s.farea)
 	for e, i in s.edges {
 		if !e.alive {
@@ -1009,6 +1201,7 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 					return .Inconsistent
 				}
 			}
+			append(&s.fhalf, h0)
 			append(&s.farea, area)
 		}
 	}
@@ -1019,27 +1212,46 @@ bool_faces :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 }
 
 // The direction from a vertex to its edge's curve at distance r (past the
-// vertex's cluster, so distinct edges are told apart by points eps apart).
+// vertex's cluster, so distinct edges are told apart by points eps apart);
+// a line's is its chord, the segment it is emitted as.
 @(private = "file")
-edge_direction :: proc(q: [4][2]f64, v: [2]f64, radius: f64, from_end: bool) -> [2]f64 {
-	at :: proc(q: [4][2]f64, t: f64, from_end: bool) -> [2]f64 {
-		return cubic_at(q, 1 - t if from_end else t)
+edge_direction :: proc(q: [4][2]f64, v: [2]f64, radius: f64, line, from_end: bool) -> [2]f64 {
+	if line {
+		return q[0] - q[3] if from_end else q[3] - q[0]
 	}
-	end := at(q, 1, from_end) - v
+	c := [4][2]f64{q[3], q[2], q[1], q[0]} if from_end else q
+	end := c[3] - v
 	r := min(radius, math.sqrt(end.x * end.x + end.y * end.y) / 2)
-	// The first point at distance r: monotone pieces move away from their
-	// ends, so bisection finds it.
+	// The point at distance r: monotone pieces move away from their ends,
+	// so |c(t) - v|^2 - r^2 rises from -r^2 at 0 to at least 3 r^2 at 1.
+	// Newton steps from the first-order guess, kept in the bracket by
+	// bisection, until it is r to 24 bits (r is a few eps, so rounding in
+	// the coordinates leaves |c(t) - v| good to about 30; the angle moves
+	// by far less than eps over r).
+	d0 := cubic_tangent(c, 0)
+	l0 := math.sqrt(d0.x * d0.x + d0.y * d0.y)
 	lo, hi := 0.0, 1.0
-	for _ in 0 ..< 60 {
-		m := (lo + hi) / 2
-		d := at(q, m, from_end) - v
-		if d.x * d.x + d.y * d.y < r * r {
-			lo = m
-		} else {
-			hi = m
+	t := r / l0 if l0 > 0 else 0.5
+	d: [2]f64
+	for _ in 0 ..< 64 {
+		if !(t > lo && t < hi) {
+			t = (lo + hi) / 2
 		}
+		d = cubic_at(c, t) - v
+		f := d.x * d.x + d.y * d.y - r * r
+		if abs(f) <= r * r / (1 << 24) {
+			break
+		}
+		if f < 0 {
+			lo = t
+		} else {
+			hi = t
+		}
+		g := cubic_tangent(c, t)
+		df := 2 * (d.x * g.x + d.y * g.y)
+		t = t - f / df if df > 0 else (lo + hi) / 2
 	}
-	return at(q, hi, from_end) - v
+	return d
 }
 
 // The direction's sector counterclockwise from +x: the four axes and the
@@ -1081,10 +1293,20 @@ bool_windings :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 			unite(s.comp[:], e.v0, e.v1)
 		}
 	}
+	// Per component: its leftmost vertex.
+	resize(&s.cleft, len(s.vpos))
+	slice.fill(s.cleft[:], max(u32))
+	for p, v in s.vpos {
+		r := find(s.comp[:], u32(v))
+		l := s.cleft[r]
+		if l == max(u32) || p.x < s.vpos[l].x || (p.x == s.vpos[l].x && p.y < s.vpos[l].y) {
+			s.cleft[r] = u32(v)
+		}
+	}
 	resize(&s.fdone, len(s.farea))
 	slice.fill(s.fdone[:], false)
 	slice.fill(s.fwind[:], 0)
-	// Per component: its leftmost vertex and its outer face.
+	// Per component: its outer face.
 	for e, i in s.edges {
 		if !e.alive {
 			continue
@@ -1095,14 +1317,7 @@ bool_windings :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 				continue
 			}
 			root := find(s.comp[:], e.v0)
-			// The component's leftmost vertex.
-			lv := e.v0
-			for v in 0 ..< len(s.vpos) {
-				if find(s.comp[:], u32(v)) == root && (s.vpos[v].x < s.vpos[lv].x || (s.vpos[v].x == s.vpos[lv].x && s.vpos[v].y < s.vpos[lv].y)) {
-					lv = u32(v)
-				}
-			}
-			q := s.vpos[lv]
+			q := s.vpos[s.cleft[root]]
 			w := s.fwind[int(f) * k:][:k]
 			for e2, j in s.edges {
 				if !e2.alive || find(s.comp[:], e2.v0) == root {
@@ -1124,22 +1339,22 @@ bool_windings :: proc(s: ^Bool_Scratch, k: int, eps: f64) -> Bool_Error {
 			append(&s.queue, f)
 			for len(s.queue) > 0 {
 				g := pop(&s.queue)
-				for e3, j in s.edges {
-					if !e3.alive {
-						continue
-					}
-					for h in ([2]u32{u32(2 * j), u32(2 * j + 1)}) {
-						if s.hface[h ~ 1] != g || s.fdone[s.hface[h]] {
-							continue
-						}
-						// Crossing from the right of h (g) to its left.
-						to := s.hface[h]
+				x := s.fhalf[g]
+				for {
+					// Crossing from the right of h (g) to its left.
+					h := x ~ 1
+					if to := s.hface[h]; !s.fdone[to] {
+						j := int(h >> 1)
 						sign: i32 = 1 if h & 1 == 0 else -1
 						for o in 0 ..< k {
 							s.fwind[int(to) * k + o] = s.fwind[int(g) * k + o] + sign * s.edelta[j * k + o]
 						}
 						s.fdone[to] = true
 						append(&s.queue, to)
+					}
+					x = s.hnext[x]
+					if x == s.fhalf[g] {
+						break
 					}
 				}
 			}
