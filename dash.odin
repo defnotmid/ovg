@@ -7,7 +7,8 @@ import cv "curves"
 // Dashes `src` into `dst` (SVG stroke-dasharray / stroke-dashoffset /
 // pathLength: when `total_length` > 0, dash lengths are fractions of it).
 // Curves stay curves: a cubic is cut at the dash ends, found along it by
-// arc length (`flat`, scratch reused across calls, measures the path). The
+// arc length (`flat`, scratch reused across calls, measures the path, and
+// each cubic's lengths come from its samples there). The
 // dash pattern runs on across segments and restarts at each subpath, as in
 // SVG. A pattern that would make more than `max_dashes` dashes leaves the
 // path undashed (as Skia; dashes that fine look solid) and returns false.
@@ -47,15 +48,21 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 	}
 	// Bounds the walk too, where f32 positions could stop advancing.
 	d := Dasher {
-		dst     = dst,
-		dashes  = dashes,
-		n       = n,
-		scale   = scale,
-		budget  = max_dashes,
-		lengths = &flat.points,
+		dst    = dst,
+		dashes = dashes,
+		n      = n,
+		scale  = scale,
+		budget = max_dashes,
 	}
 	start, pen: Vec2
 	open := false
+	// The flattened samples of each drawing segment, in the same order.
+	seg := 0
+	samples :: proc(flat: ^Flat_Path, seg: ^int) -> []Vec2 {
+		fs := flat.segs[seg^]
+		seg^ += 1
+		return flat.points[fs.first:][:fs.count]
+	}
 	it := path_iter(src)
 	for verb, coords in path_iter_next(&it) {
 		ok := true
@@ -79,17 +86,17 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 			}
 		case .Line_To:
 			if open {
-				ok = dash_segment(&d, {pen, pen, coords[0], coords[0]}, false)
+				ok = dash_segment(&d, {pen, pen, coords[0], coords[0]}, samples(flat, &seg))
 				pen = coords[0]
 			}
 		case .Bezier_To:
 			if open {
-				ok = dash_segment(&d, {pen, coords[0], coords[1], coords[2]}, true)
+				ok = dash_segment(&d, {pen, coords[0], coords[1], coords[2]}, samples(flat, &seg), true)
 				pen = coords[2]
 			}
 		case .Close:
 			if open {
-				ok = dash_segment(&d, {pen, pen, start, start}, false)
+				ok = dash_segment(&d, {pen, pen, start, start}, samples(flat, &seg))
 				pen = start
 			}
 		case .Solid, .Hole:
@@ -113,8 +120,6 @@ Dasher :: struct {
 	remaining: f32,
 	on:        bool,
 	budget:    int,
-	// A cubic's arc lengths at even steps of t (scratch).
-	lengths:   ^[dynamic]Vec2,
 }
 
 @(private = "file")
@@ -123,35 +128,30 @@ dash_length :: #force_inline proc "contextless" (d: ^Dasher) -> f32 {
 }
 
 // Walks the pattern along one segment (a line from c[0] to c[3], or a
-// cubic): the parts that draw go to the path as lines or cubics.
+// cubic whose flattened `samples` at t = k / len(samples) measure it): the
+// parts that draw go to the path as lines or cubics.
 @(private = "file")
-dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
+dash_segment :: proc(d: ^Dasher, c: [4]Vec2, samples: []Vec2, cubic := false) -> bool {
 	seg := vec_len(c[3] - c[0])
+	// Arc length and t at each sample (at most 256 a cubic).
+	lengths: [257]Vec2
 	steps := 1
 	if cubic {
-		// Arc length at t = k / steps (about 1.5 units a step, as
-		// path_flatten measures it).
-		approx := vec_len(c[1] - c[0]) + vec_len(c[2] - c[1]) + vec_len(c[3] - c[2])
-		steps = clamp(int(approx / 1.5), 2, 256)
-		clear(d.lengths)
-		append(d.lengths, Vec2{0, 0})
+		steps = len(samples)
 		seg = 0
 		prev := c[0]
-		for k in 1 ..= steps {
-			t := f32(k) / f32(steps)
-			q := cv.cubic_at(c, t)
+		for q, k in samples {
 			seg += vec_len(q - prev)
-			append(d.lengths, Vec2{seg, t})
+			lengths[k + 1] = {seg, f32(k + 1) / f32(steps)}
 			prev = q
 		}
 	}
 	// t at arc length s, reading the table forward.
 	at := 0
-	t_at :: proc(d: ^Dasher, s, seg: f32, cubic: bool, at: ^int) -> f32 {
+	t_at :: proc(l: []Vec2, s, seg: f32, cubic: bool, at: ^int) -> f32 {
 		if !cubic {
 			return s / seg if seg > 0 else 1
 		}
-		l := d.lengths[:]
 		for at^ < len(l) - 2 && l[at^ + 1].x < s {
 			at^ += 1
 		}
@@ -173,7 +173,7 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 			return false
 		}
 		pos += d.remaining
-		t := t_at(d, pos, seg, cubic, &at)
+		t := t_at(lengths[:steps + 1], pos, seg, cubic, &at)
 		if d.on {
 			draw(d, c, cubic, from, t)
 		} else {
@@ -197,10 +197,16 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, cubic: bool) -> bool {
 
 
 // A path flattened to polylines: every contour's points in one array, each
-// contour a range of it (closed ones end on their first point).
+// contour a range of it (closed ones end on their first point), and each
+// drawing segment (line, cubic, closing line) the range of samples it added.
 Flat_Path :: struct {
 	points:   [dynamic]Vec2,
 	contours: [dynamic]Flat_Contour,
+	segs:     [dynamic]Flat_Segment,
+}
+
+Flat_Segment :: struct {
+	first, count: u32,
 }
 
 Flat_Contour :: struct {
@@ -211,12 +217,13 @@ Flat_Contour :: struct {
 // A flattened path allocating from `allocator`.
 flat_path_init :: proc(f: ^Flat_Path, allocator := context.allocator) {
 	f^ = {}
-	f.points.allocator, f.contours.allocator = allocator, allocator
+	f.points.allocator, f.contours.allocator, f.segs.allocator = allocator, allocator, allocator
 }
 
 flat_path_destroy :: proc(f: ^Flat_Path) {
 	delete(f.points)
 	delete(f.contours)
+	delete(f.segs)
 	f^ = {}
 }
 
@@ -231,6 +238,7 @@ path_flatten :: proc(p: ^Path, out: ^Flat_Path, segment: f32 = 1.5) {
 path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segment: f32 = 1.5) {
 	clear(&out.points)
 	clear(&out.contours)
+	clear(&out.segs)
 	open := false
 	end :: proc(out: ^Flat_Path) {
 		ct := &out.contours[len(out.contours) - 1]
@@ -254,6 +262,7 @@ path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segme
 			open = true
 		case .Line_To:
 			if open {
+				append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
 				append(&out.points, c[0])
 			}
 		case .Bezier_To:
@@ -264,6 +273,7 @@ path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segme
 			c1, c2, p3 := c[0], c[1], c[2]
 			approx := vec_len(c1 - p0) + vec_len(c2 - c1) + vec_len(p3 - c2)
 			n := clamp(int(approx / segment), 2, 256)
+			append(&out.segs, Flat_Segment{u32(len(out.points)), u32(n)})
 			for k in 1 ..= n {
 				append(&out.points, cv.cubic_at([4]Vec2{p0, c1, c2, p3}, f32(k) / f32(n)))
 			}
@@ -271,6 +281,7 @@ path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segme
 			if open {
 				ct := &out.contours[len(out.contours) - 1]
 				ct.closed = true
+				append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
 				append(&out.points, out.points[ct.first])
 			}
 		case .Solid, .Hole:
