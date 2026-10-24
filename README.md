@@ -245,7 +245,8 @@ region (the whole canvas). A primitive's `subregion` cuts its own result.
 fill rule, `path_boolean_many` folds any number of operands, and
 `path_divide` splits the operands into every region they make
 (Illustrator's divide: one Path, each face's verbs a `Range` of it, the
-shapes nested in a face as its holes). The
+shapes nested in a face as its holes, and which operands each face lies
+inside in `Bool_Scratch.core.faces_in`). The
 result keeps the operands' own curves: each output segment is a range of
 an input line or cubic (a whole one copied bit for bit), cut where the
 operands meet, and `Bool_Scratch` records where each came from (the verb

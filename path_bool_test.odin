@@ -282,13 +282,19 @@ test_path_divide :: proc(t: ^testing.T) {
 	defer path_destroy(&union_)
 	faces: [dynamic]Range
 	defer delete(faces)
-	check :: proc(t: ^testing.T, s: ^Bool_Scratch, a, b, out, face, union_: ^Path, faces: ^[dynamic]Range, want: int) {
+	// want: how many regions lie inside a only, b only, and both.
+	check :: proc(t: ^testing.T, s: ^Bool_Scratch, a, b, out, face, union_: ^Path, faces: ^[dynamic]Range, want: [3]int) {
 		path_reset(out)
 		path_reset(union_)
 		clear(faces)
 		ops := [2]Bool_Operand{{a, .Non_Zero}, {b, .Non_Zero}}
 		testing.expect_value(t, path_divide(out, faces, ops[:], s), nil)
-		testing.expect_value(t, len(faces), want)
+		got: [3]int
+		for i in 0 ..< len(faces) {
+			ia, ib := s.core.faces_in[2 * i], s.core.faces_in[2 * i + 1]
+			got[0 if !ib else 1 if !ia else 2] += 1
+		}
+		testing.expect_value(t, got, want)
 		testing.expect_value(t, path_boolean(union_, ops[0], ops[1], .Union, s), nil)
 		sum: f64
 		for f in faces {
@@ -303,14 +309,14 @@ test_path_divide :: proc(t: ^testing.T) {
 	}
 	path_circle(&a, 30, 30, 20)
 	path_circle(&b, 50, 30, 20)
-	check(t, &s, &a, &b, &out, &face, &union_, &faces, 3)
+	check(t, &s, &a, &b, &out, &face, &union_, &faces, {1, 1, 1})
 	path_reset(&a)
 	path_reset(&b)
 	path_circle(&a, 30, 30, 25)
 	path_circle(&a, 30, 30, 15)
 	path_solidity(&a, .Hole)
 	path_circle(&b, 30, 30, 8)
-	check(t, &s, &a, &b, &out, &face, &union_, &faces, 2)
+	check(t, &s, &a, &b, &out, &face, &union_, &faces, {1, 1, 0})
 }
 
 // The coordinates of verbs [f.start, f.start + f.count) of p.

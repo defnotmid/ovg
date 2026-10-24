@@ -68,8 +68,9 @@ path_boolean_many :: proc(out: ^Path, operands: []Bool_Operand, op: Bool_Op, s: 
 // Appends every region the operands make (Illustrator's divide): each face
 // inside at least one operand, its outline Solid-wound with the shapes
 // nested directly in it as holes, curves kept; `faces` gets each region's
-// verbs in `out` (start, count), in arrangement order. On an error `out`
-// and `faces` are unchanged.
+// verbs in `out` (start, count), in arrangement order, and region i lies
+// inside operand o (under its rule) when s.core.faces_in[i * len(operands)
+// + o]. On an error `out` and `faces` are unchanged.
 path_divide :: proc(out: ^Path, faces: ^[dynamic]Range, operands: []Bool_Operand, s: ^Bool_Scratch, max_steps := DEFAULT_LIMITS[.Boolean_Steps]) -> Bool_Error {
 	cv.contours_clear(&s.input)
 	clear(&s.verbs)

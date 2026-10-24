@@ -120,8 +120,10 @@ Bool_Scratch :: struct {
 	out:     Contours,
 	out_row: [dynamic]u32,
 	out_t:   [dynamic][2]f32,
-	// bool_divide: each face's contours in `out` (first, count).
-	faces:   [dynamic][2]u32,
+	// bool_divide: each region's contours in `out` (first, count), and
+	// whether it lies inside each operand under its rule (k per region).
+	faces:    [dynamic][2]u32,
+	faces_in: [dynamic]bool,
 	fcomp:   [dynamic]u32, // per face: its component
 	cparent: [dynamic]u32, // per face of a component's outside: the face holding it
 	stats:   Bool_Stats,
@@ -203,6 +205,7 @@ bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	delete(s.out_row)
 	delete(s.out_t)
 	delete(s.faces)
+	delete(s.faces_in)
 	delete(s.fcomp)
 	delete(s.cparent)
 	s^ = {}
@@ -228,9 +231,10 @@ bool_run :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, op: Bool_
 // each bounded face inside at least one operand becomes a region of its
 // own, its outline Solid-wound and the components nested directly in it
 // as holes, curves kept as bool_run keeps them. s.faces holds each
-// region's contours in s.out.
+// region's contours in s.out, s.faces_in the operands it lies inside.
 bool_divide :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budget: ^int) -> (err: Bool_Error) {
 	clear(&s.faces)
+	clear(&s.faces_in)
 	if !(bool_arrange(s, c, inputs, budget) or_return) {
 		return
 	}
@@ -297,6 +301,9 @@ bool_divide :: proc(s: ^Bool_Scratch, c: ^Contours, inputs: []Bool_Input, budget
 			}
 		}
 		append(&s.faces, [2]u32{first, u32(len(s.out.contours)) - first})
+		for o in 0 ..< k {
+			append(&s.faces_in, fill_inside(s.fwind[f * k + o], inputs[o].even_odd))
+		}
 	}
 	return
 }

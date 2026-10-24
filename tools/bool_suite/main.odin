@@ -8,7 +8,8 @@
 // at most 1 so no output contours overlap).
 //
 // path_divide is checked too: a point inside the union lies in exactly one
-// face, any other point in none.
+// face, which says it lies inside the operands that hold the point; any
+// other point lies in none.
 //
 //     odin run tools/bool_suite -collection:deps=.. -o:speed -- [-seed:1] [-cases:500] [-v]
 package bool_suite
@@ -82,7 +83,7 @@ main :: proc() {
 					fmt.printfln("seed %d kind %d divide: %v", case_seed, kind, err)
 				}
 			} else {
-				w := check_divide(&a, &b, &out, faces[:])
+				w := check_divide(&a, &b, &out, faces[:], s.core.faces_in[:])
 				divided += 1
 				wrong += int(w > 0)
 				if w > 0 && verbose {
@@ -212,7 +213,7 @@ check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong
 
 // Samples of a divide where the count of faces holding the point isn't 1
 // inside the union and 0 outside it.
-check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range) -> (wrong: int) {
+check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> (wrong: int) {
 	ca, cb, co: cv.Contours
 	defer cv.contours_destroy(&ca)
 	defer cv.contours_destroy(&cb)
@@ -250,10 +251,14 @@ check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range) -> (wrong: int) {
 			if ona || onb || ono {
 				continue
 			}
+			// In exactly one face when inside either operand, and that face
+			// says which.
 			holding := 0
-			for fr in firsts {
-				w, _ := cv.contours_winding(&co, fr[0], fr[1], q, &stack)
-				holding += int(w != 0)
+			for fr, fi in firsts {
+				if w, _ := cv.contours_winding(&co, fr[0], fr[1], q, &stack); w != 0 {
+					holding += 1
+					wrong += int(inside[2 * fi] != (wa != 0) || inside[2 * fi + 1] != (wb != 0))
+				}
 			}
 			want := 1 if wa != 0 || wb != 0 else 0
 			wrong += int(holding != want)
