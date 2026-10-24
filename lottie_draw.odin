@@ -37,10 +37,8 @@ Lottie_Override :: struct {
 // Per-canvas drawing state, reused across draws (no allocation once warm).
 Lottie_Renderer :: struct {
 	path:     Path,
-	// Shape geometry of the layer being drawn: cubic contours (a start
-	// point, then three points per segment) in each item's own space.
-	pts:      [dynamic]Vec2,
-	contours: [dynamic]Lottie_Contour,
+	// Shape geometry of the layer being drawn, in each item's own space.
+	using geo: cv.Contours,
 	// Per document shape: its contours (geometry items).
 	geometry: [dynamic]Range,
 	// Per document shape, for paints whose geometry nothing animates (no
@@ -75,16 +73,9 @@ Lottie_Renderer :: struct {
 	text:        Lottie_Text_Scratch,
 }
 
-Lottie_Contour :: struct {
-	start:  u32,
-	segs:   u32,
-	closed: bool,
-}
-
 lottie_renderer_destroy :: proc(r: ^Lottie_Renderer, c: ^Canvas) {
 	path_destroy(&r.path)
-	delete(r.pts)
-	delete(r.contours)
+	cv.contours_destroy(&r.geo)
 	delete(r.geometry)
 	delete(r.copy_verbs)
 	delete(r.copy_coords)
@@ -558,8 +549,7 @@ lottie_draw_layer :: proc(d: ^Lottie_Draw, li: i32, frame: f32, depth: int, blen
 	case .Text:
 		lottie_draw_text(d, l, li, lt)
 	case .Shape:
-		clear(&d.r.pts)
-		clear(&d.r.contours)
+		cv.contours_clear(&d.r.geo)
 		d.unmodified = !lottie_has_modifier(doc, l.shapes)
 		lottie_build_items(d, l.shapes, lt)
 		lottie_draw_items(d, l.shapes, 0, l.shapes.count, lt)
@@ -811,36 +801,6 @@ lottie_build_items :: proc(d: ^Lottie_Draw, items: Range, t: f32) {
 }
 
 @(private)
-lottie_contour_begin :: proc(r: ^Lottie_Renderer, p: Vec2) {
-	append(&r.contours, Lottie_Contour{start = u32(len(r.pts))})
-	append(&r.pts, p)
-}
-
-@(private)
-lottie_contour_cubic :: proc(r: ^Lottie_Renderer, c1, c2, p: Vec2) {
-	append(&r.pts, c1, c2, p)
-	r.contours[len(r.contours) - 1].segs += 1
-}
-
-@(private)
-lottie_contour_line :: proc(r: ^Lottie_Renderer, p: Vec2) {
-	a := r.pts[len(r.pts) - 1]
-	lottie_contour_cubic(r, a + (p - a) / 3, a + (p - a) * (2.0 / 3), p)
-}
-
-@(private)
-lottie_contour_end :: proc(r: ^Lottie_Renderer, closed, reversed: bool) {
-	ct := &r.contours[len(r.contours) - 1]
-	ct.closed = closed
-	if reversed {
-		pts := r.pts[ct.start:][:ct.segs * 3 + 1]
-		for i in 0 ..< len(pts) / 2 {
-			pts[i], pts[len(pts) - 1 - i] = pts[len(pts) - 1 - i], pts[i]
-		}
-	}
-}
-
-@(private)
 lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 	doc, r := d.doc, d.r
 	reversed := .Reversed in sh.flags
@@ -852,35 +812,35 @@ lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 		rad := min(lottie_eval1(doc, sh.props[LOTTIE_ROUNDNESS], t, 0), abs(s.x) / 2, abs(s.y) / 2)
 		l, tp, rt, b := c.x - s.x / 2, c.y - s.y / 2, c.x + s.x / 2, c.y + s.y / 2
 		// From the top of the right edge, clockwise (as AE).
-		lottie_contour_begin(r, {rt, tp + rad})
-		lottie_contour_line(r, {rt, b - rad})
+		cv.contours_begin(&r.geo, {rt, tp + rad})
+		cv.contours_line(&r.geo, {rt, b - rad})
 		if rad > 0 {
-			lottie_contour_cubic(r, {rt, b - rad * K}, {rt - rad * K, b}, {rt - rad, b})
+			cv.contours_cubic(&r.geo, {rt, b - rad * K}, {rt - rad * K, b}, {rt - rad, b})
 		}
-		lottie_contour_line(r, {l + rad, b})
+		cv.contours_line(&r.geo, {l + rad, b})
 		if rad > 0 {
-			lottie_contour_cubic(r, {l + rad * K, b}, {l, b - rad * K}, {l, b - rad})
+			cv.contours_cubic(&r.geo, {l + rad * K, b}, {l, b - rad * K}, {l, b - rad})
 		}
-		lottie_contour_line(r, {l, tp + rad})
+		cv.contours_line(&r.geo, {l, tp + rad})
 		if rad > 0 {
-			lottie_contour_cubic(r, {l, tp + rad * K}, {l + rad * K, tp}, {l + rad, tp})
+			cv.contours_cubic(&r.geo, {l, tp + rad * K}, {l + rad * K, tp}, {l + rad, tp})
 		}
-		lottie_contour_line(r, {rt - rad, tp})
+		cv.contours_line(&r.geo, {rt - rad, tp})
 		if rad > 0 {
-			lottie_contour_cubic(r, {rt - rad * K, tp}, {rt, tp + rad * K}, {rt, tp + rad})
+			cv.contours_cubic(&r.geo, {rt - rad * K, tp}, {rt, tp + rad * K}, {rt, tp + rad})
 		}
-		lottie_contour_end(r, true, reversed)
+		cv.contours_end(&r.geo, true, reversed)
 	case .Ellipse:
 		c := lottie_eval2(doc, sh.props[LOTTIE_POSITION], t, {})
 		s := lottie_eval2(doc, sh.props[LOTTIE_SIZE], t, {}) / 2
 		k := Vec2{s.x * KAPPA90, s.y * KAPPA90}
 		// From the top, clockwise.
-		lottie_contour_begin(r, {c.x, c.y - s.y})
-		lottie_contour_cubic(r, {c.x + k.x, c.y - s.y}, {c.x + s.x, c.y - k.y}, {c.x + s.x, c.y})
-		lottie_contour_cubic(r, {c.x + s.x, c.y + k.y}, {c.x + k.x, c.y + s.y}, {c.x, c.y + s.y})
-		lottie_contour_cubic(r, {c.x - k.x, c.y + s.y}, {c.x - s.x, c.y + k.y}, {c.x - s.x, c.y})
-		lottie_contour_cubic(r, {c.x - s.x, c.y - k.y}, {c.x - k.x, c.y - s.y}, {c.x, c.y - s.y})
-		lottie_contour_end(r, true, reversed)
+		cv.contours_begin(&r.geo, {c.x, c.y - s.y})
+		cv.contours_cubic(&r.geo, {c.x + k.x, c.y - s.y}, {c.x + s.x, c.y - k.y}, {c.x + s.x, c.y})
+		cv.contours_cubic(&r.geo, {c.x + s.x, c.y + k.y}, {c.x + k.x, c.y + s.y}, {c.x, c.y + s.y})
+		cv.contours_cubic(&r.geo, {c.x - k.x, c.y + s.y}, {c.x - s.x, c.y + k.y}, {c.x - s.x, c.y})
+		cv.contours_cubic(&r.geo, {c.x - s.x, c.y - k.y}, {c.x - k.x, c.y - s.y}, {c.x, c.y - s.y})
+		cv.contours_end(&r.geo, true, reversed)
 	case .Path:
 		a, b, f, ok := lottie_path_at(doc, sh.props[LOTTIE_PATH], t)
 		if !ok || a.count == 0 {
@@ -892,15 +852,15 @@ lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 			return pa[i] + (pb[i] - pa[i]) * f
 		}
 		n := a.count
-		lottie_contour_begin(r, pt(pa, pb, 0, f))
+		cv.contours_begin(&r.geo, pt(pa, pb, 0, f))
 		segs := n if a.closed else n - 1
 		for s in 0 ..< segs {
 			i, j := s, (s + 1) % n
 			v := pt(pa, pb, 3 * i, f)
 			w := pt(pa, pb, 3 * j, f)
-			lottie_contour_cubic(r, v + pt(pa, pb, 3 * i + 2, f), w + pt(pa, pb, 3 * j + 1, f), w)
+			cv.contours_cubic(&r.geo, v + pt(pa, pb, 3 * i + 2, f), w + pt(pa, pb, 3 * j + 1, f), w)
 		}
-		lottie_contour_end(r, a.closed, false)
+		cv.contours_end(&r.geo, a.closed, false)
 	case .Star:
 		c := lottie_eval2(doc, sh.props[LOTTIE_POSITION], t, {})
 		rot := lottie_eval1(doc, sh.props[LOTTIE_STAR_ROTATION], t, 0) * math.RAD_PER_DEG
@@ -937,15 +897,15 @@ lottie_build_geometry :: proc(d: ^Lottie_Draw, sh: ^Lottie_Shape, t: f32) {
 			v, tin, tout := vert(c, rad, ang, perim_of(rad, n, polygon), round)
 			if i == 0 {
 				first_v, first_in = v, tin
-				lottie_contour_begin(r, v)
+				cv.contours_begin(&r.geo, v)
 			} else {
-				lottie_contour_cubic(r, prev_out, tin, v)
+				cv.contours_cubic(&r.geo, prev_out, tin, v)
 			}
 			prev_out = tout
 			ang += step
 		}
-		lottie_contour_cubic(r, prev_out, first_in, first_v)
-		lottie_contour_end(r, true, reversed)
+		cv.contours_cubic(&r.geo, prev_out, first_in, first_v)
+		cv.contours_end(&r.geo, true, reversed)
 	case .Group, .Fill, .Stroke, .Gradient_Fill, .Gradient_Stroke, .Trim, .Repeater, .Ignored:
 	}
 }
@@ -1134,9 +1094,7 @@ lottie_trim_contour :: proc(r: ^Lottie_Renderer, ci: u32, tr: ^Lottie_Trim) {
 		// A closed contour's wrap-around continues the previous part.
 		cont := joined && ct.closed && a <= 0 && !tr.sequential
 		if !cont {
-			start_pt := r.pts[ct.start]
-			append(&r.contours, Lottie_Contour{start = u32(len(r.pts))})
-			append(&r.pts, start_pt)
+			cv.contours_begin(&r.geo, r.pts[ct.start])
 		}
 		first := true
 		acc: f32
@@ -1156,8 +1114,7 @@ lottie_trim_contour :: proc(r: ^Lottie_Renderer, ci: u32, tr: ^Lottie_Trim) {
 				r.pts[len(r.pts) - 1] = q[0]
 			}
 			first = false
-			append(&r.pts, q[1], q[2], q[3])
-			r.contours[len(r.contours) - 1].segs += 1
+			cv.contours_segment(&r.geo, r.kinds[ct.seg + s], q[1], q[2], q[3])
 		}
 		joined = b >= total
 	}

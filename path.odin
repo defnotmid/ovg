@@ -309,3 +309,78 @@ path_iter_next :: proc "contextless" (it: ^Path_Iter) -> (verb: Verb, coords: []
 	it.coord_idx += n
 	return verb, coords, true
 }
+
+// A path's drawing as events, normalized the way fill reads it: drawing
+// before the first Move_To is skipped; Move_To begins a contour; a line or
+// cubic carries the pen as p[0]; Close draws the closing line from the pen
+// to the contour's start (of zero length too) and ends the contour; a
+// drawing verb after Close begins a new contour at that start first; Solid
+// and Hole come in verb order. Line and Close run from p[0] to p[1].
+Path_Event_Kind :: enum u8 {
+	Begin,
+	Line,
+	Cubic,
+	Close,
+	Solid,
+	Hole,
+}
+
+Path_Event :: struct {
+	kind: Path_Event_Kind,
+	p:    [4]Vec2,
+	verb: u32, // the verb it comes from
+}
+
+Path_Events :: struct {
+	path:        ^Path,
+	verb, coord: int,
+	pen, start:  Vec2,
+	moved, open: bool,
+}
+
+path_events :: proc "contextless" (p: ^Path) -> Path_Events {
+	return {path = p}
+}
+
+path_events_next :: proc "contextless" (it: ^Path_Events) -> (e: Path_Event, ok: bool) {
+	for it.verb < len(it.path.verbs) {
+		v := it.path.verbs[it.verb]
+		c := it.path.coords[it.coord:][:verb_num_coords(v)]
+		e.verb = u32(it.verb)
+		if (v == .Line_To || v == .Bezier_To) && !it.open {
+			if !it.moved {
+				it.verb, it.coord = it.verb + 1, it.coord + len(c)
+				continue
+			}
+			// Drawing after Close: a new contour from the last start (the
+			// verb is read again next call).
+			it.open, it.pen = true, it.start
+			e.kind, e.p[0] = .Begin, it.start
+			return e, true
+		}
+		it.verb, it.coord = it.verb + 1, it.coord + len(c)
+		switch v {
+		case .Move_To:
+			it.pen, it.start, it.moved, it.open = c[0], c[0], true, true
+			e.kind, e.p[0] = .Begin, c[0]
+		case .Line_To:
+			e.kind, e.p[0], e.p[1] = .Line, it.pen, c[0]
+			it.pen = c[0]
+		case .Bezier_To:
+			e.kind, e.p = .Cubic, {it.pen, c[0], c[1], c[2]}
+			it.pen = c[2]
+		case .Close:
+			if !it.open {
+				continue
+			}
+			e.kind, e.p[0], e.p[1] = .Close, it.pen, it.start
+			it.pen, it.open = it.start, false
+		case .Solid:
+			e.kind = .Solid
+		case .Hole:
+			e.kind = .Hole
+		}
+		return e, true
+	}
+	return
+}

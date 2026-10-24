@@ -76,6 +76,22 @@ cubic_bounds :: proc "contextless" (p: [4][2]$T) -> (lo, hi: [2]T) {
 	return
 }
 
+// The cubic's exact share of its contour's area, the integral of y dx:
+// summed over a closed contour it is positive when the contour winds as
+// Solid (cv.orient's sign). A straight cubic gives (x3 - x0) (y0 + y3) / 2.
+cubic_area :: proc "contextless" (p: [4][2]$T) -> T {
+	// The integrals of the Bernstein products, times 20.
+	W :: [4][3]T{{10, 4, 1}, {6, 6, 3}, {3, 6, 6}, {1, 4, 10}}
+	w := W
+	a: T
+	for i in 0 ..< 4 {
+		for j in 0 ..< 3 {
+			a += w[i][j] * p[i].y * (p[j + 1].x - p[j].x)
+		}
+	}
+	return a / 20
+}
+
 // Whether a winding number is inside under a fill rule.
 fill_inside :: #force_inline proc "contextless" (w: i32, even_odd: bool) -> bool {
 	return w & 1 != 0 if even_odd else w != 0
