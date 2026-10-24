@@ -437,33 +437,39 @@ test_shape_features :: proc(t: ^testing.T) {
 		text_layout(&s.fonts, {piece}, {}, &s.layout)
 		return s.layout.glyphs[:]
 	}
-	// Glyph ids from fontTools: a.sc, zero.slash, and aalt's alternates of I
-	// (i.sc, I.salt).
-	smcp := [?]Font_Feature{{"smcp", 1}}
-	testing.expect_value(t, layout(&s, "a", smcp[:])[0].glyph, 1868)
-	zero := [?]Font_Feature{{"zero", 1}}
-	testing.expect_value(t, layout(&s, "0", zero[:])[0].glyph, 2251)
-	aalt1, aalt2 := [?]Font_Feature{{"aalt", 1}}, [?]Font_Feature{{"aalt", 2}}
-	testing.expect_value(t, layout(&s, "I", aalt1[:])[0].glyph, 1911)
-	testing.expect_value(t, layout(&s, "I", aalt2[:])[0].glyph, 1738)
-	// Fraction features apply to all the piece's glyphs (HarfBuzz's ids),
-	// not only around U+2044 as kb flags them by default.
-	ids3 :: proc(g: []Positioned_Glyph) -> [3]Glyph_Index {
-		return {g[0].glyph, g[1].glyph, g[2].glyph}
+	// By glyph name (fontTools' and HarfBuzz's): their ids differ between
+	// Noto Sans builds.
+	font, _ := font_collection_find(&s.fonts, "Noto Sans", 400)
+	names := font_glyph_names(font)
+	defer delete(names)
+	named :: proc(names: []string, g: []Positioned_Glyph) -> (out: [4]string) {
+		for gl, i in g[:min(len(g), 4)] {
+			out[i] = names[gl.glyph]
+		}
+		return
 	}
+	smcp := [?]Font_Feature{{"smcp", 1}}
+	testing.expect_value(t, named(names, layout(&s, "a", smcp[:])), [4]string{"a.sc", "", "", ""})
+	zero := [?]Font_Feature{{"zero", 1}}
+	testing.expect_value(t, named(names, layout(&s, "0", zero[:])), [4]string{"zero.slash", "", "", ""})
+	// aalt's two alternates of I, by value (builds list them in either
+	// order).
+	aalt1, aalt2 := [?]Font_Feature{{"aalt", 1}}, [?]Font_Feature{{"aalt", 2}}
+	alt1, alt2 := named(names, layout(&s, "I", aalt1[:]))[0], named(names, layout(&s, "I", aalt2[:]))[0]
+	testing.expectf(t, (alt1 == "i.sc" && alt2 == "I.salt") || (alt1 == "I.salt" && alt2 == "i.sc"), "aalt 1, 2: %s, %s", alt1, alt2)
+	// Fraction features apply to all the piece's glyphs, as in HarfBuzz.
 	frac, numr, dnom := [?]Font_Feature{{"frac", 1}}, [?]Font_Feature{{"numr", 1}}, [?]Font_Feature{{"dnom", 1}}
-	testing.expect_value(t, ids3(layout(&s, "1/2", frac[:])), [3]Glyph_Index{2273, 533, 2264})
-	testing.expect_value(t, ids3(layout(&s, "1/2", numr[:])), [3]Glyph_Index{2273, 18, 2274})
-	testing.expect_value(t, ids3(layout(&s, "1/2", dnom[:])), [3]Glyph_Index{2263, 18, 2264})
+	testing.expect_value(t, named(names, layout(&s, "1/2", frac[:])), [4]string{"one.numr", "fraction", "two.dnom", ""})
+	testing.expect_value(t, named(names, layout(&s, "1/2", numr[:])), [4]string{"one.numr", "slash", "two.numr", ""})
+	testing.expect_value(t, named(names, layout(&s, "1/2", dnom[:])), [4]string{"one.dnom", "slash", "two.dnom", ""})
 	// Off by default, on by default turned off, and a style's own setting
 	// over letter spacing's.
-	testing.expect_value(t, layout(&s, "a", nil)[0].glyph, 68)
+	testing.expect_value(t, named(names, layout(&s, "a", nil)), [4]string{"a", "", "", ""})
 	no_liga, liga := [?]Font_Feature{{"liga", 0}}, [?]Font_Feature{{"liga", 1}}
 	testing.expect_value(t, len(layout(&s, "fi", nil)), 1)
 	testing.expect_value(t, len(layout(&s, "fi", no_liga[:])), 2)
 	testing.expect_value(t, len(layout(&s, "fi", liga[:], 2)), 1)
 	// kern off: the pair keeps its advance.
-	font, _ := font_collection_find(&s.fonts, "Noto Sans", 400)
 	em := font_scale_for_em(font, 100)
 	no_kern := [?]Font_Feature{{"kern", 0}}
 	g := layout(&s, "AV", no_kern[:])
@@ -472,11 +478,7 @@ test_shape_features :: proc(t: ^testing.T) {
 	// Features stay with their piece within one shaped segment.
 	pieces := [?]Text_Piece{{text = "aa", style = {family = "Noto Sans", size = 100, features = smcp[:]}}, {text = "aa", style = {family = "Noto Sans", size = 100}}}
 	text_layout(&s.fonts, pieces[:], {}, &s.layout)
-	ids: [4]Glyph_Index
-	for gl, i in s.layout.glyphs {
-		ids[i] = gl.glyph
-	}
-	testing.expect_value(t, ids, [4]Glyph_Index{1868, 1868, 68, 68})
+	testing.expect_value(t, named(names, s.layout.glyphs[:]), [4]string{"a.sc", "a.sc", "a", "a"})
 }
 
 @(test)
