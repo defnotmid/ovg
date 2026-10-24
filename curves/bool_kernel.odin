@@ -122,8 +122,7 @@ curve_winding :: proc(p: [4][2]f64, q: [2]f64, on_tol: f64, stack: ^[dynamic][2]
 
 // A stretch where two pieces come within the tolerance: [s0, s1] of the
 // first piece's parameter against [t0, t1] of the second's; `point` when it
-// is small (a crossing or a touch, its ends within the caller's `point`
-// distance of its middle) rather than an overlap.
+// is small (a crossing or a touch) rather than an overlap.
 Run :: struct {
 	s0, s1, t0, t1: f64,
 	point:          bool,
@@ -151,11 +150,10 @@ kernel_scratch_destroy :: proc(s: ^Kernel_Scratch) {
 // the search found its pairs within tol + delta. Cell pairs are halved
 // until both are flat, then compared as segments in closed form; a pair is
 // dropped only when its boxes are proved farther apart than tol, so no
-// crossing is missed whatever the rounding. A run is a point when all its
-// ends lie within `point` of its middle. The search covers `root` (s0, s1
-// of a, t0, t1 of b): a caller that knows every near pair lies there skips
-// the rest. `budget` counts cell pairs (false when it runs out).
-near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int, root := [4]f64{0, 1, 0, 1}) -> bool {
+// crossing is missed whatever the rounding. The search covers `root` (s0,
+// s1 of a, t0, t1 of b): a caller that knows every near pair lies there
+// skips the rest. `budget` counts cell pairs (false when it runs out).
+near_runs :: proc(a, b: ^Piece, tol, delta: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int, root := [4]f64{0, 1, 0, 1}) -> bool {
 	clear(&s.stack)
 	clear(&s.leaves)
 	append(&s.stack, Cell_Pair{root, piece_range(a, root[0], root[1]), piece_range(b, root[2], root[3])})
@@ -179,7 +177,8 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 		if fa && fb {
 			u0, u1, v0, v1, near := segments_near(pa[0], pa[3], pb[0], pb[3], tol)
 			if near {
-				append(&s.leaves, Run{span_at(cell[0], cell[1], u0), span_at(cell[0], cell[1], u1), span_at(cell[2], cell[3], v0), span_at(cell[2], cell[3], v1), false})
+				ds, dt := cell[1] - cell[0], cell[3] - cell[2]
+				append(&s.leaves, Run{cell[0] + u0 * ds, cell[0] + u1 * ds, cell[2] + v0 * dt, cell[2] + v1 * dt, false})
 			}
 			continue
 		}
@@ -191,7 +190,8 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 		if (split_a && (ma <= cell[0] || ma >= cell[1])) || (!split_a && (mb <= cell[2] || mb >= cell[3])) {
 			u0, u1, v0, v1, near := segments_near(pa[0], pa[3], pb[0], pb[3], tol)
 			if near {
-				append(&s.leaves, Run{span_at(cell[0], cell[1], u0), span_at(cell[0], cell[1], u1), span_at(cell[2], cell[3], v0), span_at(cell[2], cell[3], v1), false})
+				ds, dt := cell[1] - cell[0], cell[3] - cell[2]
+				append(&s.leaves, Run{cell[0] + u0 * ds, cell[0] + u1 * ds, cell[2] + v0 * dt, cell[2] + v1 * dt, false})
 			}
 			continue
 		}
@@ -205,20 +205,14 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 			append(&s.stack, Cell_Pair{{cell[0], cell[1], m, cell[3]}, pa, piece_range(b, m, cell[3])})
 		}
 	}
-	merge_runs(a, b, point, s, out)
+	merge_runs(a, b, tol, s, out)
 	return true
 }
 
-// The parameter at u along [lo, hi], each end exactly.
-@(private = "file")
-span_at :: #force_inline proc "contextless" (lo, hi, u: f64) -> f64 {
-	return hi if u == 1 else lo + (hi - lo) * u
-}
-
 // The leaves' connected stretches as runs, each a point run when all its
-// ends lie within `point` of its middle.
+// ends lie within 2 tol of its middle.
 @(private = "file")
-merge_runs :: proc(a, b: ^Piece, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run) {
+merge_runs :: proc(a, b: ^Piece, tol: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run) {
 	if len(s.leaves) == 0 {
 		return
 	}
@@ -242,7 +236,7 @@ merge_runs :: proc(a, b: ^Piece, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]
 		ends := [4][2]f64{piece_at(a, r.s0), piece_at(a, r.s1), piece_at(b, r.t0), piece_at(b, r.t1)}
 		r.point = true
 		for e in ends {
-			if length(e - m) > point {
+			if length(e - m) > 2 * tol {
 				r.point = false
 			}
 		}
@@ -277,11 +271,14 @@ capsule_range :: proc "contextless" (a0, a1, b0, b1: [2]f64, tol: f64) -> (lo, h
 		}
 		return 0, 0, false
 	}
-	// The end discs.
+	// The end discs. The discriminant b^2 - dd (|w|^2 - tol^2) is written by
+	// Lagrange's identity as dd tol^2 - (d x w)^2, which doesn't cancel when
+	// the disc is far from the line's start (|w| >> tol).
 	for c in ([2][2]f64{b0, b1}) {
 		w := a0 - c
 		b := d.x * w.x + d.y * w.y
-		disc := b * b - dd * (w.x * w.x + w.y * w.y - tol * tol)
+		cr := d.x * w.y - d.y * w.x
+		disc := dd * tol * tol - cr * cr
 		if disc >= 0 {
 			r := math.sqrt(disc)
 			lo, hi = min(lo, (-b - r) / dd), max(hi, (-b + r) / dd)

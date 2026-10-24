@@ -10,10 +10,11 @@ import "core:slice"
 //   pieces monotone in x and y, with their source segment and t range, and
 //     their ends at their contour's nodes (one point per joint);
 //   one point wherever two pieces come within eps (a crossing, a touch, an
-//     overlap's end), cut into both, or the node of an end it reaches;
+//     overlap's end), cut into both, or the node of an end within eps;
 //   vertices: points within eps merged, pieces cut where a vertex lies
-//     within eps of them, until nothing changes, so edges that share no
-//     vertex are more than eps apart;
+//     within eps of them, and edges sharing no vertex that come within eps
+//     met there, until nothing changes, so such edges are more than eps
+//     apart;
 //   edges between consecutive cuts, their curves snapped to their vertices;
 //     edges along the same curve between the same vertices merged, their
 //     windings summed;
@@ -502,14 +503,6 @@ Cut_Pass :: struct {
 	budget:     ^int,
 }
 
-// How near its middle a run's ends lie when it can only be one vertex: an
-// edge needs 2 (vrad + 4 eps) to be told apart at both ends, and a meeting
-// of two pieces within eps + delta has a radius of half that.
-@(private = "file")
-meet_reach :: proc "contextless" (eps, delta: f64) -> f64 {
-	return 4 * eps + (eps + delta) / 2
-}
-
 // S2-S3: each piece cut at its ends' nodes, and one point wherever two
 // pieces come within eps.
 @(private = "file")
@@ -525,19 +518,22 @@ bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error
 		pa, pb := &s.pieces[a], &s.pieces[b]
 		clear(&s.runs)
 		cell := shared_corner(s, a, b, pass.eps + pass.delta)
-		if !near_runs(pa, pb, pass.eps, pass.delta, meet_reach(pass.eps, pass.delta), &s.kernel, &s.runs, pass.budget, cell) {
+		if !near_runs(pa, pb, pass.eps, pass.delta, &s.kernel, &s.runs, pass.budget, cell) {
 			return false
 		}
 		s.stats.pairs += 1
 		for r in s.runs {
 			if r.point {
-				ta, tb := run_at(r.s0, r.s1), run_at(r.t0, r.t1)
-				meet(s, a, ta, end_node(s, a, ta), b, tb, end_node(s, b, tb))
+				meet_pieces(s, a, (r.s0 + r.s1) / 2, b, (r.t0 + r.t1) / 2, pass.eps)
 				continue
 			}
 			ta, tb := overlap_ends(pa, pb, r)
+			if u, v, crossed := crossing(pa, pb, ta, tb); crossed {
+				meet_pieces(s, a, u, b, v, pass.eps)
+				continue
+			}
 			for e in 0 ..< 2 {
-				meet(s, a, ta[e], end_node(s, a, ta[e]), b, tb[e], end_node(s, b, tb[e]))
+				meet_pieces(s, a, ta[e], b, tb[e], pass.eps)
 			}
 		}
 		return true
@@ -615,18 +611,6 @@ near_end :: proc(p: ^Piece, end, axis: int, c, r: f64) -> f64 {
 	return far
 }
 
-// Where a point run meets on one piece: an end it reaches, else its middle.
-@(private = "file")
-run_at :: proc "contextless" (lo, hi: f64) -> f64 {
-	switch {
-	case lo == 0:
-		return 0
-	case hi == 1:
-		return 1
-	}
-	return (lo + hi) / 2
-}
-
 // An overlap's two ends on each piece, each paired with the nearer end on
 // the other.
 @(private = "file")
@@ -642,17 +626,52 @@ overlap_ends :: proc(a, b: ^Piece, r: Run) -> (ta, tb: [2]f64) {
 	return
 }
 
-// The node at piece's end t, or none.
+// Where pieces a and b cross within a run whose ends pair a's ta[i] with
+// b's tb[i]: at each end b lies on a side of a, and when the sides are
+// opposite they cross between, at the parameters interpolated where the
+// side changes. A shallow crossing's run is long, but it is still one
+// meeting; a touch or an overlap keeps to one side.
 @(private = "file")
-end_node :: proc(s: ^Bool_Scratch, piece: u32, t: f64) -> u32 {
-	return s.pnode[piece][0] if t == 0 else s.pnode[piece][1] if t == 1 else max(u32)
+crossing :: proc(a, b: ^Piece, ta, tb: [2]f64) -> (u, v: f64, crossed: bool) {
+	side :: proc(a, b: ^Piece, s, t: f64) -> f64 {
+		d, w := cubic_tangent(a.p, s), piece_at(b, t) - piece_at(a, s)
+		return d.x * w.y - d.y * w.x
+	}
+	d0, d1 := side(a, b, ta[0], tb[0]), side(a, b, ta[1], tb[1])
+	if !(d0 < 0 && d1 > 0) && !(d0 > 0 && d1 < 0) {
+		return
+	}
+	k := d0 / (d0 - d1)
+	return ta[0] + (ta[1] - ta[0]) * k, tb[0] + (tb[1] - tb[0]) * k, true
 }
 
-// Pieces a and b meet at their parameters ta and tb: at the point ea or eb
-// where either has one there (both: the points are one), else at a new
-// point halfway between, cut into both.
+// Pieces a and b meet at their parameters ta and tb, halfway between them.
 @(private = "file")
-meet :: proc(s: ^Bool_Scratch, a: u32, ta: f64, ea: u32, b: u32, tb: f64, eb: u32) {
+meet_pieces :: proc(s: ^Bool_Scratch, a: u32, ta: f64, b: u32, tb: f64, eps: f64) {
+	pa, pb := &s.pieces[a], &s.pieces[b]
+	m := (piece_at(pa, ta) + piece_at(pb, tb)) / 2
+	ea := end_near(s.pnode[a], {pa.p[0], pa.p[3]}, m, eps)
+	eb := end_near(s.pnode[b], {pb.p[0], pb.p[3]}, m, eps)
+	meet(s, a, ta, ea, b, tb, eb, m)
+}
+
+// Of the points e at an edge's or a piece's two ends (at q), the nearer m
+// when within eps of it, or none.
+@(private = "file")
+end_near :: proc "contextless" (e: [2]u32, q: [2][2]f64, m: [2]f64, eps: f64) -> u32 {
+	d0, d1 := q[0] - m, q[1] - m
+	l0, l1 := d0.x * d0.x + d0.y * d0.y, d1.x * d1.x + d1.y * d1.y
+	if min(l0, l1) > eps * eps {
+		return max(u32)
+	}
+	return e[0] if l0 <= l1 else e[1]
+}
+
+// Pieces a and b meet at their parameters ta and tb near m: at the point ea
+// or eb at an end of either within eps of m (both: the points are one),
+// else at a new point m, cut into both.
+@(private = "file")
+meet :: proc(s: ^Bool_Scratch, a: u32, ta: f64, ea: u32, b: u32, tb: f64, eb: u32, m: [2]f64) {
 	switch {
 	case ea != max(u32) && eb != max(u32):
 		unite(s.parent[:], ea, eb)
@@ -661,7 +680,7 @@ meet :: proc(s: ^Bool_Scratch, a: u32, ta: f64, ea: u32, b: u32, tb: f64, eb: u3
 	case eb != max(u32):
 		add_cut(s, a, ta, eb)
 	case:
-		p := add_point(s, (piece_at(&s.pieces[a], ta) + piece_at(&s.pieces[b], tb)) / 2, false)
+		p := add_point(s, m, false)
 		add_cut(s, a, ta, p)
 		add_cut(s, b, tb, p)
 	}
@@ -782,8 +801,8 @@ unite :: proc(parent: []u32, a, b: u32) -> bool {
 }
 
 // S4: points within eps merge into vertices; pieces are cut where a vertex
-// lies within eps of them; edges shorter than the vertices can resolve
-// merge their ends; until nothing changes.
+// lies within eps of them; edges sharing no vertex that come within eps
+// meet; until nothing meets.
 @(private = "file")
 bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error {
 	for round := 0;; round += 1 {
@@ -828,13 +847,12 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 				}
 			}
 		}
-		// The cuts on one piece at one point are the same cut.
-		for {
-			changed := false
+		// Hot pixels: a vertex within eps of a piece it isn't a cut of cuts it
+		// there, once (that makes no vertex). Candidates by a sweep of the
+		// pieces' boxes over the vertices sorted by x, then taken vertex by
+		// vertex.
+		{
 			number_vertices(s)
-			// Hot pixels: a vertex within eps of a piece it isn't a cut of
-			// cuts it there. Candidates by a sweep of the pieces' boxes over
-			// the vertices sorted by x, then taken vertex by vertex.
 			n := len(s.cuts)
 			group_cuts(s, n)
 			resize(&s.order, len(s.vpos))
@@ -870,55 +888,23 @@ bool_vertices :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_E
 				v := s.vpos[vi]
 				dot := Piece{p = {v, v, v, v}, line = true}
 				clear(&s.runs)
-				if !near_runs(&s.pieces[pi], &dot, eps, delta, meet_reach(eps, delta), &s.kernel, &s.runs, budget) {
+				if !near_runs(&s.pieces[pi], &dot, eps, delta, &s.kernel, &s.runs, budget) {
 					return .Limit
 				}
 				for r in s.runs {
-					t := run_at(r.s0, r.s1)
-					if n := end_node(s, pi, t); n != max(u32) {
-						unite(s.parent[:], n, s.vfirst[vi])
-					} else {
-						add_cut(s, pi, t, s.vfirst[vi])
-					}
-					changed = true
+					add_cut(s, pi, (r.s0 + r.s1) / 2, s.vfirst[vi])
 				}
-			}
-			if !changed {
-				break
 			}
 		}
 		number_vertices(s)
-		// Short edges: consecutive cuts on a piece closer than the
-		// vertices' radii allow merge their vertices.
-		merged := false
-		sort_cuts(s)
-		for i in 1 ..< len(s.cuts) {
-			a, b := s.cuts[i - 1], s.cuts[i]
-			if a.piece != b.piece {
-				continue
-			}
-			va, vb := s.vert[a.point], s.vert[b.point]
-			if va == vb {
-				continue
-			}
-			d := s.vpos[va] - s.vpos[vb]
-			lim := 8 * eps + 2 * max(s.vrad[va], s.vrad[vb])
-			if d.x * d.x + d.y * d.y < lim * lim {
-				unite(s.parent[:], a.point, b.point)
-				merged = true
-			}
+		// Edges sharing no vertex must stay more than eps apart: where two
+		// come within eps, they meet.
+		repaired, err := repair_edges(s, eps, delta, budget)
+		if err != nil {
+			return err
 		}
-		if !merged {
-			// Edges sharing no vertex must stay more than eps apart: where
-			// two come within eps (a shallow crossing whose cuts didn't
-			// meet), both are cut there and the cuts merged.
-			repaired, err := repair_edges(s, eps, delta, budget)
-			if err != nil {
-				return err
-			}
-			if !repaired {
-				break
-			}
+		if !repaired {
+			break
 		}
 		if round > 64 {
 			return .Limit
@@ -1080,33 +1066,14 @@ build_edges :: proc(s: ^Bool_Scratch) {
 		}
 		pi := s.cuts[i].piece
 		p := &s.pieces[pi]
-		// A cut at one of the piece's end vertices is that end (a touch
-		// with a neighbour found a hair inside).
-		v_first, v_last := max(u32), max(u32)
-		for c in s.cuts[i:j] {
-			if c.t == 0 {
-				v_first = s.vert[c.point]
-			} else if c.t == 1 {
-				v_last = s.vert[c.point]
-			}
-		}
-		for &c in s.cuts[i:j] {
-			if s.vert[c.point] == v_first {
-				c.t = 0
-			} else if s.vert[c.point] == v_last {
-				c.t = 1
-			}
-		}
-		// Back in order by t (only the moved ends are out of it).
+		// The cuts next to an end at its vertex are that end (a touch with a
+		// neighbour found a hair inside); order by t is kept.
 		cs := s.cuts[i:j]
-		for a in 1 ..< len(cs) {
-			x := cs[a]
-			b := a
-			for b > 0 && cut_after(cs[b - 1], x) {
-				cs[b] = cs[b - 1]
-				b -= 1
-			}
-			cs[b] = x
+		for k := 1; k < len(cs) && s.vert[cs[k].point] == s.vert[cs[0].point]; k += 1 {
+			cs[k].t = 0
+		}
+		for k := len(cs) - 2; k >= 0 && s.vert[cs[k].point] == s.vert[cs[len(cs) - 1].point]; k -= 1 {
+			cs[k].t = 1
 		}
 		prev := i
 		for c in i + 1 ..< j {
@@ -1126,9 +1093,11 @@ build_edges :: proc(s: ^Bool_Scratch) {
 	}
 }
 
-// Where two edges sharing no vertex come within eps, they meet there as
-// pieces do (at the vertex of an edge end reached, else at a new point).
-// True when anything was cut.
+// Where two edges sharing no vertex come within eps, they meet as pieces do,
+// except that an overlap only meets at the edges' own ends: where nearly
+// parallel edges part is ill-conditioned (within delta of eps over a long
+// stretch), and a new point there each round would creep along them. True
+// when anything changed.
 @(private = "file")
 repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repaired: bool, err: Bool_Error) {
 	build_edges(s)
@@ -1151,22 +1120,21 @@ repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repair
 		pa := Piece{p = s.ecurve[a], line = s.pieces[ea.piece].line}
 		pb := Piece{p = s.ecurve[b], line = s.pieces[eb.piece].line}
 		clear(&s.runs)
-		if !near_runs(&pa, &pb, r.pass.eps, r.pass.delta, meet_reach(r.pass.eps, r.pass.delta), &s.kernel, &s.runs, r.pass.budget) {
+		if !near_runs(&pa, &pb, r.pass.eps, r.pass.delta, &s.kernel, &s.runs, r.pass.budget) {
 			return false
 		}
-		// An edge's parameter on its piece, and the point at its end.
-		at :: proc(e: Bool_Edge, t: f64) -> f64 {return e.t0 if t == 0 else e.t1 if t == 1 else e.t0 + (e.t1 - e.t0) * t}
-		end :: proc(s: ^Bool_Scratch, e: Bool_Edge, t: f64) -> u32 {return s.vfirst[e.v0] if t == 0 else s.vfirst[e.v1] if t == 1 else max(u32)}
 		for run in s.runs {
-			r.repaired = true
 			if run.point {
-				ta, tb := run_at(run.s0, run.s1), run_at(run.t0, run.t1)
-				meet(s, ea.piece, at(ea, ta), end(s, ea, ta), eb.piece, at(eb, tb), end(s, eb, tb))
+				r.repaired |= meet_edges(s, ea, (run.s0 + run.s1) / 2, eb, (run.t0 + run.t1) / 2, r.pass.eps, true)
 				continue
 			}
 			ta, tb := overlap_ends(&pa, &pb, run)
+			if u, v, crossed := crossing(&pa, &pb, ta, tb); crossed {
+				r.repaired |= meet_edges(s, ea, u, eb, v, r.pass.eps, true)
+				continue
+			}
 			for e in 0 ..< 2 {
-				meet(s, ea.piece, at(ea, ta[e]), end(s, ea, ta[e]), eb.piece, at(eb, tb[e]), end(s, eb, tb[e]))
+				r.repaired |= meet_edges(s, ea, ta[e], eb, tb[e], r.pass.eps, false)
 			}
 		}
 		return true
@@ -1175,6 +1143,56 @@ repair_edges :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> (repair
 		return false, .Limit
 	}
 	return r.repaired, nil
+}
+
+// Edges a and b meet as pieces do at their own parameters ua and ub, their
+// ends being their vertices; a new point only when `fresh`. True when
+// anything changed.
+@(private = "file")
+meet_edges :: proc(s: ^Bool_Scratch, a: Bool_Edge, ua: f64, b: Bool_Edge, ub: f64, eps: f64, fresh: bool) -> bool {
+	ta, tb := a.t0 + (a.t1 - a.t0) * ua, b.t0 + (b.t1 - b.t0) * ub
+	m := (piece_at(&s.pieces[a.piece], ta) + piece_at(&s.pieces[b.piece], tb)) / 2
+	ea := end_near({s.vfirst[a.v0], s.vfirst[a.v1]}, {s.vpos[a.v0], s.vpos[a.v1]}, m, eps)
+	eb := end_near({s.vfirst[b.v0], s.vfirst[b.v1]}, {s.vpos[b.v0], s.vpos[b.v1]}, m, eps)
+	switch {
+	case ea != max(u32) && eb != max(u32):
+		return unite(s.parent[:], ea, eb)
+	case ea != max(u32):
+		return cut_or_join(s, b.piece, tb, ea)
+	case eb != max(u32):
+		return cut_or_join(s, a.piece, ta, eb)
+	case fresh:
+		p := add_point(s, m, false)
+		add_cut(s, a.piece, ta, p)
+		add_cut(s, b.piece, tb, p)
+		return true
+	}
+	return false
+}
+
+// Cuts piece pc at t through point p's vertex, unless the piece passes
+// through that vertex already: then the stretch between there and t (within
+// eps of it, as the piece is monotone) joins it. True when anything changed.
+// (The piece's cuts are its span of the sorted cuts, as build_edges left
+// them.)
+@(private = "file")
+cut_or_join :: proc(s: ^Bool_Scratch, pc: u32, t: f64, p: u32) -> bool {
+	span := s.cuts[s.pstart[pc]:s.pstart[pc + 1]]
+	for c in span {
+		if s.vert[c.point] != s.vert[p] {
+			continue
+		}
+		lo, hi := min(c.t, t), max(c.t, t)
+		joined := false
+		for d in span {
+			if d.t >= lo && d.t <= hi {
+				joined |= unite(s.parent[:], d.point, p)
+			}
+		}
+		return joined
+	}
+	add_cut(s, pc, t, p)
+	return true
 }
 
 @(private = "file")
@@ -1205,7 +1223,7 @@ merge_coincident :: proc(s: ^Bool_Scratch, k: int, eps, delta: f64, budget: ^int
 				pb := Piece{p = s.ecurve[eb], t0 = 0, t1 = 1}
 				pa.line, pb.line = s.pieces[s.edges[ea].piece].line, s.pieces[s.edges[eb].piece].line
 				clear(&s.runs)
-				if !near_runs(&pa, &pb, 2 * eps, delta, meet_reach(eps, delta), &s.kernel, &s.runs, budget) {
+				if !near_runs(&pa, &pb, 2 * eps, delta, &s.kernel, &s.runs, budget) {
 					return .Limit
 				}
 				if len(s.runs) != 1 || s.runs[0].s0 > 0 || s.runs[0].s1 < 1 || s.runs[0].t0 > 0 || s.runs[0].t1 < 1 {

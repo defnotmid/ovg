@@ -1,6 +1,8 @@
 // Fuzzes the path booleans: random operands (polygons, self-crossing ones
 // included, cubic blobs, circles, rects on a coarse grid so edges and
-// corners coincide, tangent circles), every op under both fill rules,
+// corners coincide, tangent circles, and rects and polygons on that grid
+// with each corner moved by a few half-eps steps, so edges nearly coincide
+// at the scale the boolean resolves), every op under both fill rules,
 // checked by membership on a grid away from the outlines (the result fills
 // a point exactly when the op of the operands' fills does, with winding
 // at most 1 so no output contours overlap).
@@ -12,7 +14,6 @@
 package bool_suite
 
 import "core:fmt"
-import "core:math"
 import "core:math/rand"
 import "core:os"
 import "core:strconv"
@@ -44,7 +45,7 @@ main :: proc() {
 		a, b: vg.Path
 		defer vg.path_destroy(&a)
 		defer vg.path_destroy(&b)
-		kind := rand.int_max(6, r)
+		kind := rand.int_max(7, r)
 		operand(&a, kind, r)
 		operand(&b, kind, r)
 		for op in vg.Bool_Op {
@@ -142,6 +143,28 @@ operand :: proc(p: ^vg.Path, kind: int, r: rand.Generator) {
 		// A mix: a polygon and a circle.
 		operand(p, 0, r)
 		operand(p, 2, r)
+	case 6:
+		// Nearly coincident: rects and a polygon on the grid, each corner
+		// moved by up to 3 steps of 2^-15 (eps is 2^-14 below 128).
+		j :: proc(r: rand.Generator) -> f32 {return f32(rand.int_max(7, r) - 3) / 32768}
+		for _ in 0 ..< 1 + rand.int_max(3, r) {
+			x, y := grid(r), grid(r)
+			w, h := 10 + grid(r) / 2, 10 + grid(r) / 2
+			vg.path_move_to(p, x + j(r), y + j(r))
+			vg.path_line_to(p, x + w + j(r), y + j(r))
+			vg.path_line_to(p, x + w + j(r), y + h + j(r))
+			vg.path_line_to(p, x + j(r), y + h + j(r))
+			vg.path_close(p)
+		}
+		for i in 0 ..< 3 + rand.int_max(4, r) {
+			x, y := grid(r) + j(r), grid(r) + j(r)
+			if i == 0 {
+				vg.path_move_to(p, x, y)
+			} else {
+				vg.path_line_to(p, x, y)
+			}
+		}
+		vg.path_close(p)
 	}
 }
 
@@ -260,14 +283,9 @@ winding :: proc(c: ^cv.Contours, q: [2]f64, near: f64, stack: ^[dynamic][2]f64) 
 				w += cw
 				continue
 			}
-			// Close to this segment's box: measure the distance.
-			for k in 0 ..= 64 {
-				d := cv.cubic_at(g, f64(k) / 64) - q
-				if math.sqrt(d.x * d.x + d.y * d.y) < near {
-					on = true
-				}
-			}
-			cw, con := cv.curve_winding(g, q, 1e-9, stack)
+			// Close to its box: on when a cell of it no wider than near
+			// still holds q.
+			cw, con := cv.curve_winding(g, q, near, stack)
 			w += cw
 			on ||= con
 		}
