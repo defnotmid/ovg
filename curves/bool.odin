@@ -524,7 +524,8 @@ bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error
 		pass := (^Cut_Pass)(data)
 		pa, pb := &s.pieces[a], &s.pieces[b]
 		clear(&s.runs)
-		if !near_runs(pa, pb, pass.eps, pass.delta, meet_reach(pass.eps, pass.delta), &s.kernel, &s.runs, pass.budget) {
+		cell := shared_corner(s, a, b, pass.eps + pass.delta)
+		if !near_runs(pa, pb, pass.eps, pass.delta, meet_reach(pass.eps, pass.delta), &s.kernel, &s.runs, pass.budget, cell) {
 			return false
 		}
 		s.stats.pairs += 1
@@ -542,6 +543,76 @@ bool_cuts :: proc(s: ^Bool_Scratch, eps, delta: f64, budget: ^int) -> Bool_Error
 		return true
 	}, &pass)
 	return nil if ok else .Limit
+}
+
+// Where every pair of points of pieces a and b within r of each other lies
+// (s0, s1 of a, t0, t1 of b): near the end they share when they lie on
+// opposite sides of it in x or y. Each piece is monotone, so on that axis
+// every point of a is on one side of the shared point p (or level with it,
+// when its far end is) and every point of b on the other, and two points
+// within r both lie within r of p there. Only a curve's stretch is bounded:
+// the search never halves a line.
+@(private = "file")
+shared_corner :: proc(s: ^Bool_Scratch, a, b: u32, r: f64) -> (cell: [4]f64) {
+	cell = {0, 1, 0, 1}
+	na, nb := s.pnode[a], s.pnode[b]
+	ea, eb: int // the shared end of each (0 or 1)
+	switch {
+	case na[1] == nb[0] && na[0] != nb[1]:
+		ea, eb = 1, 0
+	case na[0] == nb[1] && na[1] != nb[0]:
+		ea, eb = 0, 1
+	case:
+		return
+	}
+	pa, pb := &s.pieces[a], &s.pieces[b]
+	p := pa.p[3 * ea]
+	for axis in 0 ..< 2 {
+		da, db := pa.p[3 - 3 * ea][axis] - p[axis], pb.p[3 - 3 * eb][axis] - p[axis]
+		if da * db > 0 || (da == 0 && db == 0) {
+			continue
+		}
+		if !pa.line {
+			narrow(cell[0:2], ea, near_end(pa, ea, axis, p[axis], r))
+		}
+		if !pb.line {
+			narrow(cell[2:4], eb, near_end(pb, eb, axis, p[axis], r))
+		}
+	}
+	return
+}
+
+// Narrows a piece's span [lo, hi] to the stretch between its end `end` and
+// t.
+@(private = "file")
+narrow :: proc "contextless" (span: []f64, end: int, t: f64) {
+	if end == 1 {
+		span[0] = max(span[0], t)
+	} else {
+		span[1] = min(span[1], t)
+	}
+}
+
+// Going from piece p's end `end` towards its other end, a parameter where
+// its coordinate on `axis` (monotone) lies between r and 2 r from c, by
+// bisection (or the other end, when it lies within 2 r): the stretch before
+// it holds every point within r of c there.
+@(private = "file")
+near_end :: proc(p: ^Piece, end, axis: int, c, r: f64) -> f64 {
+	near, far := f64(end), f64(1 - end)
+	d := abs(piece_at(p, far)[axis] - c)
+	for d > 2 * r {
+		m := (near + far) / 2
+		if m == near || m == far {
+			break
+		}
+		if dm := abs(piece_at(p, m)[axis] - c); dm <= r {
+			near = m
+		} else {
+			far, d = m, dm
+		}
+	}
+	return far
 }
 
 // Where a point run meets on one piece: an end it reaches, else its middle.

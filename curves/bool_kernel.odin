@@ -152,12 +152,13 @@ kernel_scratch_destroy :: proc(s: ^Kernel_Scratch) {
 // until both are flat, then compared as segments in closed form; a pair is
 // dropped only when its boxes are proved farther apart than tol, so no
 // crossing is missed whatever the rounding. A run is a point when all its
-// ends lie within `point` of its middle. `budget` counts cell pairs (false
-// when it runs out).
-near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int) -> bool {
+// ends lie within `point` of its middle. The search covers `root` (s0, s1
+// of a, t0, t1 of b): a caller that knows every near pair lies there skips
+// the rest. `budget` counts cell pairs (false when it runs out).
+near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out: ^[dynamic]Run, budget: ^int, root := [4]f64{0, 1, 0, 1}) -> bool {
 	clear(&s.stack)
 	clear(&s.leaves)
-	append(&s.stack, Cell_Pair{{0, 1, 0, 1}, piece_range(a, 0, 1), piece_range(b, 0, 1)})
+	append(&s.stack, Cell_Pair{root, piece_range(a, root[0], root[1]), piece_range(b, root[2], root[3])})
 	reach := tol + delta / 2
 	flat := tol / 16
 	for len(s.stack) > 0 {
@@ -178,8 +179,7 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 		if fa && fb {
 			u0, u1, v0, v1, near := segments_near(pa[0], pa[3], pb[0], pb[3], tol)
 			if near {
-				ds, dt := cell[1] - cell[0], cell[3] - cell[2]
-				append(&s.leaves, Run{cell[0] + u0 * ds, cell[0] + u1 * ds, cell[2] + v0 * dt, cell[2] + v1 * dt, false})
+				append(&s.leaves, Run{span_at(cell[0], cell[1], u0), span_at(cell[0], cell[1], u1), span_at(cell[2], cell[3], v0), span_at(cell[2], cell[3], v1), false})
 			}
 			continue
 		}
@@ -191,8 +191,7 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 		if (split_a && (ma <= cell[0] || ma >= cell[1])) || (!split_a && (mb <= cell[2] || mb >= cell[3])) {
 			u0, u1, v0, v1, near := segments_near(pa[0], pa[3], pb[0], pb[3], tol)
 			if near {
-				ds, dt := cell[1] - cell[0], cell[3] - cell[2]
-				append(&s.leaves, Run{cell[0] + u0 * ds, cell[0] + u1 * ds, cell[2] + v0 * dt, cell[2] + v1 * dt, false})
+				append(&s.leaves, Run{span_at(cell[0], cell[1], u0), span_at(cell[0], cell[1], u1), span_at(cell[2], cell[3], v0), span_at(cell[2], cell[3], v1), false})
 			}
 			continue
 		}
@@ -208,6 +207,12 @@ near_runs :: proc(a, b: ^Piece, tol, delta, point: f64, s: ^Kernel_Scratch, out:
 	}
 	merge_runs(a, b, point, s, out)
 	return true
+}
+
+// The parameter at u along [lo, hi], each end exactly.
+@(private = "file")
+span_at :: #force_inline proc "contextless" (lo, hi, u: f64) -> f64 {
+	return hi if u == 1 else lo + (hi - lo) * u
 }
 
 // The leaves' connected stretches as runs, each a point run when all its
