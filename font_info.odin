@@ -74,6 +74,14 @@ font_info_destroy :: proc(info: ^Font_Info, allocator := context.allocator) {
 	info^ = {}
 }
 
+// The characters the font maps to a glyph, ascending (cmap; font_glyph_index
+// gives each one's glyph): for a glyph browser. Free the slice.
+font_codepoints :: proc(f: ^Font, allocator := context.allocator) -> []rune {
+	runes := make([]rune, ft.codepoints(&f.face, nil), allocator)
+	ft.codepoints(&f.face, runes)
+	return runes
+}
+
 // Each glyph's name (post's, or the CFF charset's; "" when the font names
 // none, as CID-keyed CJK fonts), slices of the font data or static strings:
 // for a glyph browser. Free the slice; the strings are borrowed.

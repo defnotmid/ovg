@@ -20,6 +20,12 @@ read_all :: proc(f: ^Face, o: ^Outline) {
 	for cp := 0; cp < 0x30000; cp += 7 {
 		glyph_index(f, rune(cp))
 	}
+	runes := make([]rune, codepoints(f, nil))
+	defer delete(runes)
+	codepoints(f, runes)
+	names := make([]string, min(f.glyph_count, 4096))
+	defer delete(names)
+	glyph_names(f, names)
 }
 
 @(test)
@@ -35,6 +41,16 @@ test_vera :: proc(t: ^testing.T) {
 	testing.expect_value(t, o.verbs[0], Verb.Move)
 	testing.expect(t, glyph_empty(&f, glyph_index(&f, ' ')))
 	testing.expect(t, kern(&f, glyph_index(&f, 'A'), glyph_index(&f, 'V')) < 0)
+	// The characters it maps (fontTools: 256, from U+20 to U+FB02),
+	// ascending, each to a glyph.
+	runes := make([]rune, codepoints(&f, nil))
+	defer delete(runes)
+	testing.expect_value(t, codepoints(&f, runes), 256)
+	testing.expect_value(t, runes[0], ' ')
+	testing.expect_value(t, runes[255], 0xFB02)
+	for r, i in runes {
+		testing.expect(t, glyph_index(&f, r) != 0 && (i == 0 || r > runes[i - 1]))
+	}
 }
 
 @(test)

@@ -500,6 +500,11 @@ test_font_info :: proc(t: ^testing.T) {
 	testing.expect_value(t, names[0], ".notdef")
 	testing.expect_value(t, names[536], "zero")
 	testing.expect_value(t, names[546], "zero.zero")
+	runes := font_codepoints(&f)
+	defer delete(runes)
+	testing.expect_value(t, len(runes), 976)
+	testing.expect_value(t, runes[0], 13)
+	testing.expect_value(t, runes[975], 0xFEFF)
 
 	// The feature the info lists, set on a style.
 	s: Shape_Fx
@@ -517,4 +522,26 @@ test_font_info :: proc(t: ^testing.T) {
 	text_layout(&s.fonts, half[:], {}, &s.layout)
 	testing.expect_value(t, len(s.layout.glyphs), 1)
 	testing.expect_value(t, s.layout.glyphs[0].glyph, 568)
+}
+
+// The fallback face answers to its own family, so naming it (or setting
+// default_family to it) is not a missing family, and empty-family text
+// stays on it as faces are added.
+@(test)
+test_fallback_family :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	vera := s.fonts.fallback.family
+	f, found := font_collection_find(&s.fonts, vera, 400)
+	testing.expect(t, found && f == &s.fonts.fallback.font)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	f, found = font_collection_find(&s.fonts, "", 400)
+	testing.expect(t, found && f != &s.fonts.fallback.font)
+	s.fonts.default_family = vera
+	f, found = font_collection_find(&s.fonts, "", 400)
+	testing.expect(t, found && f == &s.fonts.fallback.font)
+	text_layout(&s.fonts, {{text = "a", style = {family = vera}}}, {}, &s.layout)
+	testing.expect_value(t, len(s.layout.missing), 0)
+	s.fonts.default_family = ""
 }

@@ -821,8 +821,11 @@ every part follows:
   PostScript names, glyph count and the GSUB / GPOS feature tags it has
   (what `features` can set); `font_glyph_names` gives every glyph's name
   (post formats 1 and 2, or the CFF charset; none for CID-keyed fonts),
-  slices of the font data. Checked against fontTools over 2,380 installed
-  faces: names, feature lists and glyph names all agree.
+  slices of the font data; `font_codepoints` gives the characters it maps
+  to a glyph, ascending (the cmap's ranges walked in order and clamped to
+  Unicode, so a malformed table costs at most one pass over them). Checked
+  against fontTools over 2,380 installed faces: names, feature lists, glyph
+  names and code points (5.6 million) all agree.
 
 ## Implementation notes
 

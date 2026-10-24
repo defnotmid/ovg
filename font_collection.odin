@@ -141,7 +141,8 @@ drop_shapers :: proc(c: ^Font_Collection) {
 // The best face for `family` (case-insensitive): matching style first, then
 // the nearest weight (0 means 400). An empty family is `default_family`
 // when the collection has it, else every face competes (earlier faces win
-// ties). `found = false` returns the fallback face.
+// ties). `found = false` returns the fallback face, which is also found by
+// its own family (so `default_family` may name it).
 font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic := false) -> (font: ^Font, found: bool) {
 	if family == "" && c.default_family != "" {
 		if f, ok := font_collection_find(c, c.default_family, weight, italic); ok {
@@ -165,7 +166,8 @@ font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, i
 		}
 	}
 	if best < 0 {
-		return &c.fallback.font, family == ""
+		// The fallback face answers to its own family too.
+		return &c.fallback.font, family == "" || strings.equal_fold(family, c.fallback.family)
 	}
 	return &c.faces[best].font, true
 }
