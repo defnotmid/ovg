@@ -7,13 +7,11 @@ import "core:mem"
 import "core:sync"
 import "core:unicode/utf8"
 
-import cv "curves"
 import ft "deps:oglyph/font"
 import sh "deps:oglyph/shape"
 
 // Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
-// outlines; glyphs draw as shapes, and atlas bitmaps are the shapes'
-// coverage. Shaped layout is `text_layout` over a Font_Collection
+// outlines; glyphs draw as shapes. Shaped layout is `text_layout` over a Font_Collection
 // (text_shape.odin); `layout_simple` places plain left-to-right text.
 
 Font :: struct {
@@ -42,13 +40,9 @@ Font :: struct {
 	// The variable font instance it draws, as a key: 0 for the default,
 	// else a hash of the face's coordinates.
 	instance:       u64,
-	// Which `font_load` made it: copies share it, separate loads (another
-	// face or instance of the same data too) don't, and none is reused; 0
-	// for a font font_load didn't make. Glyph atlases key glyphs by it.
-	serial:         u32,
 }
 
-// The next of the process's serials (fonts and font collections), from 1.
+// The next of the process's font collection serials, from 1.
 @(private)
 serial_next :: proc "contextless" () -> u32 {
 	return sync.atomic_add(&serials, 1) + 1
@@ -100,7 +94,6 @@ font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator, va
 	font.data = data
 	font.index = index
 	font.allocator = allocator
-	font.serial = serial_next()
 	font.colr = colr_open(&font)
 	if font.colr == nil {
 		font.bitmap_colour = face.tables[.sbix].at != 0 || face.tables[.CBDT].at != 0
@@ -294,213 +287,7 @@ layout_simple :: proc(f: ^Font, text: string, x, y, scale: f32, out: ^[dynamic]P
 	return pen
 }
 
-// ---- glyph atlas ------------------------------------------------------------------
-
-Cached_Glyph :: struct {
-	atlas_x, atlas_y: u32,
-	width, height:    u32,
-	// Offset from the pen position to the bitmap's top-left.
-	bearing_x:        i32,
-	bearing_y:        i32,
-	// `false` for glyphs without pixels (spaces).
-	visible:          bool,
-}
-
-// A glyph at one scale in one font (its `serial`, which no other font
-// has), so fonts from anywhere (a Font_Collection, a `font_load` of their
-// own) share an atlas.
-Glyph_Key :: struct {
-	font:       u32,
-	glyph:      Glyph_Index,
-	scale_bits: u32,
-}
-
-glyph_key :: proc "contextless" (f: ^Font, g: Glyph_Index, scale: f32) -> Glyph_Key {
-	return {f.serial, g, transmute(u32)scale}
-}
-
-// Rasterized glyph coverage packed into one Gray8 bitmap, `pixels` (row-major,
-// `width` bytes a row), so a run draws in a single call. The atlas is CPU
-// only; whoever draws from it uploads the rows `glyph_atlas_take_dirty`
-// reports into its own texture once per frame. Made with a canvas, it keeps
-// that canvas's copy in `image_id`, which `fill_glyph_run` updates.
-Glyph_Atlas :: struct {
-	packer:             Atlas,
-	width:              u32,
-	height:             u32,
-	pixels:             []u8,
-	cache:              map[Glyph_Key]Cached_Glyph,
-	// Rows [dirty_y0, dirty_y1) changed since the last take; empty when equal.
-	dirty_y0, dirty_y1: u32,
-	// The canvas image mirroring `pixels`; zero for a canvas-free atlas.
-	image_id:           Image_Id,
-}
-
-// `c` is the canvas `fill_glyph_run` draws the atlas on, or nil for an atlas
-// whose owner uploads `pixels` itself.
-glyph_atlas_init :: proc(a: ^Glyph_Atlas, width, height: u32, c: ^Canvas = nil, allocator := context.allocator) -> Error {
-	a^ = {}
-	if c != nil {
-		a.image_id = create_image_empty(c, width, height, .Gray8) or_return
-	}
-	a.pixels = make([]u8, int(width) * int(height), allocator)
-	atlas_init(&a.packer, width, height, allocator)
-	a.width = width
-	a.height = height
-	a.cache = make(map[Glyph_Key]Cached_Glyph, allocator)
-	return nil
-}
-
-// `c` is the canvas the atlas was made with, if any.
-glyph_atlas_destroy :: proc(a: ^Glyph_Atlas, c: ^Canvas = nil) {
-	delete(a.cache)
-	delete(a.pixels)
-	atlas_destroy(&a.packer)
-	if c != nil && image_id_valid(a.image_id) {
-		delete_image(c, a.image_id)
-	}
-	a^ = {}
-}
-
-// Drops every cached glyph and clears the bitmap (all rows dirty).
-glyph_atlas_reset :: proc(a: ^Glyph_Atlas) {
-	clear(&a.cache)
-	atlas_reset(&a.packer, a.width, a.height)
-	mem.zero_slice(a.pixels)
-	a.dirty_y0, a.dirty_y1 = 0, a.height
-}
-
-// Cached glyph for `(font, glyph, scale)`, rasterizing it into `pixels` on
-// first use.
-glyph_atlas_get :: proc(a: ^Glyph_Atlas, f: ^Font, g: Glyph_Index, scale: f32) -> (cached: Cached_Glyph, err: Error) {
-	key := glyph_key(f, g, scale)
-	if hit, ok := a.cache[key]; ok {
-		return hit, nil
-	}
-	// The pixels the glyph's box touches (y down).
-	x0, y0, x1, y1: i32
-	if bx0, by0, bx1, by1, ok := glyph_box_at_instance(f, g); ok {
-		x0, y0 = i32(math.floor(f32(bx0) * scale)), i32(math.floor(f32(-by1) * scale))
-		x1, y1 = i32(math.ceil(f32(bx1) * scale)), i32(math.ceil(f32(-by0) * scale))
-	}
-	w, h := u32(max(x1 - x0, 0)), u32(max(y1 - y0, 0))
-	if w == 0 || h == 0 {
-		a.cache[key] = {}
-		return {}, nil
-	}
-	// One pixel of padding, never written, keeps bilinear sampling from
-	// bleeding neighbours.
-	ax, ay, ok := atlas_add_rect(&a.packer, w + 1, h + 1)
-	if !ok {
-		return {}, .Atlas_Full
-	}
-	if s := font_glyph_shape(f, g); s != nil {
-		// Each pixel's exact coverage: its box in the shape's units.
-		unit := 1 / (scale * s.extent)
-		for j in 0 ..< h {
-			row := a.pixels[(ay + j) * a.width + ax:][:w]
-			py := (f32(y0) + f32(j) + 0.5) / scale
-			for &px, i in row {
-				q := (Vec2{(f32(x0) + f32(i) + 0.5) / scale, py} - s.origin) / s.extent
-				px = u8(cv.coverage(s.data, q, {unit, unit}, false) * 255 + 0.5)
-			}
-		}
-	}
-	if a.dirty_y0 == a.dirty_y1 {
-		a.dirty_y0, a.dirty_y1 = ay, ay + h
-	} else {
-		a.dirty_y0, a.dirty_y1 = min(a.dirty_y0, ay), max(a.dirty_y1, ay + h)
-	}
-	cached = Cached_Glyph{ax, ay, w, h, x0, y0, true}
-	a.cache[key] = cached
-	return cached, nil
-}
-
-// The rows of `pixels` changed since the last take, [y0, y1), and marks them
-// clean: upload `pixels[y0 * width:y1 * width]` at (0, y0). `ok` is false
-// when nothing changed.
-glyph_atlas_take_dirty :: proc "contextless" (a: ^Glyph_Atlas) -> (y0, y1: u32, ok: bool) {
-	y0, y1 = a.dirty_y0, a.dirty_y1
-	a.dirty_y0, a.dirty_y1 = 0, 0
-	return y0, y1, y0 < y1
-}
-
-// Copies the changed rows into the atlas's canvas image.
-glyph_atlas_upload :: proc(a: ^Glyph_Atlas, c: ^Canvas) -> Error {
-	y0, y1, dirty := glyph_atlas_take_dirty(a)
-	if !dirty {
-		return nil
-	}
-	return update_image(c, a.image_id, image_source_gray(a.pixels[y0 * a.width:y1 * a.width], a.width, y1 - y0), 0, y0)
-}
-
 // ---- drawing ------------------------------------------------------------------------
-
-// Draws glyph bitmaps from `atlas` as textured quads tinted by the paint's
-// color; the atlas must have been made with `c`. The current transform moves
-// the quads but the bitmaps are baked at `pixel_scale`, so prefer
-// `fill_glyph_outlines` for scaled or animated text.
-fill_glyph_run :: proc(c: ^Canvas, f: ^Font, atlas: ^Glyph_Atlas, glyphs: []Positioned_Glyph, pixel_scale: f32, paint: Paint) -> Error {
-	if !image_id_valid(atlas.image_id) {
-		return .Unsupported_Operation
-	}
-	st := state(c)
-	xform := st.transform
-	aw, ah := f32(atlas.width), f32(atlas.height)
-	flavor := paint.flavor
-	flavor_mul_alpha(&flavor, st.alpha)
-	glyph_tex := Glyph_Texture{.Alpha_Mask, atlas.image_id}
-	params := params_from_paint(&c.images, paint_space(paint, xform), &flavor, glyph_tex, st.scissor, 1, c.fringe_width, -1)
-	params.spread = f32(paint.spread)
-	// The paint row the quads name; added once there is a quad.
-	paint_row := u32(len(c.paints))
-	start := len(c.verts)
-	for g in glyphs {
-		cg, err := glyph_atlas_get(atlas, f, g.glyph, pixel_scale)
-		if err != nil {
-			resize(&c.verts, start)
-			glyph_atlas_upload(atlas, c)
-			return err
-		}
-		if !cg.visible {
-			continue
-		}
-		x0 := g.x + f32(cg.bearing_x)
-		y0 := g.y + f32(cg.bearing_y)
-		x1 := x0 + f32(cg.width)
-		y1 := y0 + f32(cg.height)
-		u0 := f32(cg.atlas_x) / aw
-		v0 := f32(cg.atlas_y) / ah
-		u1 := f32(cg.atlas_x + cg.width) / aw
-		v1 := f32(cg.atlas_y + cg.height) / ah
-		p00 := transform_point(xform, x0, y0)
-		p10 := transform_point(xform, x1, y0)
-		p11 := transform_point(xform, x1, y1)
-		p01 := transform_point(xform, x0, y1)
-		append(
-			&c.verts,
-			vertex(p00.x, p00.y, u0, v0, paint_row),
-			vertex(p10.x, p10.y, u1, v0, paint_row),
-			vertex(p11.x, p11.y, u1, v1, paint_row),
-			vertex(p00.x, p00.y, u0, v0, paint_row),
-			vertex(p11.x, p11.y, u1, v1, paint_row),
-			vertex(p01.x, p01.y, u0, v1, paint_row),
-		)
-	}
-	glyph_atlas_upload(atlas, c) or_return
-	if len(c.verts) == start {
-		return nil
-	}
-	add_paint(c, params)
-	cmd := Command {
-		glyph_texture       = glyph_tex,
-		composite_operation = st.composite_operation,
-		scissor_rect        = current_scissor_rect(c),
-	}
-	attach_paint_image(c, &cmd, &flavor)
-	push_draw(c, cmd, paint_row, start)
-	return nil
-}
 
 // Fills the glyph outlines: exact under any transform and any paint.
 // `scale` converts font units to pixels. Each glyph is the font's shape

@@ -643,8 +643,7 @@ test_fallback_family :: proc(t: ^testing.T) {
 }
 
 // A variable font drawn at an instance: advances, glyph boxes and layout
-// follow it, the atlas keeps instances of one face apart, and a collection
-// gives the face the instance's weight.
+// follow it, and a collection gives the face the instance's weight.
 @(test)
 test_font_variation :: proc(t: ^testing.T) {
 	data, err := os.read_entire_file("/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf", context.allocator)
@@ -673,7 +672,6 @@ test_font_variation :: proc(t: ^testing.T) {
 	for p in o.points {
 		testing.expect(t, p.x >= f32(bx0) && p.x <= f32(bx1) && p.y >= f32(by0) && p.y <= f32(by1))
 	}
-	testing.expect(t, glyph_key(&plain, g, 1) != glyph_key(&bold, g, 1))
 
 	fonts: Font_Collection
 	font_collection_init(&fonts)

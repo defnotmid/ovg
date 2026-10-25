@@ -33,7 +33,7 @@ Result :: struct {
 	temp_kib:    f64,
 	commands:    int,
 	command_kib: f64,
-	verts:       int,
+	shapes:      int,
 	image_ops:   int, // image allocations, uploads and frees handed to the backend
 }
 
@@ -91,14 +91,14 @@ main :: proc() {
 	}
 
 	fmt.printfln("%d warm frames each (recording canvas, no rasterization)\n", b.frames)
-	fmt.printfln("%-14s %9s %9s %9s %9s %9s %9s %9s %9s %8s %8s", "workload", "parse ms", "frame ms", "allocs", "KiB", "temp", "temp KiB", "commands", "cmd KiB", "verts", "img ops")
+	fmt.printfln("%-14s %9s %9s %9s %9s %9s %9s %9s %9s %8s %8s", "workload", "parse ms", "frame ms", "allocs", "KiB", "temp", "temp KiB", "commands", "cmd KiB", "shapes", "img ops")
 	// Odin pads numbers given a width with zeros: format them first.
 	f :: proc(v: f64, decimals := 1) -> string {
 		return fmt.tprintf("%.*f", decimals, v)
 	}
 	for r in b.results {
 		parse := f(r.parse_ms, 2) if r.parse_ms > 0 else "-"
-		fmt.printfln("%-14s %9s %9s %9s %9s %9s %9s %9s %9s %8s %8s", r.name, parse, f(r.frame_ms, 3), f(r.allocs), f(r.alloc_kib), f(r.temp_allocs), f(r.temp_kib), fmt.tprint(r.commands), f(r.command_kib), fmt.tprint(r.verts), fmt.tprint(r.image_ops))
+		fmt.printfln("%-14s %9s %9s %9s %9s %9s %9s %9s %9s %8s %8s", r.name, parse, f(r.frame_ms, 3), f(r.allocs), f(r.alloc_kib), f(r.temp_allocs), f(r.temp_kib), fmt.tprint(r.commands), f(r.command_kib), fmt.tprint(r.shapes), fmt.tprint(r.image_ops))
 	}
 	fmt.printfln("\nallocs / KiB: heap allocations per warm frame; temp: context.temp_allocator's; img ops: the last frame's image work for the backend (uploads). Command size: %d bytes.", size_of(vg.Command))
 }
@@ -145,7 +145,7 @@ run :: proc(b: ^Bench, w: ^Workload) {
 	r.temp_kib = f64(temp.total_memory_allocated) / n / 1024
 	r.commands = len(b.frame.commands)
 	r.command_kib = f64(len(b.frame.commands) * size_of(vg.Command)) / 1024
-	r.verts = len(b.frame.verts)
+	r.shapes = len(b.frame.shapes)
 	r.image_ops = len(b.frame.image_ops)
 	append(&b.results, r)
 }

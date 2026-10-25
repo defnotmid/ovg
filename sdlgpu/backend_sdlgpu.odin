@@ -108,7 +108,7 @@ SDL_Backend :: struct {
 	shader_format:    sdl.GPUShaderFormat,
 	// The planned frame (render.odin): the quads and paints the backend adds
 	// after the frame's, and the rows that draw them all.
-	verts:            [dynamic]vg.Vertex,
+	verts:            [dynamic]Vertex,
 	paints:           [dynamic]Paint,
 	rows:             [dynamic]Row,
 	// Each frame shape instance's shape, as a word offset in `shapes`, and
@@ -143,7 +143,7 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		device    = device,
 		scratch   = make([dynamic]Cached_Texture, allocator),
 		pipelines = make(map[Pipeline_Key]^sdl.GPUGraphicsPipeline, allocator),
-		verts     = make([dynamic]vg.Vertex, allocator),
+		verts     = make([dynamic]Vertex, allocator),
 		paints    = make([dynamic]Paint, allocator),
 		rows      = make([dynamic]Row, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
@@ -484,7 +484,7 @@ sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image,
 	}
 	img.flags = info.flags
 	// New textures are undefined (garbage on Metal), and partly updated
-	// images such as the glyph atlas sample their untouched texels.
+	// images sample their untouched texels.
 	if .COLOR_TARGET in usage {
 		cmd := sdl.AcquireGPUCommandBuffer(b.device)
 		if cmd == nil {

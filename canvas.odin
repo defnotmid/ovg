@@ -17,7 +17,6 @@ Canvas :: struct {
 	current_render_origin: [2]i32,
 	states:                [dynamic]State,
 	commands:              [dynamic]Command,
-	verts:                 [dynamic]Vertex,
 	paints:                [dynamic]Params,
 	// Uniform blocks of custom program runs (program.odin).
 	bytes:                 [dynamic]u8,
@@ -48,7 +47,6 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		backend         = backend,
 		states          = make([dynamic]State, allocator),
 		commands        = make([dynamic]Command, allocator),
-		verts           = make([dynamic]Vertex, allocator),
 		paints          = make([dynamic]Params, allocator),
 		shapes          = make([dynamic]Shape_Instance, allocator),
 		shape_words     = make([dynamic]u32, allocator),
@@ -80,7 +78,6 @@ canvas_init_recording :: proc(c: ^Canvas, allocator := context.allocator) {
 canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.states)
 	delete(c.commands)
-	delete(c.verts)
 	delete(c.paints)
 	delete(c.bytes)
 	delete(c.filters)
@@ -508,7 +505,7 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 		scissor_rect        = current_scissor_rect(c),
 	}
 	attach_paint_image(c, &cmd, &flavor)
-	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, {}, st.scissor, c.fringe_width, c.fringe_width, -1)
+	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
 	params.spread = f32(paint.spread)
 	params.smooth_edge = paint.feather > 0
 	return cmd, add_paint(c, params)
@@ -550,7 +547,7 @@ push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 =
 	at := u32(len(c.shapes) - 1)
 	if n := len(c.commands); n > 0 {
 		last := &c.commands[n - 1]
-		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.glyph_texture == base.glyph_texture && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
 			d.instances.count += 1
 			return
 		}
@@ -600,19 +597,6 @@ solid_paint :: proc(c: ^Canvas, color: [4]f32) -> u32 {
 	return add_paint(c, params)
 }
 
-// A draw of the vertices from `start` to the end of the frame's; none when
-// there are none.
-@(private)
-push_draw :: proc(c: ^Canvas, base: Command, paint: u32, start: int) {
-	if len(c.verts) == start {
-		return
-	}
-	cmd := base
-	cmd.type = Cmd_Draw{paint}
-	cmd.verts = {u32(start), u32(len(c.verts) - start)}
-	append(&c.commands, cmd)
-}
-
 @(private)
 attach_paint_image :: proc(c: ^Canvas, cmd: ^Command, flavor: ^Paint_Flavor) {
 	if img, ok := flavor.(Paint_Image); ok {
@@ -634,7 +618,6 @@ attach_paint_image :: proc(c: ^Canvas, cmd: ^Command, flavor: ^Paint_Flavor) {
 // can be found (layers size themselves from it) or dropped.
 Canvas_Mark :: struct {
 	commands: int,
-	verts:    int,
 	paints:   int,
 	bytes:    int,
 	filters:  int,
@@ -644,7 +627,7 @@ Canvas_Mark :: struct {
 }
 
 canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
-	return {len(c.commands), len(c.verts), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes), len(c.shape_words)}
+	return {len(c.commands), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes), len(c.shape_words)}
 }
 
 // Drops everything recorded since `m`. The render target must be the one
@@ -652,7 +635,6 @@ canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
 canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	// Shrinking keeps the capacity.
 	resize(&c.commands, m.commands)
-	resize(&c.verts, m.verts)
 	resize(&c.paints, m.paints)
 	resize(&c.bytes, m.bytes)
 	resize(&c.filters, m.filters)
@@ -672,7 +654,6 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	clear(&c.bytes)
 	clear(&c.filters)
 	clear(&c.runs)
-	clear(&c.verts)
 	clear(&c.paints)
 	clear(&c.shapes)
 	clear(&c.shape_words)
@@ -682,7 +663,7 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 // The frame recorded so far, as `flush` hands it over.
 @(private)
 canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
-	return {verts = c.verts[:], paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:], shape_words = c.shape_words[:]}
+	return {paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:], shape_words = c.shape_words[:]}
 }
 
 @(private)
@@ -700,7 +681,6 @@ Recorded_Frame :: struct {
 	width:       u32,
 	height:      u32,
 	dpi:         f32,
-	verts:       [dynamic]Vertex,
 	paints:      [dynamic]Params,
 	commands:    [dynamic]Command,
 	bytes:       [dynamic]u8,
@@ -714,7 +694,6 @@ Recorded_Frame :: struct {
 }
 
 recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
-	delete(f.verts)
 	delete(f.paints)
 	delete(f.commands)
 	delete(f.bytes)
@@ -743,7 +722,6 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 		a^, b^ = b^, a^
 		clear(a)
 	}
-	swap_clear(&c.verts, &out.verts)
 	swap_clear(&c.paints, &out.paints)
 	swap_clear(&c.commands, &out.commands)
 	swap_clear(&c.bytes, &out.bytes)
@@ -774,7 +752,6 @@ params_from_paint :: proc(
 	images: ^Image_Store,
 	global_transform: Transform2D,
 	flavor: ^Paint_Flavor,
-	glyph_texture: Glyph_Texture,
 	scissor: Scissor,
 	stroke_width: f32,
 	fringe_width: f32,
@@ -791,7 +768,6 @@ params_from_paint :: proc(
 
 	p.stroke_mult = (stroke_width * 0.5 + fringe_width * 0.5) / fringe_width
 	p.stroke_thr = stroke_thr
-	p.glyph_texture_type = u8(glyph_texture.kind)
 
 	inv := TRANSFORM_IDENTITY
 	switch f in flavor {

@@ -7,8 +7,8 @@ import vg ".."
 
 // A frame is planned, uploaded, then recorded. Planning turns the commands
 // into rows (one GPU operation each), adding the quads and paints of
-// clears, filters and programs after the frame's. The upload writes each
-// stream once, in place in its mapped transfer buffer: the canvas's
+// clears, filters and programs after the frame's paints. The upload writes
+// each stream once, in place in its mapped transfer buffer: the quads'
 // vertices (each naming its paint), the packed paints and the shape
 // instances; shapes new to the store go up first. Recording merges neighbouring rows that
 // share a pipeline, textures, scissor and target into one draw call. Shape
@@ -28,8 +28,25 @@ Pipeline_Key :: struct {
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
 Paint :: [14][4]f32
 
+// A quad's vertex as the triangle pipeline takes it: the position, a (u, v)
+// pair in 0..1 as 16-bit fractions, and the row of the frame's paints it is
+// drawn with.
+Vertex :: struct {
+	x, y:  f32,
+	u, v:  u16,
+	paint: u32,
+}
+
+@(private = "file")
+vertex :: #force_inline proc "contextless" (x, y, u, v: f32, paint: u32) -> Vertex {
+	unorm16 :: #force_inline proc "contextless" (f: f32) -> u16 {
+		return u16(clamp(f, 0, 1) * 65535 + 0.5)
+	}
+	return {x, y, unorm16(u), unorm16(v), paint}
+}
+
 Row_Kind :: enum u8 {
-	// Triangles from `verts` into `target`.
+	// The planner's quads `verts` (clears, filters) into `target`.
 	Draw,
 	// Shape instances `verts` (a range of the frame's shapes), one quad
 	// each.
@@ -51,8 +68,7 @@ Row :: struct {
 	key:      Pipeline_Key,
 	textures: [2]sdl.GPUTextureSamplerBinding,
 	scissor:  sdl.Rect,
-	// Vertices (the canvas's, then the planner's own quads after them), or
-	// for Shapes instances.
+	// The planner's quad vertices, or for Shapes instances.
 	verts:    vg.Range,
 	// Filter passes run in a render pass of their own.
 	own_pass: bool,
@@ -99,12 +115,12 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	if !plan_frame(b, images, frame, screen) {
 		return
 	}
-	vert_count := len(frame.verts) + len(b.verts)
+	vert_count := len(b.verts)
 	paint_count := len(frame.paints) + len(b.paints)
 	instance_count := len(frame.shapes) + len(b.groups)
 	// A frame whose buffers the device can't provide (out of memory, a lost
 	// device) is dropped, not drawn from nil buffers.
-	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(vg.Vertex), {.VERTEX}) ||
+	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(Vertex), {.VERTEX}) ||
 	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) ||
 	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) {
 		return
@@ -132,10 +148,9 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	}
 	uploaded := true
 	if vert_count > 0 {
-		if verts := ([^]vg.Vertex)(stream_map(b, &b.vertex_stream, vert_count)); verts != nil {
-			copy(verts[:len(frame.verts)], frame.verts)
-			copy(verts[len(frame.verts):vert_count], b.verts[:])
-			stream_commit(b, &b.vertex_stream, copy_pass, vert_count * size_of(vg.Vertex))
+		if verts := ([^]Vertex)(stream_map(b, &b.vertex_stream, vert_count)); verts != nil {
+			copy(verts[:vert_count], b.verts[:])
+			stream_commit(b, &b.vertex_stream, copy_pass, vert_count * size_of(Vertex))
 		} else {
 			uploaded = false
 		}
@@ -252,11 +267,10 @@ Planner :: struct {
 	origin: [2]i32,
 }
 
-// Where the planner's next quad starts in the vertex buffer: its quads
-// follow the frame's vertices.
+// Where the planner's next quad starts in the vertex buffer.
 @(private = "file")
 extra_base :: proc(p: ^Planner) -> u32 {
-	return u32(len(p.frame.verts) + len(p.b.verts))
+	return u32(len(p.b.verts))
 }
 
 // False when the frame's shapes don't fit the store.
@@ -287,12 +301,6 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			}
 		case vg.Cmd_Clear_Rect:
 			plan_clear(&p, cmd, c)
-		case vg.Cmd_Draw:
-			row := draw_row(&p, cmd)
-			row.verts = cmd.verts
-			if row.verts.count > 0 {
-				append(&b.rows, row)
-			}
 		case vg.Cmd_Draw_Shapes:
 			if c.instances.count == 0 {
 				continue
@@ -349,10 +357,6 @@ add_paint :: proc(p: ^Planner, paint: Paint) -> u32 {
 // vertices.
 @(private = "file")
 draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
-	glyph: ^Image
-	if cmd.glyph_texture.kind != .None {
-		glyph = lookup(p, cmd.glyph_texture.image)
-	}
 	scissor := sdl.Rect{0, 0, i32(p.target.width), i32(p.target.height)}
 	if sr, has := cmd.scissor_rect.?; has {
 		scissor = target_rect(p.target, p.origin, sr)
@@ -362,7 +366,7 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 		target = p.target,
 		origin = p.origin,
 		key = {blend = cmd.composite_operation, format = p.target.format},
-		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, glyph)},
+		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, nil)},
 		scissor = scissor,
 	}
 }
@@ -370,8 +374,8 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 // Two triangles over (0, 0)..(w, h), texture coordinates 0..1.
 @(private = "file")
 emit_quad :: proc(p: ^Planner, w, h: f32, paint: u32) {
-	append(&p.b.verts, vg.vertex(0, 0, 0, 0, paint), vg.vertex(w, 0, 1, 0, paint), vg.vertex(w, h, 1, 1, paint))
-	append(&p.b.verts, vg.vertex(0, 0, 0, 0, paint), vg.vertex(w, h, 1, 1, paint), vg.vertex(0, h, 0, 1, paint))
+	append(&p.b.verts, vertex(0, 0, 0, 0, paint), vertex(w, 0, 1, 0, paint), vertex(w, h, 1, 1, paint))
+	append(&p.b.verts, vertex(0, 0, 0, 0, paint), vertex(w, h, 1, 1, paint), vertex(0, h, 0, 1, paint))
 }
 
 // `rect` (drawing coordinates) in target pixels, clipped to the target.
@@ -419,8 +423,8 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 	append(&p.b.rows, row)
 	x0, y0 := f32(c.x), f32(c.y)
 	x1, y1 := x0 + f32(c.w), y0 + f32(c.h)
-	append(&p.b.verts, vg.vertex(x0, y0, 0.5, 1, paint), vg.vertex(x1, y0, 0.5, 1, paint), vg.vertex(x1, y1, 0.5, 1, paint))
-	append(&p.b.verts, vg.vertex(x0, y0, 0.5, 1, paint), vg.vertex(x1, y1, 0.5, 1, paint), vg.vertex(x0, y1, 0.5, 1, paint))
+	append(&p.b.verts, vertex(x0, y0, 0.5, 1, paint), vertex(x1, y0, 0.5, 1, paint), vertex(x1, y1, 0.5, 1, paint))
+	append(&p.b.verts, vertex(x0, y0, 0.5, 1, paint), vertex(x1, y1, 0.5, 1, paint), vertex(x0, y1, 0.5, 1, paint))
 }
 
 // Rows drawing `instances` with `base`'s state: one per stretch of
@@ -953,12 +957,12 @@ program_pipeline :: proc(b: ^SDL_Backend, p: ^Program, format: sdl.GPUTextureFor
 	}
 	buffer := sdl.GPUVertexBufferDescription {
 		slot       = 0,
-		pitch      = size_of(vg.Vertex),
+		pitch      = size_of(Vertex),
 		input_rate = .VERTEX,
 	}
 	attrs := [2]sdl.GPUVertexAttribute {
-		{location = 0, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(vg.Vertex, x))},
-		{location = 1, buffer_slot = 0, format = .USHORT2_NORM, offset = u32(offset_of(vg.Vertex, u))},
+		{location = 0, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(Vertex, x))},
+		{location = 1, buffer_slot = 0, format = .USHORT2_NORM, offset = u32(offset_of(Vertex, u))},
 	}
 	color := sdl.GPUColorTargetDescription {
 		format = format,
@@ -1090,13 +1094,13 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 	}
 	buffer := sdl.GPUVertexBufferDescription {
 		slot       = 0,
-		pitch      = size_of(vg.Vertex),
+		pitch      = size_of(Vertex),
 		input_rate = .VERTEX,
 	}
 	attrs := [3]sdl.GPUVertexAttribute {
-		{location = 0, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(vg.Vertex, x))},
-		{location = 1, buffer_slot = 0, format = .USHORT2_NORM, offset = u32(offset_of(vg.Vertex, u))},
-		{location = 2, buffer_slot = 0, format = .UINT, offset = u32(offset_of(vg.Vertex, paint))},
+		{location = 0, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(Vertex, x))},
+		{location = 1, buffer_slot = 0, format = .USHORT2_NORM, offset = u32(offset_of(Vertex, u))},
+		{location = 2, buffer_slot = 0, format = .UINT, offset = u32(offset_of(Vertex, paint))},
 	}
 	s := key.blend
 	color := sdl.GPUColorTargetDescription {

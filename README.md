@@ -127,8 +127,8 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   made into it (rare, history-dependent pixel errors on RADV).
 - Redundant state is skipped within a render pass: uniforms, samplers and
   scissor are set only when they change.
-- Pipelines are cached by blend factors, target format and kind (triangles,
-  shapes, box shapes). There is no depth or stencil buffer. Blur
+- Pipelines are cached by blend factors, target format and kind (quads,
+  shapes, box shapes, groups). There is no depth or stencil buffer. Blur
   intermediates are kept per image shape and released after 30 frames
   unused.
 - RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
@@ -137,8 +137,8 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   `tools/sdlgpu_parity` pass). The Windows path compiles
   (`odin check -target:windows_amd64`) but is untested.
 - New images are cleared to transparent: SDL_GPU leaves texture contents
-  undefined (garbage on Metal), and the glyph atlas samples texels it never
-  wrote (its padding).
+  undefined (garbage on Metal), and a partly updated image samples texels
+  it never wrote.
   D3D12 needs DXIL blobs, which the build doesn't produce on Linux (slangc's
   dxc fails on Arch), so Windows runs on Vulkan.
 
@@ -652,9 +652,9 @@ every part follows:
   table rows (`svg_props`, `LOTTIE_EFFECTS`, `LIMIT_INFO`).
 
 - **`Canvas` records, backends draw.** Drawing calls record `Command`s:
-  shape instances whose words go into the frame (each shape once), and
-  triangles only for glyphs from an atlas and the backend's own quads;
-  `flush` hands a `Frame` to the backend. A backend is a `Backend` value
+  shape instances whose words go into the frame (each shape once), with
+  their paint rows (clears, filters and programs are the backend's own
+  quads); `flush` hands a `Frame` to the backend. A backend is a `Backend` value
   (data pointer + procedures).
 - **One way to draw a path: its shape.** A fill or a stroke is a `Shape`
   (shape.odin) whose pixels take their exact area coverage. What makes a
@@ -739,15 +739,8 @@ every part follows:
   another blend fills as one, a group of its glyphs in white tinted by the
   paint (see Layers), so overlapping glyphs never darken where they meet. Feathered and aliased paints fill the outlines as one
   shape (a feather widens each pixel's footprint; aliased takes each pixel
-  center's winding). `fill_glyph_run` draws cached coverage bitmaps from a `Glyph_Atlas`
-  (baked at one scale). Both take glyph ids, so shaped runs draw as is.
-  The atlas itself needs no canvas: `glyph_atlas_get` writes each pixel's
-  exact coverage of the glyph's shape into its Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
-  the last take, so a renderer of its own can upload them into its own
-  texture once a frame (an atlas made with a canvas keeps that canvas's
-  image, which `fill_glyph_run` updates). Glyphs are keyed by the font's
-  serial (one per `font_load`, kept by copies and never reused), so fonts
-  from anywhere share one atlas and freed fonts leave no stale entries.
+  center's winding). Text has this one path, exact at any position,
+  transform and size: there is no glyph atlas.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set;
@@ -802,8 +795,8 @@ every part follows:
   by weight; `Text_Style.variations` (CSS font-variation-settings) picks
   the face whose instance those settings select, so instances apart in any
   axis (wdth, opsz) are told apart. A font is one instance for its life
-  (load another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it,
-  and glyph atlases keep instances of one face apart (oglyph/font lists a
+  (load another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it
+  (oglyph/font lists a
   face's axes and named instances, and `ft.name_string` names them:
   "Weight", "Bold"). Not handled: explicit bidi controls
   (U+202A..U+202E, U+2066..U+2069), a right-to-left paragraph direction,
@@ -847,8 +840,7 @@ every part follows:
 - The software backend matches the GPU shader: the same shape coverage,
   one gradient formula for linear/box/radial (the radial path was off by
   half a feather), no double `Flip_Y`, GPU texel conversions, rounding to 8
-  bits, rotated-scissor mask, top-left rule for atlas glyph quads, the GPU
-  blur coefficients.
+  bits, rotated-scissor mask, the GPU blur coefficients.
 - `clear_rect` clears only its rectangle (∩ scissor) with premultiplied color.
 - Second blur pass reads the intermediate as premultiplied (straight-alpha
   sources were premultiplied twice).

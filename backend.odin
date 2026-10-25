@@ -5,8 +5,8 @@ import "core:mem"
 // Renderer contract and the types that cross the canvas -> backend boundary.
 //
 // A backend is a `Backend` value: a data pointer plus procedures. The canvas
-// records `Command`s and `Vertex`es for a frame and hands them to `render` on
-// `flush`. Images live in the canvas-owned `Image_Store`, which calls back
+// records a frame's `Command`s, paints and shape instances and hands them to
+// `render` on `flush`. Images live in the canvas-owned `Image_Store`, which calls back
 // into the backend to allocate, upload and free them.
 
 Error :: enum u8 {
@@ -24,32 +24,6 @@ Error :: enum u8 {
 	Image_Update_With_Different_Format,
 	Unsupported_Format,
 	Unsupported_Operation,
-	Atlas_Full,
-}
-
-// One vertex of a frame's triangles, as a GPU takes it: the position, a
-// (u, v) pair in 0..1 stored as 16-bit fractions (`unorm16`), and the row of
-// `Frame.paints` it is drawn with, so draws with different paints can share
-// one draw call. For paths `u` runs across a stroke and `v` is edge
-// coverage; for glyphs (u, v) is the atlas coordinate.
-Vertex :: struct {
-	x, y:  f32,
-	u, v:  u16,
-	paint: u32,
-}
-
-vertex :: #force_inline proc "contextless" (x, y, u, v: f32, paint: u32) -> Vertex {
-	return {x, y, unorm16(u), unorm16(v), paint}
-}
-
-// `f` in 0..1 as a 16-bit fraction (65535 is 1).
-unorm16 :: #force_inline proc "contextless" (f: f32) -> u16 {
-	return u16(clamp(f, 0, 1) * 65535 + 0.5)
-}
-
-// A vertex's (u, v) as 0..1.
-vertex_uv :: #force_inline proc "contextless" (v: Vertex) -> [2]f32 {
-	return {f32(v.u) / 65535, f32(v.v) / 65535}
 }
 
 // `[start, start + count)` into one of the frame's arrays; `count == 0`
@@ -99,8 +73,6 @@ Params :: struct {
 	stroke_thr:                  f32,
 	tex_type:                    f32,
 	shader_type:                 Shader_Type,
-	// 0 = none, 1 = alpha mask, 2 = color texture.
-	glyph_texture_type:          u8,
 	image_blur_filter_direction: [2]f32,
 	// Blur taps each side of the center (see `blur_pass_coefficients`).
 	image_blur_filter_taps:      f32,
@@ -136,7 +108,7 @@ pack_frag_uniforms :: proc "contextless" (p: Params) -> (out: [14][4]f32) {
 	out[9] = {p.extent[0], p.extent[1], p.radius, p.feather}
 	out[10] = {p.stroke_mult, p.stroke_thr, p.tex_type, f32(p.shader_type)}
 	out[11] = {
-		f32(p.glyph_texture_type),
+		0,
 		p.image_blur_filter_direction[0],
 		p.image_blur_filter_direction[1],
 		p.image_blur_filter_taps,
@@ -144,17 +116,6 @@ pack_frag_uniforms :: proc "contextless" (p: Params) -> (out: [14][4]f32) {
 	out[12] = {p.image_blur_filter_coeff[0], p.image_blur_filter_coeff[1], p.image_blur_filter_coeff[2], p.image_blur_filter_edge}
 	out[13] = {p.spread, p.focal[0], p.focal[1], p.focal[2]}
 	return
-}
-
-Glyph_Texture_Kind :: enum u8 {
-	None          = 0,
-	Alpha_Mask    = 1,
-	Color_Texture = 2,
-}
-
-Glyph_Texture :: struct {
-	kind:  Glyph_Texture_Kind,
-	image: Image_Id,
 }
 
 // `nil` is the screen (the backend's default output); an `Image_Id` renders
@@ -262,11 +223,6 @@ Cmd_Clear_Rect :: struct {
 	x, y, w, h: u32,
 	color:      Color,
 }
-// The triangle list `Frame.verts[Command.verts]` (glyphs from an atlas),
-// painted with `Frame.paints[paint]` (every vertex names the same row).
-Cmd_Draw :: struct {
-	paint: u32,
-}
 // Shape instances `Frame.shapes[instances]`, each filled by coverage
 // (shape.odin) with its own paint row; one command covers a run of them
 // that share the command's image, blend and scissor. When `group` is not
@@ -322,7 +278,6 @@ Cmd_Filter_Image :: struct {
 Command_Type :: union {
 	Cmd_Set_Render_Target,
 	Cmd_Clear_Rect,
-	Cmd_Draw,
 	Cmd_Draw_Shapes,
 	Cmd_Filter_Image,
 	Cmd_Run_Program,
@@ -331,11 +286,8 @@ Command_Type :: union {
 
 Command :: struct {
 	type:                Command_Type,
-	// Cmd_Draw's triangles: a range of `Frame.verts`.
-	verts:               Range,
 	// Paint image, gradient ramp, or the filter source.
 	image:               Image_Id,
-	glyph_texture:       Glyph_Texture,
 	composite_operation: Composite_Operation_State,
 	// Axis-aligned scissor captured at record time. `nil` means either no
 	// clipping or a rotated scissor that only the shader's `scissor_mat`
@@ -345,7 +297,6 @@ Command :: struct {
 
 // Everything one `flush` hands to the backend.
 Frame :: struct {
-	verts:     []Vertex,
 	paints:    []Params,
 	commands:  []Command,
 	// Uniform blocks of program runs (`Program_Run.uniforms`).

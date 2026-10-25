@@ -10,8 +10,7 @@ import cv "curves"
 // CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
 // as the GPU fragment shader (shaders/ovg.slang) and the same shape
 // coverage, so its output is a pixel reference for GPU backends: one
-// sample at each pixel center, top-left fill rule (atlas glyph quads),
-// blending in [0, 1] with rounding to 8 bits.
+// sample at each pixel center, blending in [0, 1] with rounding to 8 bits.
 Software_Backend :: struct {
 	allocator: mem.Allocator,
 	pixels:    []u8,
@@ -217,13 +216,6 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 	#partial switch c in cmd.type {
 	case Cmd_Clear_Rect:
 		sw_clear_rect(&r, c)
-	case Cmd_Draw:
-		frag := make_frag(images, cmd, frame.paints[c.paint])
-		r.frag = &frag
-		verts := frame.verts[cmd.verts.start:][:cmd.verts.count]
-		for i := 0; i + 3 <= len(verts); i += 3 {
-			raster_triangle(&r, verts[i], verts[i + 1], verts[i + 2])
-		}
 	case Cmd_Draw_Shapes:
 		if c.group != 0 {
 			raster_group(b, &r, images, frame, cmd, c)
@@ -375,84 +367,6 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	}
 }
 
-// Evaluated from the same end whichever way the edge runs, so the two
-// triangles sharing it get exactly opposite values (no rounding gap along
-// the edge for the top-left rule to miss).
-@(private = "file")
-edge :: #force_inline proc "contextless" (a, b: Vertex, px, py: f32) -> f32 {
-	if a.y < b.y || (a.y == b.y && a.x < b.x) {
-		return (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
-	}
-	return -((a.x - b.x) * (py - b.y) - (a.y - b.y) * (px - b.x))
-}
-
-// Edges owning pixel centers that lie exactly on them (top-left rule), so
-// triangles sharing an edge never both cover a pixel.
-@(private = "file")
-is_top_left :: #force_inline proc "contextless" (a, b: Vertex) -> bool {
-	return (a.y == b.y && b.x > a.x) || b.y < a.y
-}
-
-@(private = "file")
-raster_triangle :: proc(r: ^Raster, v0, v1, v2: Vertex) {
-	v1, v2 := v1, v2
-	area := edge(v0, v1, v2.x, v2.y)
-	if abs(area) < 1e-9 {
-		return
-	}
-	if area < 0 {
-		v1, v2 = v2, v1
-		area = -area
-	}
-
-	uv0, uv1, uv2 := vertex_uv(v0), vertex_uv(v1), vertex_uv(v2)
-	minx := min(v0.x, v1.x, v2.x)
-	miny := min(v0.y, v1.y, v2.y)
-	maxx := max(v0.x, v1.x, v2.x)
-	maxy := max(v0.y, v1.y, v2.y)
-	// Pixels whose centers can fall inside.
-	x0 := max(r.x0, i32(math.ceil(minx - 0.5)))
-	y0 := max(r.y0, i32(math.ceil(miny - 0.5)))
-	x1 := min(r.x1 - 1, i32(math.floor(maxx - 0.5)))
-	y1 := min(r.y1 - 1, i32(math.floor(maxy - 0.5)))
-	if x0 > x1 || y0 > y1 {
-		return
-	}
-
-	tl0 := is_top_left(v1, v2)
-	tl1 := is_top_left(v2, v0)
-	tl2 := is_top_left(v0, v1)
-	inv_area := 1 / area
-
-	for y in y0 ..= y1 {
-		py := f32(y) + 0.5
-		for x in x0 ..= x1 {
-			px := f32(x) + 0.5
-			w0 := edge(v1, v2, px, py)
-			w1 := edge(v2, v0, px, py)
-			w2 := edge(v0, v1, px, py)
-			if w0 < 0 || w1 < 0 || w2 < 0 {
-				continue
-			}
-			if (w0 == 0 && !tl0) || (w1 == 0 && !tl1) || (w2 == 0 && !tl2) {
-				continue
-			}
-			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			b0 := w0 * inv_area
-			b1 := w1 * inv_area
-			b2 := w2 * inv_area
-			u := b0 * uv0.x + b1 * uv1.x + b2 * uv2.x
-			v := b0 * uv0.y + b1 * uv1.y + b2 * uv2.y
-			src, keep := shade(r.frag, px, py, u, v)
-			if !keep {
-				continue
-			}
-			dst := load_texel(r.target, tx, ty)
-			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
-		}
-	}
-}
-
 // ---- fragment evaluation (mirrors shaders/ovg.slang) ---------------------
 
 @(private = "file")
@@ -466,11 +380,9 @@ Sw_Texture :: struct {
 
 @(private = "file")
 Frag :: struct {
-	p:         Params,
-	tex:       Sw_Texture,
-	has_tex:   bool,
-	glyph:     Sw_Texture,
-	has_glyph: bool,
+	p:       Params,
+	tex:     Sw_Texture,
+	has_tex: bool,
 }
 
 @(private = "file")
@@ -489,9 +401,6 @@ lookup_texture :: proc(images: ^Image_Store, id: Image_Id) -> (Sw_Texture, bool)
 make_frag :: proc(images: ^Image_Store, cmd: Command, p: Params) -> (f: Frag) {
 	f.p = p
 	f.tex, f.has_tex = lookup_texture(images, cmd.image)
-	if p.glyph_texture_type != 0 {
-		f.glyph, f.has_glyph = lookup_texture(images, cmd.glyph_texture.image)
-	}
 	return
 }
 
@@ -574,19 +483,7 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 	sc := Vec2{0.5, 0.5} - (Vec2{abs(sp.x), abs(sp.y)} - p.scissor_ext) * p.scissor_scale
 	scissor := clamp(sc.x, 0, 1) * clamp(sc.y, 0, 1)
 
-	if p.glyph_texture_type != 0 {
-		mask: [4]f32 = {1, 1, 1, 1}
-		if f.has_glyph {
-			mask = sample(f.glyph, u, v)
-		}
-		if p.glyph_texture_type == 1 {
-			mask = {mask[0], mask[0], mask[0], mask[0]}
-		} else {
-			result = {1, 1, 1, 1}
-			mask = {mask[0] * mask[3], mask[1] * mask[3], mask[2] * mask[3], mask[3]}
-		}
-		result *= mask * scissor
-	} else if p.shader_type != .Filter_Image {
+	if p.shader_type != .Filter_Image {
 		result *= stroke_alpha * scissor
 	}
 	return result, true

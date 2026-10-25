@@ -363,7 +363,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		sw_best = min(sw_best, time.duration_milliseconds(time.tick_since(t0)))
 	}
 	fmt.printfln("%s: %d bytes, %d nodes, %d shapes, %d path verbs, %d servers", path, len(data), len(doc.nodes), len(doc.shapes), len(doc.verbs), len(doc.servers))
-	fmt.printfln("parse %.2f ms, record %.2f ms (%d commands, %d verts), software render %.2f ms at %dx%d (best of %d)", parse_best, record_best, len(frame.commands), len(frame.verts), sw_best, w, h, n)
+	fmt.printfln("parse %.2f ms, record %.2f ms (%d commands, %d shapes), software render %.2f ms at %dx%d (best of %d)", parse_best, record_best, len(frame.commands), len(frame.shapes), sw_best, w, h, n)
 }
 
 flat_name :: proc(root, p: string) -> string {

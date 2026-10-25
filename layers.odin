@@ -552,8 +552,6 @@ command_bounds :: proc(c: ^Canvas, cmd: ^Command) -> (b: Bounds, ok: bool) {
 			return
 		}
 		b = {f32(v.x), f32(v.y), f32(v.x + v.w), f32(v.y + v.h)}
-	case Cmd_Draw:
-		b = verts_bounds(b, c.verts[cmd.verts.start:][:cmd.verts.count])
 	case Cmd_Draw_Shapes:
 		for inst in c.shapes[v.instances.start:][:v.instances.count] {
 			b = bounds_union(b, instance_bounds(inst, c.shape_words[:]))
@@ -567,17 +565,7 @@ command_bounds :: proc(c: ^Canvas, cmd: ^Command) -> (b: Bounds, ok: bool) {
 	return b, b.minx < b.maxx && b.miny < b.maxy
 }
 
-@(private = "file")
-verts_bounds :: proc "contextless" (b: Bounds, verts: []Vertex) -> Bounds {
-	b := b
-	for v in verts {
-		b.minx = min(b.minx, v.x)
-		b.miny = min(b.miny, v.y)
-		b.maxx = max(b.maxx, v.x)
-		b.maxy = max(b.maxy, v.y)
-	}
-	return b
-}
+
 
 @(private = "file")
 bounds_union :: proc "contextless" (a, b: Bounds) -> Bounds {

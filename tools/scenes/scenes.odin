@@ -19,7 +19,6 @@ Scene :: struct {
 Resources :: struct {
 	checker:  vg.Image_Id,
 	font:     vg.Font,
-	atlas:    vg.Glyph_Atlas,
 	scratch:  vg.Path,
 	glyphs:   [dynamic]vg.Positioned_Glyph,
 	path:     vg.Path,
@@ -118,7 +117,6 @@ resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.font_collection_destroy(&r.emoji_fonts)
 	vg.text_layout_destroy(&r.emoji_layout)
 	vg.layer_stack_destroy(&r.layers, c)
-	vg.glyph_atlas_destroy(&r.atlas, c)
 	vg.font_destroy(&r.font)
 	for shape in r.frame_shapes {
 		vg.shape_destroy(shape)
@@ -148,7 +146,6 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.font_collection_init(&r.svg_fonts, FONT_DATA)
 	vg.font_collection_init(&r.emoji_fonts, FONT_DATA)
 	vg.font_collection_set_emoji(&r.emoji_fonts, vg.EMOJI_FONT_DATA)
-	vg.glyph_atlas_init(&r.atlas, 512, 512, c)
 	r.target, _ = vg.create_image_empty(c, 96, 96, .RGBA8, {.Premultiplied})
 	r.blurred, _ = vg.create_image_empty(c, 96, 96, .RGBA8, {.Premultiplied})
 	r.tile_a, _ = vg.create_image_empty(c, 32, 32, .RGBA8, {.Premultiplied})
@@ -423,8 +420,8 @@ scene_text :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.restore(c)
 	clear(&r.glyphs)
 	small := vg.font_scale_for_em(&r.font, 16)
-	vg.layout_simple(&r.font, "Atlas glyphs 0123", 10, 170, small, &r.glyphs)
-	vg.fill_glyph_run(c, &r.font, &r.atlas, r.glyphs[:], small, vg.paint_color(vg.rgb(0, 100, 50)))
+	vg.layout_simple(&r.font, "Small glyphs 0123", 10, 170, small, &r.glyphs)
+	vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], small, vg.paint_color(vg.rgb(0, 100, 50)), &r.scratch)
 	clear(&r.glyphs)
 	vg.layout_simple(&r.font, "Outline", 150, 130, sc, &r.glyphs)
 	op := vg.paint_color(vg.rgb(200, 0, 0))

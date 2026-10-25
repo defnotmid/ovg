@@ -106,7 +106,6 @@ float stroke_mult() { return P(10).x; }
 float stroke_thr() { return P(10).y; }
 int tex_type() { return int(P(10).z); }
 int shader_type() { return int(P(10).w); }
-int glyph_texture_type() { return int(P(11).x); }
 float2 blur_direction() { return P(11).yz; }
 int blur_taps() { return int(P(11).w); }
 float3 blur_coeff() { return P(12).xyz; }
@@ -712,19 +711,8 @@ float4 fs_main(VS_Out i) : SV_Target {
         result = fill_color(type, i.fpos);
     }
 
-    float scissor = scissor_mask(i.fpos);
-    int glyph = glyph_texture_type();
-    if (glyph != 0) {
-        float4 mask = glyphtex.SampleLevel(i.ftcoord, 0);
-        if (glyph == 1) {
-            mask = float4(mask.x);
-        } else {
-            result = float4(1, 1, 1, 1);
-            mask = float4(mask.xyz * mask.w, mask.w);
-        }
-        result *= mask * scissor;
-    } else if (type != FILTER_IMAGE) {
-        result *= stroke_alpha * scissor;
+    if (type != FILTER_IMAGE) {
+        result *= stroke_alpha * scissor_mask(i.fpos);
     }
     return result;
 }

@@ -103,27 +103,6 @@ test_slot_map :: proc(t: ^testing.T) {
 	testing.expect_value(t, slot_map_get(&m, b)^, 99)
 }
 
-@(test)
-test_atlas :: proc(t: ^testing.T) {
-	a: Atlas
-	atlas_init(&a, 128, 128)
-	defer atlas_destroy(&a)
-	x, y, ok := atlas_add_rect(&a, 32, 32)
-	testing.expect(t, ok && x == 0 && y == 0)
-	x, y, ok = atlas_add_rect(&a, 32, 16)
-	testing.expect(t, ok && x == 32 && y == 0)
-	x, y, ok = atlas_add_rect(&a, 96, 16)
-	testing.expect(t, ok && x == 32 && y == 16)
-
-	small: Atlas
-	atlas_init(&small, 32, 32)
-	defer atlas_destroy(&small)
-	_, _, ok = atlas_add_rect(&small, 31, 31)
-	testing.expect(t, ok)
-	_, _, ok = atlas_add_rect(&small, 32, 32)
-	testing.expect(t, !ok)
-}
-
 // ---- paths -----------------------------------------------------------------------------
 
 @(test)
@@ -216,9 +195,8 @@ test_canvas_void :: proc(t: ^testing.T) {
 	clear_rect(&c, 0, 0, 10, 10, WHITE)
 	flush(&c)
 	// The fill and the stroke are shapes in one draw (after the frame's
-	// render target), then the clear; no triangles.
+	// render target), then the clear.
 	testing.expect_value(t, vb.last_frame_commands, 3)
-	testing.expect_value(t, vb.last_frame_verts, 0)
 
 	save(&c)
 	translate(&c, 10, 20)
@@ -529,88 +507,6 @@ test_sw_conic :: proc(t: ^testing.T) {
 	testing.expect(t, bottom.r > 80 && bottom.r < 180 && bottom.b > 80 && bottom.b < 180)
 	testing.expect(t, left.b > left.r)
 	testing.expect(t, right.r > right.b)
-}
-
-@(test)
-test_sw_glyph_mask :: proc(t: ^testing.T) {
-	s: Sw
-	sw_open(&s, 32, 32)
-	defer sw_close(&s)
-	clear_rect(&s.canvas, 0, 0, 32, 32, WHITE)
-
-	font: Font
-	atlas: Glyph_Atlas
-	testing.expect_value(t, glyph_atlas_init(&atlas, 32, 32, &s.canvas), Error.None)
-	defer glyph_atlas_destroy(&atlas, &s.canvas)
-	// An 8x8 glyph written straight into the bitmap: fill_glyph_run uploads
-	// the dirty rows before drawing.
-	for y in 0 ..< 8 {
-		mem.set(&atlas.pixels[y * 32], 255, 8)
-	}
-	atlas.dirty_y0, atlas.dirty_y1 = 0, 8
-	atlas.cache[glyph_key(&font, 42, 1)] = {0, 0, 8, 8, 0, 0, true}
-
-	glyphs := []Positioned_Glyph{{42, 12, 12}}
-	testing.expect_value(t, fill_glyph_run(&s.canvas, &font, &atlas, glyphs, 1, paint_color(rgb(255, 0, 0))), Error.None)
-	_, _, dirty := glyph_atlas_take_dirty(&atlas)
-	testing.expect(t, !dirty)
-	flush(&s.canvas)
-	testing.expect_value(t, px(&s, 15, 15), [4]u8{255, 0, 0, 255})
-	testing.expect_value(t, px(&s, 4, 4), [4]u8{255, 255, 255, 255})
-}
-
-@(test)
-test_glyph_atlas_cpu :: proc(t: ^testing.T) {
-	fonts: Font_Collection
-	font_collection_init(&fonts)
-	defer font_collection_destroy(&fonts)
-	atlas: Glyph_Atlas
-	testing.expect_value(t, glyph_atlas_init(&atlas, 128, 64), Error.None)
-	defer glyph_atlas_destroy(&atlas)
-	testing.expect(t, !image_id_valid(atlas.image_id))
-
-	f := &fonts.fallback.font
-	sc := font_scale_for_em(f, 20)
-	a, err := glyph_atlas_get(&atlas, f, font_glyph_index(f, 'A'), sc)
-	testing.expect_value(t, err, Error.None)
-	testing.expect(t, a.visible && a.width > 4 && a.height > 8)
-	space, _ := glyph_atlas_get(&atlas, f, font_glyph_index(f, ' '), sc)
-	testing.expect(t, !space.visible)
-	ink := 0
-	for y in a.atlas_y ..< a.atlas_y + a.height {
-		for x in a.atlas_x ..< a.atlas_x + a.width {
-			ink += int(atlas.pixels[y * atlas.width + x] > 128)
-		}
-	}
-	testing.expect(t, ink > 10)
-	y0, y1, dirty := glyph_atlas_take_dirty(&atlas)
-	testing.expect(t, dirty && y0 <= a.atlas_y && y1 >= a.atlas_y + a.height)
-	_, _, dirty = glyph_atlas_take_dirty(&atlas)
-	testing.expect(t, !dirty)
-
-	// The same font through another Font value (a copy) hits the cache:
-	// nothing new to upload. Another load of the same data is another font
-	// (its data may be freed and the address reused while the atlas lives).
-	copy_of := f^
-	again, _ := glyph_atlas_get(&atlas, &copy_of, font_glyph_index(f, 'A'), sc)
-	testing.expect_value(t, again, a)
-	_, _, dirty = glyph_atlas_take_dirty(&atlas)
-	testing.expect(t, !dirty)
-	reloaded, _ := font_load(f.data)
-	defer font_destroy(&reloaded)
-	testing.expect(t, glyph_key(&reloaded, 1, sc) != glyph_key(f, 1, sc) && glyph_key(&copy_of, 1, sc) == glyph_key(f, 1, sc))
-
-	glyph_atlas_reset(&atlas)
-	y0, y1, dirty = glyph_atlas_take_dirty(&atlas)
-	testing.expect(t, dirty && y0 == 0 && y1 == atlas.height)
-	testing.expect_value(t, atlas.pixels[a.atlas_y * atlas.width + a.atlas_x + a.width / 2], 0)
-
-	for _ in 0 ..< 1000 {
-		if _, err = glyph_atlas_get(&atlas, f, font_glyph_index(f, 'W'), sc * f32(1 + len(atlas.cache))); err != nil {
-			break
-		}
-	}
-	testing.expect_value(t, err, Error.Atlas_Full)
 }
 
 @(test)

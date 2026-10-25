@@ -7,7 +7,6 @@ import "core:mem"
 Void_Backend :: struct {
 	width, height:       u32,
 	last_frame_commands: int,
-	last_frame_verts:    int,
 }
 
 void_backend :: proc(b: ^Void_Backend) -> Backend {
@@ -20,7 +19,6 @@ void_backend :: proc(b: ^Void_Backend) -> Backend {
 		render = proc(data: rawptr, output: Render_Output, images: ^Image_Store, frame: Frame) {
 			b := (^Void_Backend)(data)
 			b.last_frame_commands = len(frame.commands)
-			b.last_frame_verts = len(frame.verts)
 		},
 		alloc_image = proc(data: rawptr, info: Image_Info) -> (Backend_Image, Error) {
 			return {}, nil
