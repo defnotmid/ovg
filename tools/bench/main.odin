@@ -363,7 +363,7 @@ text_draw :: proc(b: ^Bench, user: rawptr, i: int) {
 		pieces := [?]vg.Text_Piece{{text = line, style = {size = 16 + f32(k)}}}
 		vg.text_layout(&b.fonts, pieces[:], {x = 10, y = 30 + f32(k) * 24}, &w.layout)
 		for run in w.layout.runs {
-			vg.fill_glyph_outlines(&b.canvas, vg.font_collection_font(&b.fonts, run.face), w.layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &b.layers.scratch)
+			vg.fill_glyph_outlines(&b.canvas, vg.text_layout_font(&w.layout, run), w.layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &b.layers.scratch)
 		}
 	}
 }

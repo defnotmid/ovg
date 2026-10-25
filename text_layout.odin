@@ -79,7 +79,7 @@ Text_Options :: struct {
 }
 
 // Consecutive glyphs of one face, size and paint. The face is named by its
-// id in the collection laid out with (font_collection_font), so the layout
+// id in the collection laid out with (text_layout_font), so the layout
 // stays valid as faces are added to it.
 Text_Run :: struct {
 	face:         Face_Id,
@@ -94,6 +94,8 @@ Text_Line :: struct {
 }
 
 Text_Layout :: struct {
+	// The collection laid out with (borrowed), whose faces the runs name.
+	fonts:    ^Font_Collection,
 	glyphs:   [dynamic]Positioned_Glyph,
 	// Per glyph: the index of its first codepoint in the text (all pieces'
 	// codepoints in order, newlines included).
@@ -128,6 +130,7 @@ text_layout_destroy :: proc(l: ^Text_Layout) {
 
 // Lays out `pieces` into `l` (cleared). Glyph positions are absolute.
 text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Options, l: ^Text_Layout) {
+	l.fonts = fonts
 	clear(&l.glyphs)
 	clear(&l.clusters)
 	clear(&l.runs)
@@ -294,6 +297,12 @@ rune_is_default_ignorable :: proc "contextless" (r: rune) -> bool {
 	return false
 }
 
+// The font of a run's face, to draw it with (for immediate use, as
+// font_collection_font's); nil once the face is removed.
+text_layout_font :: proc(l: ^Text_Layout, run: Text_Run) -> ^Font {
+	return font_collection_font(l.fonts, run.face)
+}
+
 // Width of the widest line.
 text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 	w: f32
@@ -305,13 +314,12 @@ text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 
 // Appends the outlines of the laid-out glyphs to `out`, where drawing the
 // layout puts them (positions, alignment, baseline, letter spacing and
-// fallback faces as laid out); `fonts` is the collection it was laid out
-// with. Fill them with the non-zero rule. A colour glyph (COLR emoji) adds
-// its base glyph's plain outline, which is often empty: emoji mostly add
-// nothing. Glyphs placed on a path turn with it.
-text_layout_path :: proc(fonts: ^Font_Collection, l: ^Text_Layout, out: ^Path) {
+// fallback faces as laid out). Fill them with the non-zero rule. A colour
+// glyph (COLR emoji) adds its base glyph's plain outline, which is often
+// empty: emoji mostly add nothing. Glyphs placed on a path turn with it.
+text_layout_path :: proc(l: ^Text_Layout, out: ^Path) {
 	for run in l.runs {
-		font := font_collection_font(fonts, run.face)
+		font := text_layout_font(l, run)
 		for g, k in l.glyphs[run.first:][:run.count] {
 			if len(l.turns) == 0 {
 				font_glyph_path(font, g.glyph, g.x, g.y, run.em, out)

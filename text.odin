@@ -74,14 +74,6 @@ font_allocator :: proc(f: ^Font) -> mem.Allocator {
 	return f.allocator if f.allocator.procedure != nil else runtime.heap_allocator()
 }
 
-Font_Id :: struct {
-	key: Key,
-}
-
-font_id_valid :: #force_inline proc "contextless" (id: Font_Id) -> bool {
-	return id.key.gen != 0
-}
-
 Glyph_Index :: distinct i32
 
 Font_V_Metrics :: struct {
@@ -275,30 +267,6 @@ font_glyph_path_transformed :: proc(f: ^Font, g: Glyph_Index, m: Transform2D, p:
 	return true
 }
 
-Font_Store :: struct {
-	fonts: Slot_Map(Font),
-}
-
-font_store_init :: proc(s: ^Font_Store, allocator := context.allocator) {
-	slot_map_init(&s.fonts, allocator)
-}
-
-font_store_destroy :: proc(s: ^Font_Store) {
-	slot_map_destroy(&s.fonts)
-}
-
-font_store_add :: proc(s: ^Font_Store, font: Font) -> Font_Id {
-	return {slot_map_insert(&s.fonts, font)}
-}
-
-font_store_get :: proc(s: ^Font_Store, id: Font_Id) -> ^Font {
-	return slot_map_get(&s.fonts, id.key)
-}
-
-font_store_remove :: proc(s: ^Font_Store, id: Font_Id) {
-	slot_map_remove(&s.fonts, id.key)
-}
-
 // A glyph placed on the baseline at (x, y), in pixels.
 Positioned_Glyph :: struct {
 	glyph: Glyph_Index,
@@ -339,8 +307,8 @@ Cached_Glyph :: struct {
 }
 
 // A glyph at one scale in one font (its `serial`, which no other font
-// has), so fonts from anywhere (a Font_Store, a Font_Collection, a
-// `font_load` of their own) share an atlas.
+// has), so fonts from anywhere (a Font_Collection, a `font_load` of their
+// own) share an atlas.
 Glyph_Key :: struct {
 	font:       u32,
 	glyph:      Glyph_Index,

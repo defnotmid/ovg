@@ -2718,7 +2718,7 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	// letter-spacing not), as resvg does.
 	lo, hi := f32(1e30), f32(-1e30)
 	for run in l.runs {
-		font := font_collection_font(fonts, run.face)
+		font := text_layout_font(l, run)
 		for g in l.glyphs[run.first:][:run.count] {
 			adv, _ := font_glyph_advance(font, g.glyph)
 			lo = min(lo, g.x)
@@ -2749,14 +2749,14 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	// Segments in proportion to the text, so it sits alike at any scale.
 	segment := doc.pieces[ch.pieces.start].size / 48
 	text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
-	text_layout_on_path(fonts, l, tp, {side = tpd.side})
+	text_layout_on_path(l, tp, {side = tpd.side})
 	// Text after the path continues from its last glyph's end.
 	end = pen
 	#reverse for run in l.runs {
 		for k := run.count - 1; k >= 0; k -= 1 {
 			if turn := l.turns[run.first + k]; turn != {} {
 				g := l.glyphs[run.first + k]
-				adv, _ := font_glyph_advance(font_collection_font(fonts, run.face), g.glyph)
+				adv, _ := font_glyph_advance(text_layout_font(l, run), g.glyph)
 				return {g.x, g.y} + turn * (f32(adv) * run.em), end_x
 			}
 		}

@@ -1,7 +1,7 @@
 package ovg
 
 // Generational handle. The zero key is never issued, so a zero-valued
-// handle (`Image_Id{}`, `Font_Id{}`) always means "none".
+// handle (`Image_Id{}`) always means "none".
 Key :: struct {
 	idx: u32,
 	gen: u32,

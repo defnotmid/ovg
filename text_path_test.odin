@@ -32,7 +32,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	path_line_to(&path, 200, 50)
 	text_path_set(&tp, &path)
 	testing.expect_value(t, text_path_length(&tp), 190)
-	text_layout_on_path(&fonts, &l, &tp, {})
+	text_layout_on_path(&l, &tp, {})
 	for g, i in l.glyphs {
 		testing.expect(t, near({g.x, g.y}, {10 + straight[i].x, 50}))
 		testing.expect(t, near(l.turns[i], {1, 0}))
@@ -45,7 +45,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	path_move_to(&path, 30, 0)
 	path_line_to(&path, 30, 300)
 	text_path_set(&tp, &path)
-	text_layout_on_path(&fonts, &l, &tp, {start = 5})
+	text_layout_on_path(&l, &tp, {start = 5})
 	for g, i in l.glyphs {
 		testing.expect(t, near({g.x, g.y}, {30, 5 + straight[i].x}))
 		testing.expect(t, near(l.turns[i], {0, 1}))
@@ -65,7 +65,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	testing.expect(t, ok && near(p, {100, 105}) && near(dir, {0, 1}))
 	_, _, ok = text_path_at(&tp, 21)
 	testing.expect(t, !ok)
-	text_layout_on_path(&fonts, &l, &tp, {})
+	text_layout_on_path(&l, &tp, {})
 	testing.expect(t, l.turns[2] == {})
 
 	// side = right runs from the path's end, turned around.
@@ -74,7 +74,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	path_move_to(&path, 0, 50)
 	path_line_to(&path, 200, 50)
 	text_path_set(&tp, &path)
-	text_layout_on_path(&fonts, &l, &tp, {side = .Right})
+	text_layout_on_path(&l, &tp, {side = .Right})
 	testing.expect(t, near({l.glyphs[0].x, l.glyphs[0].y}, {200 - straight[0].x, 50}))
 	testing.expect(t, near(l.turns[0], {-1, 0}))
 
@@ -82,7 +82,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	out: Path
 	path_init(&out)
 	defer path_destroy(&out)
-	text_layout_path(&fonts, &l, &out)
+	text_layout_path(&l, &out)
 	box := svg_path_bbox(out.verbs[:], out.coords[:])
 	testing.expect(t, box.y >= 50 - 1e-3 && box.y + box.h > 60)
 }

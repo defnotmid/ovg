@@ -170,7 +170,7 @@ test_shape_fallback_and_bidi :: proc(t: ^testing.T) {
 	testing.expect(t, len(l.runs) >= 3)
 	found := false
 	for run in l.runs {
-		if font_collection_font(&s.fonts, run.face) == arabic {
+		if text_layout_font(l, run) == arabic {
 			found = true
 			testing.expect_value(t, run.count, 3)
 		}
@@ -421,6 +421,9 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 	testing.expect_value(t, font_collection_add(&alone, bebas), 1)
 	text_layout(&alone, {{text = "office", style = {family = "Bebas Neue", size = 20}}}, {}, &l)
 	testing.expect(t, again.runs[0].face == fonts.faces[0].id && slice.equal(again.glyphs[:], l.glyphs[:]))
+	// Each layout resolves its runs in the collection it was laid out with.
+	testing.expect(t, text_layout_font(&l, l.runs[0]) == &alone.faces[0].font)
+	testing.expect(t, text_layout_font(&again, again.runs[0]) == &fonts.faces[0].font)
 
 	font_collection_remove(&fonts, 1)
 	testing.expect(t, font_collection_font(&fonts, id) == nil)
@@ -668,7 +671,7 @@ test_font_variation :: proc(t: ^testing.T) {
 	testing.expect_value(t, font_collection_add(&fonts, data, variations = large[:]), 1)
 	pick :: proc(fonts: ^Font_Collection, l: ^Text_Layout, v: []Font_Variation) -> ^Font {
 		text_layout(fonts, {{text = "a", style = {family = "Adwaita Sans", size = 50, variations = v}}}, {}, l)
-		return font_collection_font(fonts, l.runs[0].face)
+		return text_layout_font(l, l.runs[0])
 	}
 	// The smallest size is the default instance's or the third face.
 	testing.expect(t, pick(&fonts, &l, small[:]) == (&fonts.faces[0].font if opsz.min == opsz.default else &fonts.faces[2].font))

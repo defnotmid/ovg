@@ -183,7 +183,7 @@ lottie_text_layout :: proc(fonts: ^Font_Collection, s: ^Lottie_Text_Scratch, sty
 		s.xs[i], s.adv[i] = max(f32), 0
 	}
 	for run in l.runs {
-		font := font_collection_font(fonts, run.face)
+		font := text_layout_font(l, run)
 		for k in run.first ..< run.first + run.count {
 			c := l.clusters[k]
 			if c < 0 || int(c) >= n {
@@ -395,7 +395,7 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 	path := &r.path
 	paints := [2]bool{false, true} if td.stroke_over else [2]bool{true, false}
 	for run in lay.runs {
-		font := font_collection_font(fonts, run.face)
+		font := text_layout_font(lay, run)
 		glyphs := lay.glyphs[run.first:][:run.count]
 		if !animated {
 			for stroke in paints {

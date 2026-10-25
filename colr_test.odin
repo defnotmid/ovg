@@ -160,7 +160,7 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	path: Path
 	defer path_destroy(&path)
 	for run in l.runs {
-		fill_glyph_outlines(&c, font_collection_font(&fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &path)
+		fill_glyph_outlines(&c, text_layout_font(&l, run), l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &path)
 	}
 	flush(&c)
 	orange := 0

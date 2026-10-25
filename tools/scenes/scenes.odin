@@ -19,8 +19,6 @@ Scene :: struct {
 Resources :: struct {
 	checker:  vg.Image_Id,
 	font:     vg.Font,
-	font_id:  vg.Font_Id,
-	fonts:    vg.Font_Store,
 	atlas:    vg.Glyph_Atlas,
 	scratch:  vg.Path,
 	glyphs:   [dynamic]vg.Positioned_Glyph,
@@ -121,7 +119,6 @@ resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.text_layout_destroy(&r.emoji_layout)
 	vg.layer_stack_destroy(&r.layers, c)
 	vg.glyph_atlas_destroy(&r.atlas, c)
-	vg.font_store_destroy(&r.fonts)
 	vg.font_destroy(&r.font)
 	for shape in r.frame_shapes {
 		vg.shape_destroy(shape)
@@ -151,8 +148,6 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.font_collection_init(&r.svg_fonts, FONT_DATA)
 	vg.font_collection_init(&r.emoji_fonts, FONT_DATA)
 	vg.font_collection_set_emoji(&r.emoji_fonts, vg.EMOJI_FONT_DATA)
-	vg.font_store_init(&r.fonts)
-	r.font_id = vg.font_store_add(&r.fonts, r.font)
 	vg.glyph_atlas_init(&r.atlas, 512, 512, c)
 	r.target, _ = vg.create_image_empty(c, 96, 96, .RGBA8, {.Premultiplied})
 	r.blurred, _ = vg.create_image_empty(c, 96, 96, .RGBA8, {.Premultiplied})
@@ -443,7 +438,7 @@ scene_emoji :: proc(c: ^vg.Canvas, r: ^Resources) {
 		l := &r.emoji_layout
 		vg.text_layout(&r.emoji_fonts, {{text = s, style = {size = size}}}, {x = x, y = y}, l)
 		for run in l.runs {
-			vg.fill_glyph_outlines(c, vg.font_collection_font(&r.emoji_fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint, &r.scratch)
+			vg.fill_glyph_outlines(c, vg.text_layout_font(l, run), l.glyphs[run.first:][:run.count], run.em, paint, &r.scratch)
 		}
 	}
 	text(c, r, "Hi 👋🔥😂 👩‍💻🇯🇵", 26, 8, 34, vg.paint_color(vg.rgb(20, 20, 40)))

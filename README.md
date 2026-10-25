@@ -300,7 +300,7 @@ at any size, under any transform):
 vg.font_collection_set_emoji(&fonts, vg.EMOJI_FONT_DATA) // optional emoji fallback
 vg.text_layout(&fonts, {{text = "Hello 👋🔥 👩‍💻 🇯🇵", style = {size = 48}}}, {x = 10, y = 60}, &layout)
 for run in layout.runs {
-	font := vg.font_collection_font(&fonts, run.face)
+	font := vg.text_layout_font(&layout, run)
 	vg.fill_glyph_outlines(&c, font, layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &path)
 }
 ```
@@ -781,7 +781,9 @@ every part follows:
   names its faces by `Face_Id` (runs, `font_collection_find`,
   `font_collection_glyph`), and `font_collection_face` /
   `font_collection_font` give a face's record or font for immediate use:
-  keep the id, not the pointer. Ids stay with their faces as faces are
+  keep the id, not the pointer. A layout records the collection it was
+  laid out with, so `text_layout_font(&layout, run)` gives a run's font
+  (and `text_layout_path`, `text_layout_on_path` need nothing more). Ids stay with their faces as faces are
   added before or after them, so a layout outlives faces added to its
   collection; a removed face's id, a replaced emoji face's
   (`Font_Collection.emoji` is a `Maybe`), `Face_Id{}` and another

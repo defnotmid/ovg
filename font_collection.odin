@@ -176,10 +176,10 @@ font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 }
 
 // Face `id`, for immediate use (adding faces moves it); nil once the face
-// is removed (or, for an emoji face, replaced), for Face_Id{} and for an
-// id of another collection.
+// is removed (or, for an emoji face, replaced), for Face_Id{}, for an id
+// of another collection and without a collection.
 font_collection_face :: proc(c: ^Font_Collection, id: Face_Id) -> ^Font_Face {
-	if c.serial == 0 || id.collection != c.serial || int(id.index) >= len(c.places) {
+	if c == nil || c.serial == 0 || id.collection != c.serial || int(id.index) >= len(c.places) {
 		return nil
 	}
 	switch at := c.places[id.index]; at {
