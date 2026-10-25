@@ -42,6 +42,28 @@ Shape_Segment :: struct {
 	level:                    u8, // bidi embedding level: 0 LTR, 1 RTL, 2 numbers in RTL
 }
 
+// A codepoint of the text and what layout finds out about it; loops read
+// a few columns each.
+@(private)
+Shape_Char :: struct {
+	char:   rune,
+	piece:  i32,
+	face:   Face_Id, // after fallback
+	script: sh.Script,
+	level:  u8, // bidi level (text_bidi.odin)
+	bidi:   Bidi_Class, // scratch
+}
+
+// A piece of the text: its first codepoint, size and feature settings
+// (features[first:][:count]: letter spacing's, then Text_Style.features;
+// the last of a tag wins).
+@(private)
+Shape_Piece :: struct {
+	start:    i32,
+	size:     f32,
+	features: [2]i32,
+}
+
 // Shaping state for one layout at a time (pooled by Font_Collection).
 Text_Shaper :: struct {
 	shaper:         sh.Shaper,
@@ -49,24 +71,13 @@ Text_Shaper :: struct {
 	plan_features:  [dynamic]sh.Feature,
 	// The segment being shaped: its feature settings.
 	seg_features:   [dynamic]sh.Feature,
-	// Per piece.
-	piece_start:    [dynamic]i32, // first codepoint
-	piece_size:     [dynamic]f32,
-	// The piece's feature settings: features[first:][:count] (letter
-	// spacing's, then Text_Style.features; the last of a tag wins).
-	piece_features: [dynamic][2]i32,
+	pieces:         [dynamic]Shape_Piece,
 	features:       [dynamic]sh.Feature,
-	// Per codepoint of the text.
-	runes:          [dynamic]rune,
-	piece:          [dynamic]i32,
-	face:           [dynamic]Face_Id, // after fallback
-	script:         [dynamic]sh.Script,
-	level:          [dynamic]u8, // bidi level (text_bidi.odin)
-	bidi:           [dynamic]Bidi_Class, // scratch
+	chars:          #soa[dynamic]Shape_Char,
 	// Segments of the current line, and their visual order.
 	segs:           [dynamic]Shape_Segment,
 	order:          [dynamic]i32,
-	// Shaped glyphs of the current line, clusters indexing `runes`. The
+	// Shaped glyphs of the current line, clusters indexing `chars`. The
 	// layout reads every field per glyph, so these are rows.
 	glyphs:         [dynamic]sh.Glyph,
 }
@@ -86,16 +97,9 @@ shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
 	s.plans.allocator = allocator
 	s.plan_features.allocator = allocator
 	s.seg_features.allocator = allocator
-	s.piece_start.allocator = allocator
-	s.piece_size.allocator = allocator
-	s.piece_features.allocator = allocator
+	s.pieces.allocator = allocator
 	s.features.allocator = allocator
-	s.runes.allocator = allocator
-	s.piece.allocator = allocator
-	s.face.allocator = allocator
-	s.script.allocator = allocator
-	s.level.allocator = allocator
-	s.bidi.allocator = allocator
+	s.chars = make(#soa[dynamic]Shape_Char, allocator)
 	s.segs.allocator = allocator
 	s.order.allocator = allocator
 	s.glyphs.allocator = allocator
@@ -122,16 +126,9 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 	delete(s.plans)
 	delete(s.plan_features)
 	delete(s.seg_features)
-	delete(s.piece_start)
-	delete(s.piece_size)
-	delete(s.piece_features)
+	delete(s.pieces)
 	delete(s.features)
-	delete(s.runes)
-	delete(s.piece)
-	delete(s.face)
-	delete(s.script)
-	delete(s.level)
-	delete(s.bidi)
+	delete(s.chars)
 	delete(s.segs)
 	delete(s.order)
 	delete(s.glyphs)
@@ -142,11 +139,25 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 // growing (geometrically) only when it is short. Rows it gains keep
 // whatever they held.
 @(private)
-scratch_size :: #force_inline proc(a: ^[dynamic]$T, n: int) {
+scratch_size :: proc {
+	scratch_size_rows,
+	scratch_size_soa,
+}
+
+@(private)
+scratch_size_rows :: #force_inline proc(a: ^[dynamic]$T, n: int) {
 	if n > cap(a) {
 		reserve(a, max(n, 2 * cap(a)))
 	}
 	(^runtime.Raw_Dynamic_Array)(a).len = n
+}
+
+@(private)
+scratch_size_soa :: #force_inline proc(a: ^#soa[dynamic]$T, n: int) {
+	if n > cap(a) {
+		reserve(a, max(n, 2 * cap(a)))
+	}
+	runtime.raw_soa_footer(a).len = n
 }
 
 @(private)
@@ -187,7 +198,7 @@ shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 	// Fast path: Latin with common punctuation, symbols and digits is one
 	// left-to-right Latin run.
 	latin := true
-	for r in s.runes[a:b] {
+	for r in s.chars.char[a:b] {
 		if r >= 0x370 && (r < 0x2000 || r > 0x20cf) {
 			latin = false
 			break
@@ -195,16 +206,16 @@ shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 	}
 	if latin {
 		for i in a ..< b {
-			s.script[i] = .Latin
-			s.level[i] = 0
+			s.chars[i].script = .Latin
+			s.chars[i].level = 0
 		}
 		return
 	}
-	sh.script_runs(s.runes[a:b], s.script[a:b])
+	sh.script_runs(s.chars.char[a:b], s.chars.script[a:b])
 	for i in a ..< b {
-		s.bidi[i] = bidi_class(s.runes[i], s.script[i])
+		s.chars[i].bidi = bidi_class(s.chars[i].char, s.chars[i].script)
 	}
-	bidi_resolve(s.bidi[a:b], s.level[a:b])
+	bidi_resolve(s.chars.bidi[a:b], s.chars.level[a:b])
 }
 
 // Shapes one segment, appending its glyphs to the shaper's line glyphs.
@@ -217,12 +228,12 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 	direction: sh.Direction = .RTL if seg.level & 1 == 1 else .LTR
 	shaper_segment_features(s, seg)
 	plan := shaper_plan(fonts, s, seg, direction)
-	sh.shape(&s.shaper, plan, &seg.font.face, s.runes[seg.first:][:seg.count], s.seg_features[:], &s.glyphs)
+	sh.shape(&s.shaper, plan, &seg.font.face, s.chars.char[seg.first:seg.first + seg.count], s.seg_features[:], &s.glyphs)
 	if !s.shaper.ok {
 		// Past the shaper's limits: one glyph per codepoint.
 		resize(&s.glyphs, first)
 		for i in seg.first ..< seg.first + seg.count {
-			g := font_glyph_index(seg.font, s.runes[i])
+			g := font_glyph_index(seg.font, s.chars[i].char)
 			adv, _ := font_glyph_advance(seg.font, g)
 			append(&s.glyphs, sh.Glyph{id = u16(g), cluster = i, advance = adv})
 		}
@@ -238,21 +249,21 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 @(private)
 shaper_segment_features :: proc(s: ^Text_Shaper, seg: ^Shape_Segment) {
 	clear(&s.seg_features)
-	p0, p1 := s.piece[seg.first], s.piece[seg.first + seg.count - 1]
+	p0, p1 := s.chars[seg.first].piece, s.chars[seg.first + seg.count - 1].piece
 	same := true
 	for p in p0 + 1 ..= p1 {
-		a, b := s.piece_features[p0], s.piece_features[p]
+		a, b := s.pieces[p0].features, s.pieces[p].features
 		if a[1] != b[1] || !features_equal(s.features[a[0]:][:a[1]], s.features[b[0]:][:b[1]]) {
 			same = false
 			break
 		}
 	}
 	for p in p0 ..= p1 {
-		pf := s.piece_features[p]
+		pf := s.pieces[p].features
 		start, end := 0, 0
 		if !same {
-			start = int(max(s.piece_start[p], seg.first) - seg.first)
-			end = int(min(s.piece_start[p + 1] if int(p) + 1 < len(s.piece_start) else max(i32), seg.first + seg.count) - seg.first)
+			start = int(max(s.pieces[p].start, seg.first) - seg.first)
+			end = int(min(s.pieces[p + 1].start if int(p) + 1 < len(s.pieces) else max(i32), seg.first + seg.count) - seg.first)
 		}
 		for f in s.features[pf[0]:][:pf[1]] {
 			append(&s.seg_features, sh.Feature{f.tag, f.value, start, end})

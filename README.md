@@ -750,7 +750,10 @@ every part follows:
   from anywhere share one atlas and freed fonts leave no stale entries.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
-  that names no family uses `Font_Collection.default_family` when set) and
+  that names no family uses `Font_Collection.default_family` when set;
+  the collection keeps its faces indexed by family, with what a find
+  scores, so finding one is a binary search and a sweep of the family,
+  not a scan: 0.23 us for a 72-face family among 2,380 faces, from 15 us) and
   shapes with `oglyph/shape`: each line is split into
   segments of one font (per-glyph fallback picks the first face covering a
   codepoint), size, script and bidi level (each character's Unicode script,
@@ -814,6 +817,10 @@ every part follows:
   an offset across it. Each glyph sits where its middle falls, turned to
   the path's direction there: `Text_Layout.turns` holds each glyph's
   direction (cos, sin), {0, 0} for a glyph off either end (not drawn).
+  A path of one closed contour takes one circuit of text, wrapping round
+  past its end (SVG 2): the glyphs whose middles lie within a path's length
+  after x = 0, around it or before it, as `anchor` (the text's align, SVG
+  text-anchor) says.
   `side = .Right` runs along the path reversed. `text_layout_path` follows
   the turns; to draw, turn each glyph about its origin
   (`apply_transform(c, {t.x, t.y, -t.y, t.x, g.x, g.y})`, then the glyph at

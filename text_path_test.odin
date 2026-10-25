@@ -86,3 +86,63 @@ test_text_on_path :: proc(t: ^testing.T) {
 	box := svg_path_bbox(out.verbs[:], out.coords[:])
 	testing.expect(t, box.y >= 50 - 1e-3 && box.y + box.h > 60)
 }
+
+// A path of one closed contour takes one circuit of text, wrapping round
+// past its end; past a circuit's worth, glyphs are hidden. Which circuit
+// follows the anchor.
+@(test)
+test_text_on_closed_path :: proc(t: ^testing.T) {
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	l: Text_Layout
+	text_layout_init(&l)
+	defer text_layout_destroy(&l)
+	tp: Text_Path
+	text_path_init(&tp)
+	defer text_path_destroy(&tp)
+	path: Path
+	path_init(&path)
+	defer path_destroy(&path)
+	// A 100 x 100 square from (0, 0), clockwise on screen: 400 long.
+	path_move_to(&path, 0, 0)
+	path_line_to(&path, 100, 0)
+	path_line_to(&path, 100, 100)
+	path_line_to(&path, 0, 100)
+	path_close(&path)
+	text_path_set(&tp, &path)
+	testing.expect_value(t, text_path_length(&tp), 400)
+
+	pieces := [?]Text_Piece{{text = "AVA", style = {size = 20}}}
+	text_layout(&fonts, pieces[:], {}, &l)
+	straight := [3]f32{l.glyphs[0].x, l.glyphs[1].x, l.glyphs[2].x}
+	// From 5 before the end: the glyphs past it go on along the top edge.
+	text_layout_on_path(&l, &tp, {start = 395})
+	for turn in l.turns {
+		testing.expect(t, turn != {})
+	}
+	last := len(l.glyphs) - 1
+	testing.expect(t, near(l.turns[last], {1, 0}))
+	testing.expect(t, abs(l.glyphs[last].y) < 1e-3 && abs(l.glyphs[last].x - (straight[last] - 5)) < 1e-3)
+
+	// Centred about the start: the first half wraps back onto the end.
+	text_layout(&fonts, pieces[:], {align = .Center}, &l)
+	text_layout_on_path(&l, &tp, {anchor = .Center})
+	for turn in l.turns {
+		testing.expect(t, turn != {})
+	}
+	testing.expect(t, near(l.turns[0], {0, -1}))
+
+	// More than a circuit of a short path: the glyphs past it don't show.
+	path_reset(&path)
+	path_move_to(&path, 0, 0)
+	path_line_to(&path, 10, 0)
+	path_line_to(&path, 10, 10)
+	path_line_to(&path, 0, 10)
+	path_close(&path)
+	text_path_set(&tp, &path)
+	long := [?]Text_Piece{{text = "AVAVAVA", style = {size = 20}}}
+	text_layout(&fonts, long[:], {}, &l)
+	text_layout_on_path(&l, &tp, {})
+	testing.expect(t, l.turns[0] != {} && l.turns[len(l.turns) - 1] == {})
+}

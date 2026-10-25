@@ -2749,7 +2749,11 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	// Segments in proportion to the text, so it sits alike at any scale.
 	segment := doc.pieces[ch.pieces.start].size / 48
 	text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
-	text_layout_on_path(l, tp, {side = tpd.side})
+	// x = 0 at the anchor, `x` along the path.
+	for &g in l.glyphs {
+		g.x -= x
+	}
+	text_layout_on_path(l, tp, {start = x, side = tpd.side, anchor = ch.anchor})
 	// Text after the path continues from its last glyph's end.
 	end = pen
 	#reverse for run in l.runs {

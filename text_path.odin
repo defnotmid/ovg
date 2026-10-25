@@ -22,8 +22,11 @@ Text_Path_Side :: enum u8 {
 
 Text_Path_Options :: struct {
 	// The distance along the path where x = 0 falls (SVG startOffset).
-	start: f32,
-	side:  Text_Path_Side,
+	start:  f32,
+	side:   Text_Path_Side,
+	// How the text sits about x = 0 (the align it was laid out with, SVG
+	// text-anchor): on a closed path, which circuit of it shows.
+	anchor: Text_Align,
 }
 
 text_path_init :: proc(tp: ^Text_Path, allocator := context.allocator) {
@@ -95,11 +98,24 @@ text_path_at :: proc(tp: ^Text_Path, d: f32) -> (p, dir: Vec2, ok: bool) {
 // Places the glyphs of `l` (laid out from x = 0, y = 0) along the path:
 // each glyph's origin moves onto it and `l.turns` takes its direction (cos,
 // sin), a glyph whose middle falls off the path getting {0, 0} (it isn't
-// drawn). Drawing turns each glyph about its origin; `text_layout_path`
+// drawn). A path of one closed contour takes one circuit of text, wrapping
+// round past its end (SVG 2): the glyphs whose middles lie within a path's
+// length after x = 0 (anchor .Left), around it (.Center) or before it
+// (.Right). Drawing turns each glyph about its origin; `text_layout_path`
 // follows the turns, and the layout's extent covers the turned glyphs.
 text_layout_on_path :: proc(l: ^Text_Layout, tp: ^Text_Path, opts: Text_Path_Options) {
 	resize(&l.turns, len(l.glyphs))
 	total := text_path_length(tp)
+	closed := len(tp.flat.contours) == 1 && tp.flat.contours[0].closed
+	// The circuit's first x.
+	circuit: f32
+	switch opts.anchor {
+	case .Left:
+	case .Center:
+		circuit = -total * 0.5
+	case .Right:
+		circuit = -total
+	}
 	l.min, l.max = {math.F32_MAX, math.F32_MAX}, {-math.F32_MAX, -math.F32_MAX}
 	for run in l.runs {
 		font := text_layout_font(l, run)
@@ -108,11 +124,18 @@ text_layout_on_path :: proc(l: ^Text_Layout, tp: ^Text_Path, opts: Text_Path_Opt
 			turn := &l.turns[run.first + k]
 			adv, _ := font_glyph_advance(font, g.glyph)
 			half := f32(adv) * run.em * 0.5
-			d := opts.start + g.x + half
+			mid := g.x + half
+			d := opts.start + mid
+			if closed && total > 0 {
+				d -= total * math.floor(d / total)
+			}
 			if opts.side == .Right {
 				d = total - d
 			}
 			p, dir, ok := text_path_at(tp, d)
+			if closed && (mid < circuit || mid > circuit + total) {
+				ok = false
+			}
 			if !ok {
 				turn^ = {}
 				continue

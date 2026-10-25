@@ -4,6 +4,7 @@ import "core:math"
 import "core:slice"
 import "core:strings"
 import "core:sync"
+import "core:unicode"
 
 import ft "deps:oglyph/font"
 
@@ -55,6 +56,21 @@ Font_Collection :: struct {
 	// PLACE_FALLBACK, PLACE_EMOJI or PLACE_GONE (removed, or an emoji face
 	// replaced).
 	places:         [dynamic]i32,
+	// The faces of `faces` by a hash of their family (family_hash),
+	// ascending, with what finding one scores: a family's faces lie
+	// together, so a find is a binary search and a sweep of its run, not a
+	// scan of every face.
+	by_family:      [dynamic]Family_Entry,
+}
+
+@(private)
+Family_Entry :: struct {
+	hash:   u64,
+	face:   Face_Id,
+	// The face's (its family string, borrowed).
+	family: string,
+	weight: i32,
+	italic: bool,
 }
 
 @(private = "file")
@@ -67,6 +83,7 @@ PLACE_GONE :: -3
 font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator) {
 	c.faces = make([dynamic]Font_Face, allocator)
 	c.places = make([dynamic]i32, allocator)
+	c.by_family = make([dynamic]Family_Entry, allocator)
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
 	font, _ := font_load(data, 0, allocator)
 	family, weight, italic := font_identity(data, &font, allocator)
@@ -85,6 +102,7 @@ font_collection_destroy :: proc(c: ^Font_Collection) {
 	}
 	delete(c.faces)
 	delete(c.places)
+	delete(c.by_family)
 	delete(c.fallback.family, allocator)
 	font_destroy(&c.fallback.font)
 	if e, ok := &c.emoji.?; ok {
@@ -132,6 +150,7 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 	// A collection never initialized takes its allocator here, not from
 	// the first append.
 	c.faces.allocator = allocator
+	c.by_family.allocator = allocator
 	added := 0
 	for index in 0 ..< 64 {
 		font, err := font_load(data, i32(index), allocator, variations)
@@ -149,7 +168,10 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 				italic = v.value != 0
 			}
 		}
-		append(&c.faces, Font_Face{family, weight, italic, font, face_id_new(c, i32(len(c.faces)))})
+		id := face_id_new(c, i32(len(c.faces)))
+		append(&c.faces, Font_Face{family, weight, italic, font, id})
+		h := family_hash(family)
+		inject_at(&c.by_family, family_first(c, h), Family_Entry{h, id, c.faces[len(c.faces) - 1].family, i32(weight), italic})
 		added += 1
 	}
 	if at := len(c.faces) - added; before < at {
@@ -169,6 +191,13 @@ font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 		c.default_family = ""
 	}
 	c.places[face.id.index] = PLACE_GONE
+	h := family_hash(face.family)
+	for k := family_first(c, h); k < len(c.by_family) && c.by_family[k].hash == h; k += 1 {
+		if c.by_family[k].face == face.id {
+			ordered_remove(&c.by_family, k)
+			break
+		}
+	}
 	delete(face.family, collection_allocator(c))
 	font_destroy(&face.font)
 	ordered_remove(&c.faces, i)
@@ -222,6 +251,43 @@ face_id_new :: proc(c: ^Font_Collection, place: i32) -> Face_Id {
 	return {c.serial, u32(len(c.places) - 1)}
 }
 
+// A hash of a family name that names equal under strings.equal_fold
+// share: each character taken as the least of its case-fold orbit
+// (unicode.simple_fold), as equal_fold compares them.
+@(private = "file")
+family_hash :: proc(family: string) -> u64 {
+	h: u64 = 0xcbf29ce484222325
+	for r in family {
+		least := r
+		if r < 0x80 {
+			if r >= 'a' && r <= 'z' {
+				least = r - ('a' - 'A')
+			}
+		} else {
+			for f := unicode.simple_fold(r); f != r; f = unicode.simple_fold(f) {
+				least = min(least, f)
+			}
+		}
+		h = (h ~ u64(least)) * 0x100000001b3
+	}
+	return h
+}
+
+// The first entry of `by_family` at or past hash `h`.
+@(private = "file")
+family_first :: proc(c: ^Font_Collection, h: u64) -> int {
+	lo, hi := 0, len(c.by_family)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if c.by_family[mid].hash < h {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
 // The places of faces[from:], after they moved.
 @(private = "file")
 face_places :: proc(c: ^Font_Collection, from: int) {
@@ -255,22 +321,36 @@ font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, i
 		}
 	}
 	want := weight if weight > 0 else 400
+	// The best by score, then by place (earlier faces win ties).
 	best := -1
 	best_score := max(int)
-	for &f, i in c.faces {
-		if family != "" && !strings.equal_fold(f.family, family) {
-			continue
+	score :: #force_inline proc(f: ^Font, weight: int, face_italic: bool, want: int, italic: bool, variations: []Font_Variation) -> int {
+		s := abs(weight - want) * 2 + (0 if face_italic == italic else 10000)
+		if len(variations) > 0 && !picks_instance(f, variations) {
+			s += 1 << 30
 		}
-		score := abs(f.weight - want) * 2 + (0 if f.italic == italic else 10000)
-		if len(variations) > 0 && !picks_instance(&f.font, variations) {
-			score += 1 << 30
+		return s
+	}
+	if family == "" {
+		// No family asked for: every face competes, the first of the right
+		// style winning.
+		for &f, i in c.faces {
+			if sc := i + score(&f.font, f.weight, f.italic, want, italic, variations); sc < best_score {
+				best, best_score = i, sc
+			}
 		}
-		if family == "" {
-			// No family asked for: the first face of the right style.
-			score += i
-		}
-		if score < best_score {
-			best, best_score = i, score
+	} else {
+		// The family's run of the index, scored from its entries.
+		h := family_hash(family)
+		for k := family_first(c, h); k < len(c.by_family) && c.by_family[k].hash == h; k += 1 {
+			e := &c.by_family[k]
+			if e.family != family && !strings.equal_fold(e.family, family) {
+				continue
+			}
+			at := int(c.places[e.face.index])
+			if sc := score(&c.faces[at].font, int(e.weight), e.italic, want, italic, variations); sc < best_score || (sc == best_score && at < best) {
+				best, best_score = at, sc
+			}
 		}
 	}
 	if best < 0 {

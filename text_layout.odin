@@ -153,12 +153,8 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	for piece in pieces {
 		bytes += len(piece.text)
 	}
-	scratch_size(&s.piece_start, len(pieces))
-	scratch_size(&s.piece_size, len(pieces))
-	scratch_size(&s.piece_features, len(pieces))
-	scratch_size(&s.runes, bytes)
-	scratch_size(&s.piece, bytes)
-	scratch_size(&s.face, bytes)
+	scratch_size(&s.pieces, len(pieces))
+	scratch_size(&s.chars, bytes)
 	n: i32
 	// The highest codepoint: emoji and mark fallback have nothing to do
 	// below the first they look at.
@@ -169,9 +165,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		if pi == 0 {
 			first = face
 		}
-		s.piece_start[pi] = n
-		s.piece_size[pi] = size
-		s.piece_features[pi] = shaper_add_piece_features(s, piece.style)
+		s.pieces[pi] = {n, size, shaper_add_piece_features(s, piece.style)}
 		// The face's characters, as its shaping tables map them.
 		font := font_collection_font(fonts, face)
 		cmap := &font_shaping(fonts, font).cmap
@@ -182,25 +176,20 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 					id = f
 				}
 			}
-			s.runes[n], s.piece[n], s.face[n] = r, i32(pi), id
+			s.chars[n] = {char = r, piece = i32(pi), face = id}
 			top = max(top, r)
 			n += 1
 		}
 	}
-	scratch_size(&s.runes, int(n))
-	scratch_size(&s.piece, int(n))
-	scratch_size(&s.face, int(n))
+	scratch_size(&s.chars, int(n))
 	if top >= 0x200D {
-		emoji_fallback(fonts, s.runes[:], s.face[:])
+		emoji_fallback(fonts, s.chars.char[:n], s.chars.face[:n])
 	}
 	if top >= 0x300 {
 		mark_fallback(fonts, s)
 	}
-	scratch_size(&s.script, int(n))
-	scratch_size(&s.level, int(n))
-	scratch_size(&s.bidi, int(n))
 
-	first_font, first_size := font_collection_font(fonts, first), s.piece_size[0]
+	first_font, first_size := font_collection_font(fonts, first), s.pieces[0].size
 	first_em := font_scale_for_em(first_font, first_size)
 	line_height := (opts.line_height if opts.line_height > 0 else 1.2) * first_size
 
@@ -210,7 +199,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	next_piece := 0
 	for a: i32 = 0; a <= n; {
 		b := a
-		for b < n && s.runes[b] != '\n' {
+		for b < n && s.chars[b].char != '\n' {
 			b += 1
 		}
 		// Letter spacing follows every glyph but the last of a line (as usvg
@@ -218,7 +207,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		trailing: f32
 		layout_line(fonts, s, pieces, l, a, b, &pen, &next_piece, &trailing)
 		// Offsets of pieces starting at the line end (or with the newline).
-		for next_piece < len(pieces) && s.piece_start[next_piece] <= b {
+		for next_piece < len(pieces) && s.pieces[next_piece].start <= b {
 			pen += {pieces[next_piece].dx, pieces[next_piece].dy}
 			next_piece += 1
 		}
@@ -353,13 +342,14 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 	}
 	shaper_itemize(s, a, b)
 	for i := a; i < b; {
-		face, size, script, level := s.face[i], s.piece_size[s.piece[i]], s.script[i], s.level[i]
+		c := s.chars[i]
+		size := s.pieces[c.piece].size
 		j := i + 1
-		for j < b && s.face[j] == face && s.piece_size[s.piece[j]] == size && s.script[j] == script && s.level[j] == level {
+		for j < b && s.chars[j].face == c.face && s.pieces[s.chars[j].piece].size == size && s.chars[j].script == c.script && s.chars[j].level == c.level {
 			j += 1
 		}
-		f := font_collection_font(fonts, face)
-		append(&s.segs, Shape_Segment{first = i, count = j - i, face = face, font = f, em = font_scale_for_em(f, size), script = script, level = level})
+		f := font_collection_font(fonts, c.face)
+		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = f, em = font_scale_for_em(f, size), script = c.script, level = c.level})
 		i = j
 	}
 	for &seg in s.segs {
@@ -375,15 +365,15 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 		seg := &s.segs[si]
 		em := seg.em
 		for g in s.glyphs[seg.glyph_first:][:seg.glyph_count] {
-			if rune_is_default_ignorable(s.runes[g.cluster]) {
+			if rune_is_default_ignorable(s.chars[g.cluster].char) {
 				// Joiners and variation selectors left over by shaping.
 				continue
 			}
-			for next_piece^ < len(pieces) && s.piece_start[next_piece^] <= g.cluster {
+			for next_piece^ < len(pieces) && s.pieces[next_piece^].start <= g.cluster {
 				pen^ += {pieces[next_piece^].dx, pieces[next_piece^].dy}
 				next_piece^ += 1
 			}
-			style := &pieces[s.piece[g.cluster]].style
+			style := &pieces[s.chars[g.cluster].piece].style
 			if n := len(l.runs); n == 0 || l.runs[n - 1].face != seg.face || l.runs[n - 1].em != em || l.runs[n - 1].paint != style.paint {
 				append(&l.runs, Text_Run{seg.face, em, style.paint, k, 0})
 			}
@@ -455,37 +445,38 @@ mark_fallback :: proc(fonts: ^Font_Collection, s: ^Text_Shaper) {
 	is_mark :: proc(r: rune) -> bool {
 		return unicode.is_nonspacing_mark(r) || unicode.is_enclosing_mark(r) || unicode.is_spacing_mark(r)
 	}
-	n := len(s.runes)
+	n := len(s.chars)
+	char, piece, face := s.chars.char[:n], s.chars.piece[:n], s.chars.face[:n]
 	for i := 1; i < n; i += 1 {
-		if s.face[i] == s.face[i - 1] || !is_mark(s.runes[i]) {
+		if face[i] == face[i - 1] || !is_mark(char[i]) {
 			continue
 		}
 		// The cluster: back to its base, on to its last mark (one piece).
 		base := i - 1
-		for base > 0 && is_mark(s.runes[base]) && s.piece[base - 1] == s.piece[i] {
+		for base > 0 && is_mark(char[base]) && piece[base - 1] == piece[i] {
 			base -= 1
 		}
 		end := i + 1
-		for end < n && is_mark(s.runes[end]) && s.piece[end] == s.piece[i] {
+		for end < n && is_mark(char[end]) && piece[end] == piece[i] {
 			end += 1
 		}
-		if s.piece[base] != s.piece[i] {
+		if piece[base] != piece[i] {
 			i = end - 1
 			continue
 		}
 		for k in base ..< end {
-			id := s.face[k]
+			id := face[k]
 			f := font_collection_font(fonts, id)
 			has_all := true
 			for j in base ..< end {
-				if font_glyph_index_drawable(f, s.runes[j]) == 0 {
+				if font_glyph_index_drawable(f, char[j]) == 0 {
 					has_all = false
 					break
 				}
 			}
 			if has_all {
 				for j in base ..< end {
-					s.face[j] = id
+					face[j] = id
 				}
 				break
 			}
