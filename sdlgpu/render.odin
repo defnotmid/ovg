@@ -13,7 +13,8 @@ import vg ".."
 // instances; shapes new to the store go up first. Recording merges neighbouring rows that
 // share a pipeline, textures, scissor and target into one draw call. Shape
 // rows aren't scissored: each instance carries its scissor's pixels, which
-// the shader keeps to, so instances under any scissors draw together.
+// the shader keeps to where the instance's quad reaches out of them, so
+// instances under any scissors draw together.
 
 Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
@@ -306,8 +307,13 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				continue
 			}
 			row := draw_row(&p, cmd)
+			// The whole target cuts nothing a draw would draw: no quad
+			// reaches out of it.
 			sc := row.scissor
-			clip := [4]f32{f32(sc.x), f32(sc.y), f32(sc.x + sc.w), f32(sc.y + sc.h)}
+			clip := [4]f32{-math.F32_MAX, -math.F32_MAX, math.F32_MAX, math.F32_MAX}
+			if sc != {0, 0, i32(p.target.width), i32(p.target.height)} {
+				clip = {f32(sc.x), f32(sc.y), f32(sc.x + sc.w), f32(sc.y + sc.h)}
+			}
 			for &k in b.shape_clips[c.instances.start:][:c.instances.count] {
 				k = clip
 			}
@@ -454,8 +460,9 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 // instances whose bounds meet it, in order, so a pixel looks at the few
 // near it; a record covers a row's run of cells that list any. Records map
 // cell units to drawing coordinates and share the grid (`group_words`,
-// placed in the store): each cell's first list entry, one more for the
-// end, then the lists (instances from the first).
+// placed in the store): its columns and rows (nx | ny << 16), each cell's
+// first list entry, one more for the end, then the lists (instances from
+// the first).
 @(private = "file")
 plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) {
 	b := p.b
@@ -482,11 +489,14 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 		j1 = clamp(int((b.maxy - area.miny) / ch), 0, ny - 1)
 		return
 	}
-	// Indices into `group_words` (it grows below): its starts, then lists.
-	at := len(b.group_words)
+	// Indices into `group_words` (it grows below): the grid's size, its
+	// starts, then lists.
+	head := len(b.group_words)
+	at := head + 1
 	lists := at + nx * ny + 1
 	resize(&b.group_words, lists)
 	words := &b.group_words
+	words[head] = u32(nx) | u32(ny) << 16
 	for k in at ..< lists {
 		words[k] = 0
 	}
@@ -533,7 +543,7 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 				m = {cw, 0, 0, ch},
 				t = {area.minx, area.miny, 0, 0},
 				bounds = {f32(i0), f32(j), f32(i), f32(j + 1)},
-				data = {u32(at), c.group - 1, c.instances.start, u32(nx) | u32(ny) << 16},
+				data = {u32(head), c.group - 1, c.instances.start, 0},
 				clip = clip,
 			})
 		}

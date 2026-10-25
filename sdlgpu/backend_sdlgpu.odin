@@ -193,8 +193,8 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	b.vert = shader(b, VERT_SPV, VERT_MSL, "vs_main", .VERTEX, 0, 0, 1)
 	b.frag = shader(b, FRAG_SPV, FRAG_MSL, "fs_main", .FRAGMENT, 2, 1, 0)
 	b.shape_vert = shader(b, SHAPE_VERT_SPV, SHAPE_VERT_MSL, "vs_shape", .VERTEX, 0, 1, 2)
-	b.shape_frag = shader(b, SHAPE_FRAG_SPV, SHAPE_FRAG_MSL, "fs_shape", .FRAGMENT, 2, 2, 0)
-	b.shape_box_frag = shader(b, SHAPE_BOX_FRAG_SPV, SHAPE_BOX_FRAG_MSL, "fs_shape_box", .FRAGMENT, 2, 2, 0)
+	b.shape_frag = shader(b, SHAPE_FRAG_SPV, SHAPE_FRAG_MSL, "fs_shape", .FRAGMENT, 2, 3, 0)
+	b.shape_box_frag = shader(b, SHAPE_BOX_FRAG_SPV, SHAPE_BOX_FRAG_MSL, "fs_shape_box", .FRAGMENT, 2, 3, 0)
 	b.shape_group_frag = shader(b, SHAPE_GROUP_FRAG_SPV, SHAPE_GROUP_FRAG_MSL, "fs_shape_group", .FRAGMENT, 2, 3, 0)
 	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil || b.shape_group_frag == nil {
 		return .Shader_Compile

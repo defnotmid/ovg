@@ -759,8 +759,9 @@ struct VS_Shape_Out {
     // Drawing coordinates.
     float2 fpos : TEXCOORD1;
     nointerpolation float4 uv : TEXCOORD2;
+    // The instance's data, its w the instance's index, with bit 31 set when
+    // its quad reaches out of its scissor.
     nointerpolation uint4 data : TEXCOORD3;
-    nointerpolation float4 clip : TEXCOORD4;
 };
 
 [shader("vertex")]
@@ -777,18 +778,30 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.rc = rc;
     o.fpos = d;
     o.uv = s.uv;
-    o.data = s.data;
-    o.clip = s.clip;
+    // Whether any corner of the quad lies outside the scissor.
+    float2 lo = float2(s.bounds.x - epp.x, s.bounds.y - epp.y);
+    float2 hi = float2(s.bounds.z + epp.x, s.bounds.w + epp.y);
+    float2 c0 = float2(s.m.x * lo.x + s.m.z * lo.y, s.m.y * lo.x + s.m.w * lo.y) + s.t.xy - view.size.zw;
+    float2 cx_ = float2(s.m.x * (hi.x - lo.x), s.m.y * (hi.x - lo.x));
+    float2 cy_ = float2(s.m.z * (hi.y - lo.y), s.m.w * (hi.y - lo.y));
+    float2 qmin = min(min(c0, c0 + cx_), min(c0 + cy_, c0 + cx_ + cy_));
+    float2 qmax = max(max(c0, c0 + cx_), max(c0 + cy_, c0 + cx_ + cy_));
+    bool cut = any(qmin < s.clip.xy) || any(qmax > s.clip.zw);
+    o.data = uint4(s.data.xyz, (shape_draw.base.x + iid) | (cut ? 0x80000000u : 0u));
     float2 p = d - view.size.zw;
     o.position = float4(2.0 * p.x / view.size.x - 1.0, 1.0 - 2.0 * p.y / view.size.y, 0, 1);
     return o;
 }
 
 // Leaves the pixels outside the instance's scissor, as a scissored draw
-// would, before any coverage work.
+// would, before any coverage work; only an instance whose quad reaches out
+// of it reads it.
 void shape_clip(VS_Shape_Out i) {
-    if (any(i.position.xy < i.clip.xy) || any(i.position.xy >= i.clip.zw)) {
-        discard;
+    if ((i.data.w & 0x80000000u) != 0u) {
+        float4 clip = members[i.data.w & 0x7fffffffu].clip;
+        if (any(i.position.xy < clip.xy) || any(i.position.xy >= clip.zw)) {
+            discard;
+        }
     }
 }
 
@@ -837,17 +850,18 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
 
 // A group (ovg Cmd_Draw_Shapes.group): a record over its instances'
 // bounds, in cells (rc: cell units; data: its grid's word offset in
-// `shapes`, the tint's paint row, the first instance, and the grid's
-// columns and rows). Each pixel composites the instances its cell lists, in
+// `shapes`, the grid's columns and rows its first word, the tint's paint
+// row and the first instance). Each pixel composites the instances its cell lists, in
 // order, each shaded as `shape_fill` would, source-over, then takes the
 // tint.
 [shader("fragment")]
 float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
     shape_clip(i);
-    uint nx = i.data.w & 0xffffu;
-    uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, i.data.w >> 16) - 1u);
-    uint at = i.data.x + cell.y * nx + cell.x;
-    uint lists = i.data.x + nx * (i.data.w >> 16) + 1u;
+    uint dims = shapes[i.data.x];
+    uint nx = dims & 0xffffu;
+    uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, dims >> 16) - 1u);
+    uint at = i.data.x + 1u + cell.y * nx + cell.x;
+    uint lists = i.data.x + 1u + nx * (dims >> 16) + 1u;
     float4 acc = float4(0, 0, 0, 0);
     for (uint k = shapes[at]; k < shapes[at + 1u]; k++) {
         Shape_Instance s = members[i.data.z + shapes[lists + k]];

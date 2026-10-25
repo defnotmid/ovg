@@ -53,14 +53,14 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.5), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.6), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.5 https://github.com/defnotmid/oglyph
+git clone -b v0.0.6 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -127,6 +127,10 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   made into it (rare, history-dependent pixel errors on RADV).
 - Redundant state is skipped within a render pass: uniforms, samplers and
   scissor are set only when they change.
+- Shape draws aren't scissored by draw: each instance carries its
+  scissor's pixels, and the vertex shader marks those whose quad reaches
+  out of them, whose pixels then test them, so shapes under different
+  scissors draw in one call.
 - Pipelines are cached by blend factors, target format and kind (quads,
   shapes, box shapes, groups). There is no depth or stencil buffer. Blur
   intermediates are kept per image shape and released after 30 frames
