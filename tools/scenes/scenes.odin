@@ -86,6 +86,7 @@ ALL := [?]Scene {
 	{"turbulence", scene_turbulence},
 	{"layer_blend", scene_layer_blend},
 	{"layer_groups", scene_layer_groups},
+	{"backdrop_blur", scene_backdrop_blur},
 	{"svg", scene_svg},
 	{"lottie", scene_lottie},
 	{"lottie_text_fx", scene_lottie_text_fx},

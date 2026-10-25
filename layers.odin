@@ -683,14 +683,14 @@ layer_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, sigma: f32) -> I
 }
 
 // Blurs `src` into `dst` (both of the window's size) with per-axis sigma in
-// pixels. Above `max_exact` the blur runs on a copy downscaled by
-// sigma / max_exact, on the grid a whole-canvas copy would use, so the
-// result does not depend on where the window is.
+// pixels, `edge` beyond `src`. Above `max_exact` the blur runs on a copy
+// downscaled by sigma / max_exact, on the grid a whole-canvas copy would
+// use, so the result does not depend on where the window is.
 @(private)
-layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma: [2]f32, max_exact: f32) {
+layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma: [2]f32, max_exact: f32, edge := Blur_Edge.Transparent) {
 	s := max(sigma.x, sigma.y)
 	if s <= max_exact {
-		filter_image(c, dst, Blur_XY{sigma.x, sigma.y, .Transparent}, src)
+		filter_image(c, dst, Blur_XY{sigma.x, sigma.y, edge}, src)
 		return
 	}
 	win := ls.window
@@ -725,7 +725,7 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 		f32(win.h) * f32(gh) / ch,
 	)
 	blurred := layer_acquire(ls, c, sw, sh, format = info.format)
-	filter_image(c, blurred, Blur_XY{sigma.x / f, sigma.y / f, .Transparent}, small)
+	filter_image(c, blurred, Blur_XY{sigma.x / f, sigma.y / f, edge}, small)
 	layer_release(ls, small)
 	layer_draw_image(
 		ls,
@@ -739,6 +739,60 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 		f32(sw) * cw / f32(gw),
 		f32(sh) * ch / f32(gh),
 	)
+	layer_release(ls, blurred)
+}
+
+// Blurs what the current target holds under `p` (current units and
+// transform) with a Gaussian of `sigma` (current units) and fills `p` with
+// it, in draw order: the backdrop of a translucent panel drawn next (CSS
+// backdrop-filter: blur()). Past the target's edges the blur repeats them.
+// The target must hold its pixels: the root layer (`layer_stack_begin`
+// with `root_layer` to draw to the screen) or an offscreen image, with no
+// layer pushed; otherwise nothing is drawn. The fill takes the current
+// scissor, global alpha and blend.
+layer_backdrop_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Path, sigma: f32) {
+	top := ls.targets[len(ls.targets) - 1]
+	backdrop, is_image := top.target.(Image_Id)
+	if !is_image || len(ls.frames) > 0 || sigma <= 0 {
+		return
+	}
+	info, _ := image_info(c, backdrop)
+	t := state(c).transform
+	s := sigma * transform_average_scale(t)
+	// The target's pixels the blur reads: the path's, grown by its reach.
+	reach := blur_reach({s, s}, LAYER_MAX_EXACT_SIGMA)
+	b := path_device_bounds(c, p, t)
+	ox, oy := f32(top.origin.x), f32(top.origin.y)
+	x0 := max(math.floor(b.minx - reach.x), ox)
+	y0 := max(math.floor(b.miny - reach.y), oy)
+	x1 := min(math.ceil(b.maxx + reach.x), ox + f32(info.width))
+	y1 := min(math.ceil(b.maxy + reach.y), oy + f32(info.height))
+	if !(x0 < x1 && y0 < y1) {
+		return
+	}
+	// Pooled by bucket size; past the target the copy repeats its edges, as
+	// the blur does.
+	w := layer_bucket(u32(x1 - x0), info.width)
+	h := layer_bucket(u32(y1 - y0), info.height)
+	region := layer_acquire(ls, c, w, h)
+	layer_draw_image(ls, c, region, w, h, backdrop, ox - x0, oy - y0, f32(info.width), f32(info.height))
+	blurred := layer_acquire(ls, c, w, h)
+	window := ls.window
+	ls.window = {u32(x0 - ox), u32(y0 - oy), w, h}
+	layer_blur_into(ls, c, blurred, region, {s, s}, LAYER_MAX_EXACT_SIGMA, .Clamp)
+	ls.window = window
+	layer_release(ls, region)
+	// The path in device pixels, so the blurred pixels land where they
+	// were read whatever the transform.
+	save(c)
+	reset_transform(c)
+	path_reset(&ls.scratch)
+	append(&ls.scratch.verbs, ..p.verbs[:])
+	for q in p.coords {
+		append(&ls.scratch.coords, transform_point(t, q.x, q.y))
+	}
+	fill_path(c, &ls.scratch, paint_image(blurred, x0, y0, f32(w), f32(h), 0, 1))
+	restore(c)
 	layer_release(ls, blurred)
 }
 

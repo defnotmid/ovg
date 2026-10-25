@@ -409,3 +409,40 @@ scene_layer_groups :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_pop(ls, c)
 	vg.layer_stack_end(ls, c)
 }
+
+// Backdrop blurs (vg.layer_backdrop_blur) over stripes, text and a
+// gradient: a rounded panel with per-corner radii under a translucent fill
+// (as a floating menu), a wide blur (the downscaled path) under a rotated
+// one, and one against the target's edge.
+scene_backdrop_blur :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H, nil, true)
+	vg.clear_rect(c, 0, 0, W, H, vg.rgb(250, 250, 245))
+	p := &r.path
+	vg.path_reset(p)
+	for x in 0 ..< W / 6 {
+		vg.path_rect(p, f32(6 * x), 0, 3, H)
+	}
+	vg.fill_path(c, p, vg.paint_linear_gradient(0, 0, W, H, vg.rgb(20, 60, 200), vg.rgb(220, 40, 60)))
+	f, g, em := lay(r, "Backdrop", 12, 60, 40)
+	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgb(10, 10, 10)), &r.scratch)
+
+	vg.path_reset(p)
+	vg.path_rounded_rect_varying(p, 20, 30, 120, 60, 12, 4, 12, 4)
+	vg.layer_backdrop_blur(ls, c, p, 4)
+	vg.fill_path(c, p, vg.paint_color(vg.rgba(255, 255, 255, 90)))
+
+	vg.save(c)
+	vg.translate(c, 190, 120)
+	vg.rotate(c, 0.3)
+	vg.path_reset(p)
+	vg.path_rounded_rect(p, -40, -30, 80, 60, 10)
+	vg.layer_backdrop_blur(ls, c, p, 10)
+	vg.fill_path(c, p, vg.paint_color(vg.rgba(20, 20, 30, 70)))
+	vg.restore(c)
+
+	vg.path_reset(p)
+	vg.path_rect(p, 0, 150, 60, H - 150)
+	vg.layer_backdrop_blur(ls, c, p, 3)
+	vg.layer_stack_end(ls, c)
+}

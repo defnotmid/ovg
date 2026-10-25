@@ -633,6 +633,54 @@ test_sw_layer_global_alpha :: proc(t: ^testing.T) {
 	near(t, px(&s, 24, 8), {0, 0, 255, 255})
 }
 
+// A backdrop blur fills its path with what was drawn under it, blurred:
+// one-pixel stripes turn grey inside a rounded rect, stay sharp outside it
+// and in the corner its arc leaves out, and stay opaque at the target's
+// edge (the blur repeats the edge). Without a root layer there is no
+// backdrop to read and nothing is drawn.
+@(test)
+test_layer_backdrop_blur :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 40)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	stripes :: proc(c: ^Canvas, p: ^Path) {
+		clear_rect(c, 0, 0, 64, 40, WHITE)
+		path_reset(p)
+		for x in 0 ..< 32 {
+			path_rect(p, f32(2 * x), 0, 1, 40)
+		}
+		fill_path(c, p, paint_color(BLACK))
+	}
+	frame :: proc(c: ^Canvas, ls: ^Layer_Stack, p: ^Path, root: bool) {
+		layer_stack_begin(ls, c, 64, 40, nil, root)
+		stripes(c, p)
+		path_reset(p)
+		path_rounded_rect(p, 16, 8, 32, 24, 6)
+		layer_backdrop_blur(ls, c, p, 2)
+		path_reset(p)
+		path_rect(p, 0, 30, 10, 10)
+		layer_backdrop_blur(ls, c, p, 2)
+		layer_stack_end(ls, c)
+		flush(c)
+	}
+	frame(c, &ls, &p, true)
+	mid := px(&s, 32, 20)
+	testing.expect(t, mid.r > 100 && mid.r < 156 && mid.a == 255)
+	testing.expect_value(t, px(&s, 8, 20), [4]u8{0, 0, 0, 255})
+	testing.expect_value(t, px(&s, 9, 20), [4]u8{255, 255, 255, 255})
+	testing.expect_value(t, px(&s, 16, 8), [4]u8{0, 0, 0, 255})
+	edge := px(&s, 0, 38)
+	testing.expect(t, edge.r > 0 && edge.r < 200 && edge.a == 255)
+
+	frame(c, &ls, &p, false)
+	testing.expect_value(t, px(&s, 32, 20), [4]u8{0, 0, 0, 255})
+}
+
 // A layer with only an opacity over shapes draws as one group: the shapes
 // composite, then fade once (the blue hides the red where they overlap).
 @(test)

@@ -696,6 +696,14 @@ every part follows:
   shapes near it. Each layer was a render pass, a few microseconds of GPU
   time however small: a Lottie repeater's 49 fading copies (720p, RADV) took
   1.09 ms, now 0.14 ms (M4 8.4 -> 0.6 ms).
+- **Backdrop blur** (`layer_backdrop_blur(ls, c, path, sigma)`, CSS
+  backdrop-filter: blur()): in draw order, what the target holds under the
+  path is copied out (grown by the blur's reach, into a pooled image),
+  blurred (edges repeated at the target's), and the path filled with it,
+  its edge by exact coverage; a translucent panel drawn next sits on frosted
+  glass. It reads the target, so drawing to the screen takes a root layer
+  (`layer_stack_begin(..., root_layer = true)`); inside a pushed layer it
+  draws nothing.
 - **Images are top-down on both backends**, including images rendered into
   (SDL_GPU puts y = 0 at the top of every target), so a render target can be
   used as an image paint without `Flip_Y`.
