@@ -214,6 +214,39 @@ test_shape_pieces_and_lines :: proc(t: ^testing.T) {
 	testing.expect(t, abs(l.glyphs[3].y - (2 + 24)) < 0.01)
 }
 
+// Each glyph's advance is the pen's step past it: kerned by Vera's kern
+// table (the pair's value on the left glyph's advance), each glyph starts
+// where the one before it ends and the advances add up to the line's
+// width and its trailing letter spacing; a mark (U+0301 on x in JetBrains
+// Mono) steps by nothing, letter spacing included.
+@(test)
+test_text_layout_advances :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	g := fx_layout(&s, "AVAy.", "Bitstream Vera Sans", 3)
+	l := &s.layout
+	testing.expect_value(t, len(l.advances), len(g))
+	sum: f32
+	for k in 0 ..< len(g) {
+		if k > 0 {
+			testing.expect(t, abs(g[k].x - (g[k - 1].x + l.advances[k - 1])) < 0.001)
+		}
+		sum += l.advances[k]
+	}
+	testing.expect(t, abs(sum - (l.lines[0].width + 3)) < 0.001)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	g = fx_layout(&s, "x\u0301x", "JetBrains Mono", 3)
+	testing.expect_value(t, len(g), 3)
+	if len(g) == 3 {
+		font := text_layout_font(l, l.runs[0])
+		adv, _ := font_glyph_advance(font, g[0].glyph)
+		testing.expect(t, abs(l.advances[0] - (f32(adv) * l.runs[0].em + 3)) < 0.001)
+		testing.expect_value(t, l.advances[1], 0)
+		testing.expect(t, abs(g[2].x - (g[0].x + l.advances[0])) < 0.001)
+	}
+}
+
 // Bidi levels in a left-to-right paragraph, without fonts: Arabic letters
 // take their script from the test, as kb's itemization gives them.
 @(test)

@@ -100,6 +100,11 @@ Text_Layout :: struct {
 	// Per glyph: the index of its first codepoint in the text (all pieces'
 	// codepoints in order, newlines included).
 	clusters: [dynamic]i32,
+	// Per glyph: how far the pen steps past it, in pixels (its advance,
+	// plus letter spacing after a base). A line's pen starts at its left
+	// end and moves by the advances, and by the dx of the pieces it
+	// meets, so a glyph ends at its pen plus its advance.
+	advances: [dynamic]f32,
 	runs:     [dynamic]Text_Run,
 	lines:    [dynamic]Text_Line,
 	// Families not in the collection (drawn with the fallback face).
@@ -114,13 +119,15 @@ Text_Layout :: struct {
 // A layout allocating from `allocator`.
 text_layout_init :: proc(l: ^Text_Layout, allocator := context.allocator) {
 	l^ = {}
-	l.glyphs.allocator, l.clusters.allocator, l.runs.allocator = allocator, allocator, allocator
+	l.glyphs.allocator, l.clusters.allocator, l.advances.allocator = allocator, allocator, allocator
+	l.runs.allocator = allocator
 	l.lines.allocator, l.missing.allocator, l.turns.allocator = allocator, allocator, allocator
 }
 
 text_layout_destroy :: proc(l: ^Text_Layout) {
 	delete(l.glyphs)
 	delete(l.clusters)
+	delete(l.advances)
 	delete(l.runs)
 	delete(l.lines)
 	delete(l.missing)
@@ -133,6 +140,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	l.fonts = fonts
 	clear(&l.glyphs)
 	clear(&l.clusters)
+	clear(&l.advances)
 	clear(&l.runs)
 	clear(&l.lines)
 	clear(&l.missing)
@@ -361,6 +369,7 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 	k := len(l.glyphs)
 	scratch_size(&l.glyphs, k + len(s.glyphs))
 	scratch_size(&l.clusters, k + len(s.glyphs))
+	scratch_size(&l.advances, k + len(s.glyphs))
 	for si in s.order {
 		seg := &s.segs[si]
 		em := seg.em
@@ -380,16 +389,20 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 			l.runs[len(l.runs) - 1].count += 1
 			l.glyphs[k] = {Glyph_Index(g.id), pen.x + f32(g.offset.x) * em, pen.y - f32(g.offset.y) * em}
 			l.clusters[k] = g.cluster
-			k += 1
-			pen.x += f32(g.advance) * em
+			step := f32(g.advance) * em
+			pen.x += step
 			if !g.mark {
 				pen.x += style.letter_spacing
+				step += style.letter_spacing
 				trailing^ = style.letter_spacing
 			}
+			l.advances[k] = step
+			k += 1
 		}
 	}
 	scratch_size(&l.glyphs, k)
 	scratch_size(&l.clusters, k)
+	scratch_size(&l.advances, k)
 }
 
 @(private = "file")
