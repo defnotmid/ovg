@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 764 "ovg.slang"
+#line 767 "ovg.slang"
 struct vs_shape_Result_0
 {
     float4 position_0 [[position]];
@@ -11,17 +11,18 @@ struct vs_shape_Result_0
     float2 fpos_0 [[user(TEXCOORD_1)]];
     float4 uv_0 [[user(TEXCOORD_2)]];
     uint4 data_0 [[user(TEXCOORD_3)]];
+    float4 clip_0 [[user(TEXCOORD_4)]];
 };
 
 
-#line 753
+#line 756
 struct Shape_Draw_0
 {
     uint4 base_0;
 };
 
 
-#line 753
+#line 756
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -29,6 +30,7 @@ struct Shape_Instance_natural_0
     packed_float4 bounds_0;
     packed_float4 uv_1;
     packed_uint4 data_1;
+    packed_float4 clip_1;
 };
 
 
@@ -48,7 +50,7 @@ struct KernelContext_0
 };
 
 
-#line 764
+#line 767
 struct VS_Shape_Out_0
 {
     float4 position_1;
@@ -56,161 +58,162 @@ struct VS_Shape_Out_0
     float2 fpos_1;
     [[flat]] float4 uv_2;
     [[flat]] uint4 data_2;
+    [[flat]] float4 clip_2;
 };
 
 
-#line 764
+#line 767
 [[vertex]] vs_shape_Result_0 vs_shape(uint vid_0 [[vertex_id]], uint iid_0 [[instance_id]], uint base_instance_0 [[base_instance]], Shape_Draw_0 constant* shape_draw_1 [[buffer(1)]], Shape_Instance_natural_0 device* shape_instances_1 [[buffer(2)]], View_0 constant* view_1 [[buffer(0)]])
 {
 
-#line 764
+#line 767
     thread KernelContext_0 kernelContext_0;
 
-#line 764
+#line 767
     (&kernelContext_0)->shape_draw_0 = shape_draw_1;
 
-#line 764
+#line 767
     (&kernelContext_0)->shape_instances_0 = shape_instances_1;
 
-#line 764
+#line 767
     (&kernelContext_0)->view_0 = view_1;
 
-#line 776
+#line 780
     Shape_Instance_natural_0 s_0 = shape_instances_1[shape_draw_1->base_0.x + (iid_0 - base_instance_0)];
 
     uint k_0 = vid_0 % 6U;
 
-#line 778
+#line 782
     bool _S1;
     if(k_0 == 1U)
     {
 
-#line 779
+#line 783
         _S1 = true;
 
-#line 779
+#line 783
     }
     else
     {
 
-#line 779
+#line 783
         _S1 = k_0 == 2U;
 
-#line 779
+#line 783
     }
 
-#line 779
+#line 783
     if(_S1)
     {
 
-#line 779
+#line 783
         _S1 = true;
 
-#line 779
+#line 783
     }
     else
     {
 
-#line 779
+#line 783
         _S1 = k_0 == 4U;
 
-#line 779
+#line 783
     }
 
-#line 779
+#line 783
     float cx_0;
 
-#line 779
+#line 783
     if(_S1)
     {
 
-#line 779
+#line 783
         cx_0 = 1.0f;
 
-#line 779
+#line 783
     }
     else
     {
 
-#line 779
+#line 783
         cx_0 = 0.0f;
 
-#line 779
+#line 783
     }
     if(k_0 == 2U)
     {
 
-#line 780
+#line 784
         _S1 = true;
 
-#line 780
+#line 784
     }
     else
     {
 
-#line 780
+#line 784
         _S1 = k_0 == 4U;
 
-#line 780
+#line 784
     }
 
-#line 780
+#line 784
     if(_S1)
     {
 
-#line 780
+#line 784
         _S1 = true;
 
-#line 780
+#line 784
     }
     else
     {
 
-#line 780
+#line 784
         _S1 = k_0 == 5U;
 
-#line 780
+#line 784
     }
 
-#line 780
+#line 784
     float cy_0;
 
-#line 780
+#line 784
     if(_S1)
     {
 
-#line 780
+#line 784
         cy_0 = 1.0f;
 
-#line 780
+#line 784
     }
     else
     {
 
-#line 780
+#line 784
         cy_0 = 0.0f;
 
-#line 780
+#line 784
     }
 
-#line 780
+#line 784
     float4 _S2 = float4(s_0.t_0) ;
     float2 epp_0 = _S2.zw;
 
-#line 781
+#line 785
     float4 _S3 = float4(s_0.bounds_0) ;
     float _S4 = epp_0.x;
 
-#line 782
+#line 786
     float _S5 = mix(_S3.x - _S4, _S3.z + _S4, cx_0);
 
-#line 782
+#line 786
     float _S6 = epp_0.y;
 
-#line 782
+#line 786
     float _S7 = mix(_S3.y - _S6, _S3.w + _S6, cy_0);
 
-#line 782
+#line 786
     float4 _S8 = float4(s_0.m_0) ;
     float2 d_0 = float2(_S8.x * _S5 + _S8.z * _S7 + _S2.x, _S8.y * _S5 + _S8.w * _S7 + _S2.y);
     thread VS_Shape_Out_0 o_0;
@@ -218,29 +221,33 @@ struct VS_Shape_Out_0
     (&o_0)->fpos_1 = d_0;
     (&o_0)->uv_2 = float4(s_0.uv_1) ;
     (&o_0)->data_2 = uint4(s_0.data_1) ;
+    (&o_0)->clip_2 = float4(s_0.clip_1) ;
     float2 p_0 = d_0 - (&kernelContext_0)->view_0->size_0.zw;
     (&o_0)->position_1 = float4(2.0f * p_0.x / (&kernelContext_0)->view_0->size_0.x - 1.0f, 1.0f - 2.0f * p_0.y / (&kernelContext_0)->view_0->size_0.y, 0.0f, 1.0f);
     VS_Shape_Out_0 _S9 = o_0;
 
-#line 791
+#line 796
     thread vs_shape_Result_0 _S10;
 
-#line 791
+#line 796
     (&_S10)->position_0 = _S9.position_1;
 
-#line 791
+#line 796
     (&_S10)->rc_0 = _S9.rc_1;
 
-#line 791
+#line 796
     (&_S10)->fpos_0 = _S9.fpos_1;
 
-#line 791
+#line 796
     (&_S10)->uv_0 = _S9.uv_2;
 
-#line 791
+#line 796
     (&_S10)->data_0 = _S9.data_2;
 
-#line 791
+#line 796
+    (&_S10)->clip_0 = _S9.clip_2;
+
+#line 796
     return _S10;
 }
 

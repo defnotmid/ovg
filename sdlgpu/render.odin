@@ -11,7 +11,9 @@ import vg ".."
 // stream once, in place in its mapped transfer buffer: the canvas's
 // vertices (each naming its paint), the packed paints and the shape
 // instances; shapes new to the store go up first. Recording merges neighbouring rows that
-// share a pipeline, textures, scissor and target into one draw call.
+// share a pipeline, textures, scissor and target into one draw call. Shape
+// rows aren't scissored: each instance carries its scissor's pixels, which
+// the shader keeps to, so instances under any scissors draw together.
 
 Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
@@ -153,7 +155,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		// Written once, straight into the mapped transfer buffer.
 		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
-				out[i] = gpu_shape_instance(inst, vg.instance_words(inst, frame.shape_words), b.shape_offsets[i])
+				out[i] = gpu_shape_instance(inst, vg.instance_words(inst, frame.shape_words), b.shape_offsets[i], b.shape_clips[i])
 			}
 			copy(out[len(frame.shapes):instance_count], b.groups[:])
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
@@ -272,6 +274,7 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 	}
 	clear(&b.groups)
 	clear(&b.group_words)
+	resize(&b.shape_clips, len(frame.shapes))
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
 		case vg.Cmd_Set_Render_Target:
@@ -294,11 +297,20 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			if c.instances.count == 0 {
 				continue
 			}
+			row := draw_row(&p, cmd)
+			sc := row.scissor
+			clip := [4]f32{f32(sc.x), f32(sc.y), f32(sc.x + sc.w), f32(sc.y + sc.h)}
+			for &k in b.shape_clips[c.instances.start:][:c.instances.count] {
+				k = clip
+			}
+			row.kind = .Shapes
+			row.key.shapes = true
+			row.scissor = {0, 0, i32(p.target.width), i32(p.target.height)}
 			if c.group != 0 {
-				plan_group(&p, cmd, c)
+				plan_group(&p, row, c, clip)
 				continue
 			}
-			plan_shape_rows(&p, draw_row(&p, cmd), c.instances)
+			plan_shape_rows(&p, row, c.instances)
 		case vg.Cmd_Filter_Image:
 			plan_filter(&p, cmd, c)
 		case vg.Cmd_Run_Program:
@@ -417,8 +429,6 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 @(private = "file")
 plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 	row := base
-	row.kind = .Shapes
-	row.key.shapes = true
 	start := instances.start
 	for i in instances.start ..< instances.start + instances.count {
 		t := p.frame.shapes[i].transform
@@ -443,7 +453,7 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 // placed in the store): each cell's first list entry, one more for the
 // end, then the lists (instances from the first).
 @(private = "file")
-plan_group :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
+plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) {
 	b := p.b
 	n := int(c.instances.count)
 	bounds := make([]vg.Bounds, n, context.temp_allocator)
@@ -499,9 +509,8 @@ plan_group :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 			}
 		}
 	}
-	row := draw_row(p, cmd)
-	row.kind = .Shapes
-	row.key.shapes, row.key.group = true, true
+	row := base
+	row.key.group = true
 	first := len(b.groups)
 	listed :: proc(words: ^[dynamic]u32, cell: int) -> bool {
 		return words[cell] != words[cell + 1]
@@ -521,6 +530,7 @@ plan_group :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Draw_Shapes) {
 				t = {area.minx, area.miny, 0, 0},
 				bounds = {f32(i0), f32(j), f32(i), f32(j + 1)},
 				data = {u32(at), c.group - 1, c.instances.start, u32(nx) | u32(ny) << 16},
+				clip = clip,
 			})
 		}
 	}

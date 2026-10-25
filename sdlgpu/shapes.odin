@@ -44,6 +44,8 @@ Gpu_Shape_Instance :: struct {
 	bounds: [4]f32,
 	uv:     [4]f32,
 	data:   [4]u32,
+	// The scissor's pixels (target pixels x0, y0, x1, y1).
+	clip:   [4]f32,
 }
 
 @(private)
@@ -187,7 +189,7 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 // The instance as the shader reads it: `words` are its shape's, `offset`
 // their place in the store.
 @(private)
-gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32) -> Gpu_Shape_Instance {
+gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, clip: [4]f32) -> Gpu_Shape_Instance {
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t) * (1 + inst.widen)
 	u, v := vg.instance_footprint(inst)
@@ -199,5 +201,6 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32) -
 		bounds = {x0, y0, x1, y1},
 		uv = {u.x, u.y, v.x, v.y},
 		data = {offset, inst.paint, flags, 0},
+		clip = clip,
 	}
 }

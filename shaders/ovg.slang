@@ -740,13 +740,16 @@ float4 fs_main(VS_Out i) : SV_Target {
 // the shape units one pixel spans per axis (t.zw), the shape's bounds, the
 // pixel's sides in shape units (uv: u.xy, v.xy: its footprint), and its
 // word offset in `shapes`, paint row and flags (bit 0: even-odd; bit 1:
-// aliased, the pixel center's winding).
+// aliased, the pixel center's winding), and its scissor's pixels (target
+// pixels x0, y0, x1, y1: draws aren't scissored, so instances of any
+// scissor draw together).
 struct Shape_Instance {
     float4 m;
     float4 t;
     float4 bounds;
     float4 uv;
     uint4 data;
+    float4 clip;
 };
 
 // Vertex uniform slot 1: the draw's first instance (x).
@@ -769,6 +772,7 @@ struct VS_Shape_Out {
     float2 fpos : TEXCOORD1;
     nointerpolation float4 uv : TEXCOORD2;
     nointerpolation uint4 data : TEXCOORD3;
+    nointerpolation float4 clip : TEXCOORD4;
 };
 
 [shader("vertex")]
@@ -786,9 +790,18 @@ VS_Shape_Out vs_shape(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     o.fpos = d;
     o.uv = s.uv;
     o.data = s.data;
+    o.clip = s.clip;
     float2 p = d - view.size.zw;
     o.position = float4(2.0 * p.x / view.size.x - 1.0, 1.0 - 2.0 * p.y / view.size.y, 0, 1);
     return o;
+}
+
+// Leaves the pixels outside the instance's scissor, as a scissored draw
+// would, before any coverage work.
+void shape_clip(VS_Shape_Out i) {
+    if (any(i.position.xy < i.clip.xy) || any(i.position.xy >= i.clip.zw)) {
+        discard;
+    }
 }
 
 // The paint through the pixel's coverage, as the edge coverage of a path's
@@ -816,6 +829,7 @@ float shape_aliased(VS_Shape_Out i) {
 // leaner shader than the parallelogram one, so it runs with more waves.
 [shader("fragment")]
 float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
+    shape_clip(i);
     paint_index = i.data.y;
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
@@ -825,6 +839,7 @@ float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
 
 [shader("fragment")]
 float4 fs_shape(VS_Shape_Out i) : SV_Target {
+    shape_clip(i);
     paint_index = i.data.y;
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
@@ -840,6 +855,7 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
 // tint.
 [shader("fragment")]
 float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
+    shape_clip(i);
     uint nx = i.data.w & 0xffffu;
     uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, i.data.w >> 16) - 1u);
     uint at = i.data.x + cell.y * nx + cell.x;

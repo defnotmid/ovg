@@ -111,8 +111,10 @@ SDL_Backend :: struct {
 	verts:            [dynamic]vg.Vertex,
 	paints:           [dynamic]Paint,
 	rows:             [dynamic]Row,
-	// Each frame shape instance's shape, as a word offset in `shapes`.
+	// Each frame shape instance's shape, as a word offset in `shapes`, and
+	// its scissor's pixels (target pixels x0, y0, x1, y1).
 	shape_offsets:    [dynamic]u32,
+	shape_clips:      [dynamic][4]f32,
 	// The frame's group records, after its instances, and their grids
 	// (render.odin, plan_group).
 	groups:           [dynamic]Gpu_Shape_Instance,
@@ -145,6 +147,7 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		paints    = make([dynamic]Paint, allocator),
 		rows      = make([dynamic]Row, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
+		shape_clips = make([dynamic][4]f32, allocator),
 		groups = make([dynamic]Gpu_Shape_Instance, allocator),
 		group_words = make([dynamic]u32, allocator),
 	}
@@ -234,6 +237,7 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.paints)
 		delete(b.rows)
 		delete(b.shape_offsets)
+		delete(b.shape_clips)
 		delete(b.groups)
 		delete(b.group_words)
 		b^ = {}
@@ -280,6 +284,7 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.paints)
 	delete(b.rows)
 	delete(b.shape_offsets)
+	delete(b.shape_clips)
 	delete(b.groups)
 	delete(b.group_words)
 
