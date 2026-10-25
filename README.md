@@ -801,8 +801,7 @@ every part follows:
   "Weight", "Bold"). Not handled: explicit bidi controls
   (U+202A..U+202E, U+2066..U+2069), a right-to-left paragraph direction,
   vertical text, MVAR's varied line metrics (ascent and descent stay the
-  default instance's). `layout_simple` still places plain left-to-right
-  text with advances and kerning (UI labels).
+  default instance's). All text, UI labels too, lays out this one way.
 - **Shaping** is oglyph's (`deps:oglyph/shape`; its README has the
   details): HarfBuzz's shapers and lookups, checked against HarfBuzz with
   no differences over its corpora, about HarfBuzz's speed (0.99-1.10x its

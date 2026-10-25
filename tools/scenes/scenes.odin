@@ -18,7 +18,9 @@ Scene :: struct {
 
 Resources :: struct {
 	checker:  vg.Image_Id,
-	font:     vg.Font,
+	// Vera, and a layout of text in it (`lay`).
+	fonts:    vg.Font_Collection,
+	layout:   vg.Text_Layout,
 	scratch:  vg.Path,
 	glyphs:   [dynamic]vg.Positioned_Glyph,
 	path:     vg.Path,
@@ -117,7 +119,8 @@ resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.font_collection_destroy(&r.emoji_fonts)
 	vg.text_layout_destroy(&r.emoji_layout)
 	vg.layer_stack_destroy(&r.layers, c)
-	vg.font_destroy(&r.font)
+	vg.font_collection_destroy(&r.fonts)
+	vg.text_layout_destroy(&r.layout)
 	for shape in r.frame_shapes {
 		vg.shape_destroy(shape)
 		free(shape)
@@ -142,7 +145,7 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 		}
 	}
 	r.checker, _ = vg.create_image(c, vg.image_source_rgba(pix[:], 8, 8))
-	r.font, _ = vg.font_load(FONT_DATA)
+	vg.font_collection_init(&r.fonts, FONT_DATA)
 	vg.font_collection_init(&r.svg_fonts, FONT_DATA)
 	vg.font_collection_init(&r.emoji_fonts, FONT_DATA)
 	vg.font_collection_set_emoji(&r.emoji_fonts, vg.EMOJI_FONT_DATA)
@@ -405,28 +408,30 @@ scene_scissor :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.restore(c)
 }
 
+// Lays out `s` in Vera at `size` from (x, y) into `r.layout`: its one
+// run's font, glyphs and font units to pixels.
+lay :: proc(r: ^Resources, s: string, x, y, size: f32) -> (font: ^vg.Font, glyphs: []vg.Positioned_Glyph, em: f32) {
+	vg.text_layout(&r.fonts, {{text = s, style = {size = size}}}, {x = x, y = y}, &r.layout)
+	run := r.layout.runs[0]
+	return vg.text_layout_font(&r.layout, run), r.layout.glyphs[run.first:][:run.count], run.em
+}
+
 scene_text :: proc(c: ^vg.Canvas, r: ^Resources) {
-	clear(&r.glyphs)
-	sc := vg.font_scale_for_em(&r.font, 28)
-	vg.layout_simple(&r.font, "Vector text!", 10, 40, sc, &r.glyphs)
-	vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], sc, vg.paint_color(vg.rgb(20, 20, 40)), &r.scratch)
-	clear(&r.glyphs)
+	f, g, em := lay(r, "Vector text!", 10, 40, 28)
+	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgb(20, 20, 40)), &r.scratch)
 	vg.save(c)
 	vg.translate(c, 20, 80)
 	vg.rotate(c, 0.15)
-	vg.layout_simple(&r.font, "Rotated", 0, 30, sc, &r.glyphs)
+	f, g, em = lay(r, "Rotated", 0, 30, 28)
 	gp := vg.paint_linear_gradient(0, 0, 150, 0, vg.rgb(255, 60, 0), vg.rgb(120, 0, 255))
-	vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], sc, gp, &r.scratch)
+	vg.fill_glyph_outlines(c, f, g, em, gp, &r.scratch)
 	vg.restore(c)
-	clear(&r.glyphs)
-	small := vg.font_scale_for_em(&r.font, 16)
-	vg.layout_simple(&r.font, "Small glyphs 0123", 10, 170, small, &r.glyphs)
-	vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], small, vg.paint_color(vg.rgb(0, 100, 50)), &r.scratch)
-	clear(&r.glyphs)
-	vg.layout_simple(&r.font, "Outline", 150, 130, sc, &r.glyphs)
+	f, g, em = lay(r, "Small glyphs 0123", 10, 170, 16)
+	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgb(0, 100, 50)), &r.scratch)
+	f, g, em = lay(r, "Outline", 150, 130, 28)
 	op := vg.paint_color(vg.rgb(200, 0, 0))
 	op.stroke.line_width = 1
-	vg.stroke_glyph_outlines(c, &r.font, r.glyphs[:], sc, op, &r.scratch)
+	vg.stroke_glyph_outlines(c, f, g, em, op, &r.scratch)
 }
 
 // COLRv1 colour glyphs (layers, gradients, transforms) among plain text.

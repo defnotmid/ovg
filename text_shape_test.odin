@@ -123,9 +123,8 @@ test_shape_legacy_kern_table :: proc(t: ^testing.T) {
 	testing.expect(t, font.shaping != nil)
 	em := font_scale_for_em(font, 100)
 	adv, _ := font_glyph_advance(font, g[0].glyph)
-	kern := font_glyph_kern(font, g[0].glyph, g[1].glyph)
-	testing.expect(t, kern < 0)
-	testing.expect(t, abs(g[1].x - g[0].x - f32(adv + kern) * em) < 0.01)
+	// Vera's kern table: A V -131 (fontTools).
+	testing.expect(t, abs(g[1].x - g[0].x - f32(adv - 131) * em) < 0.01)
 }
 
 @(test)
@@ -206,9 +205,9 @@ test_shape_pieces_and_lines :: proc(t: ^testing.T) {
 	font := &s.fonts.fallback.font
 	em := font_scale_for_em(font, 20)
 	// Kerning continues across pieces of one face and size.
+	// Vera's kern table: B C -36 (fontTools).
 	adv_b, _ := font_glyph_advance(font, l.glyphs[1].glyph)
-	kern := font_glyph_kern(font, l.glyphs[1].glyph, l.glyphs[2].glyph)
-	testing.expect(t, abs(l.glyphs[2].x - (l.glyphs[1].x + f32(adv_b + kern) * em + 5)) < 0.01)
+	testing.expect(t, abs(l.glyphs[2].x - (l.glyphs[1].x + f32(adv_b - 36) * em + 5)) < 0.01)
 	testing.expect_value(t, l.glyphs[2].y, 2)
 	testing.expect_value(t, l.glyphs[3].x, 0)
 	testing.expect(t, abs(l.glyphs[3].y - (2 + 24)) < 0.01)

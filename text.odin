@@ -5,14 +5,13 @@ import "core:hash"
 import "core:math"
 import "core:mem"
 import "core:sync"
-import "core:unicode/utf8"
 
 import ft "deps:oglyph/font"
 import sh "deps:oglyph/shape"
 
 // Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
 // outlines; glyphs draw as shapes. Shaped layout is `text_layout` over a Font_Collection
-// (text_shape.odin); `layout_simple` places plain left-to-right text.
+// (text_shape.odin).
 
 Font :: struct {
 	face:           ft.Face,
@@ -208,10 +207,6 @@ font_glyph_advance :: proc(f: ^Font, g: Glyph_Index) -> (advance, left_side_bear
 	return i32(ft.advance(&f.face, ft.Glyph(g))), i32(b)
 }
 
-font_glyph_kern :: proc(f: ^Font, a, b: Glyph_Index) -> i32 {
-	return i32(ft.kern(&f.face, ft.Glyph(a), ft.Glyph(b)))
-}
-
 // Appends the glyph outline to `p`, scaled to pixels with its origin at
 // (x, y) and y pointing down.
 font_glyph_path :: proc(f: ^Font, g: Glyph_Index, x, y, scale: f32, p: ^Path) -> bool {
@@ -264,27 +259,6 @@ font_glyph_path_transformed :: proc(f: ^Font, g: Glyph_Index, m: Transform2D, p:
 Positioned_Glyph :: struct {
 	glyph: Glyph_Index,
 	x, y:  f32,
-}
-
-// Plain left-to-right layout using advances and kerning; no shaping,
-// ligatures or bidi. Appends to `out` and returns the pen x after the text.
-layout_simple :: proc(f: ^Font, text: string, x, y, scale: f32, out: ^[dynamic]Positioned_Glyph, letter_spacing: f32 = 0) -> f32 {
-	pen := x
-	prev: Glyph_Index = -1
-	for r in text {
-		if r == utf8.RUNE_ERROR {
-			continue
-		}
-		g := font_glyph_index(f, r)
-		if prev >= 0 {
-			pen += f32(font_glyph_kern(f, prev, g)) * scale
-		}
-		append(out, Positioned_Glyph{g, pen, y})
-		adv, _ := font_glyph_advance(f, g)
-		pen += f32(adv) * scale + letter_spacing
-		prev = g
-	}
-	return pen
 }
 
 // ---- drawing ------------------------------------------------------------------------

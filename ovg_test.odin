@@ -516,19 +516,19 @@ test_sw_text :: proc(t: ^testing.T) {
 	defer sw_close(&s)
 	clear_rect(&s.canvas, 0, 0, 128, 48, WHITE)
 
-	font, err := font_load(#load("assets/Vera.ttf"))
-	testing.expect_value(t, err, Error.None)
-	defer font_destroy(&font)
-	sc := font_scale_for_em(&font, 32)
-	glyphs: [dynamic]Positioned_Glyph
-	defer delete(glyphs)
-	end := layout_simple(&font, "Hi!", 8, 38, sc, &glyphs)
-	testing.expect_value(t, len(glyphs), 3)
-	testing.expect(t, end > 40 && end < 100)
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	l: Text_Layout
+	defer text_layout_destroy(&l)
+	text_layout(&fonts, {{text = "Hi!", style = {size = 32}}}, {x = 8, y = 38}, &l)
+	testing.expect_value(t, len(l.glyphs), 3)
+	testing.expect(t, l.max.x > 40 && l.max.x < 100)
 
 	scratch: Path
 	defer path_destroy(&scratch)
-	fill_glyph_outlines(&s.canvas, &font, glyphs[:], sc, paint_color(BLACK), &scratch)
+	run := l.runs[0]
+	fill_glyph_outlines(&s.canvas, text_layout_font(&l, run), l.glyphs[:], run.em, paint_color(BLACK), &scratch)
 	flush(&s.canvas)
 	// The stem of the "H" is solid; the counter between its stems is not.
 	dark := 0
@@ -791,17 +791,17 @@ test_sw_glyph_outline_area :: proc(t: ^testing.T) {
 	s: Sw
 	sw_open(&s, 160, 64)
 	defer sw_close(&s)
-	font, err := font_load(#load("assets/Vera.ttf"))
-	testing.expect_value(t, err, Error.None)
-	defer font_destroy(&font)
-	sc := font_scale_for_em(&font, 48)
-	glyphs: [dynamic]Positioned_Glyph
-	defer delete(glyphs)
-	layout_simple(&font, "lOB", 8, 52, sc, &glyphs)
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	l: Text_Layout
+	defer text_layout_destroy(&l)
+	text_layout(&fonts, {{text = "lOB", style = {size = 48}}}, {x = 8, y = 52}, &l)
+	font, sc, glyphs := text_layout_font(&l, l.runs[0]), l.runs[0].em, l.glyphs[:]
 	p: Path
 	defer path_destroy(&p)
 	for g in glyphs {
-		font_glyph_path(&font, g.glyph, g.x, g.y, sc, &p)
+		font_glyph_path(font, g.glyph, g.x, g.y, sc, &p)
 	}
 	covered, _ := fill_ink(&s, &p, .Non_Zero)
 

@@ -9,12 +9,10 @@ import vg "../.."
 // even-odd path with an image paint.
 scene_curves :: proc(c: ^vg.Canvas, r: ^Resources) {
 	text :: proc(c: ^vg.Canvas, r: ^Resources, s: string, x, y, size: f32, paint: vg.Paint) {
-		clear(&r.glyphs)
-		sc := vg.font_scale_for_em(&r.font, size)
-		vg.layout_simple(&r.font, s, x, y, sc, &r.glyphs)
-		for g in r.glyphs {
-			if shape := vg.font_glyph_shape(&r.font, g.glyph); shape != nil {
-				vg.fill_shape(c, shape, paint, {sc, 0, 0, sc, g.x, g.y})
+		f, glyphs, em := lay(r, s, x, y, size)
+		for g in glyphs {
+			if shape := vg.font_glyph_shape(f, g.glyph); shape != nil {
+				vg.fill_shape(c, shape, paint, {em, 0, 0, em, g.x, g.y})
 			}
 		}
 	}
@@ -67,14 +65,15 @@ scene_curves_alpha :: proc(c: ^vg.Canvas, r: ^Resources) {
 	run :: proc(c: ^vg.Canvas, r: ^Resources, s: string, x0, y, size, spacing: f32, paint: vg.Paint) {
 		x := x0
 		clear(&r.glyphs)
-		sc := vg.font_scale_for_em(&r.font, size)
+		font := &r.fonts.fallback.font
+		sc := vg.font_scale_for_em(font, size)
 		for ch in s {
-			g := vg.font_glyph_index(&r.font, ch)
+			g := vg.font_glyph_index(font, ch)
 			append(&r.glyphs, vg.Positioned_Glyph{g, x, y})
-			adv, _ := vg.font_glyph_advance(&r.font, g)
+			adv, _ := vg.font_glyph_advance(font, g)
 			x += f32(adv) * sc + spacing
 		}
-		vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], sc, paint, &r.scratch)
+		vg.fill_glyph_outlines(c, font, r.glyphs[:], sc, paint, &r.scratch)
 	}
 	vg.save(c)
 	vg.set_global_alpha(c, 0.5)

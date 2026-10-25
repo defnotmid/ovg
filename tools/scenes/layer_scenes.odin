@@ -59,10 +59,8 @@ scene_layers :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_push(ls, c, {opacity = 0.6, blur = 1.5})
 	circle(c, r, 0, 0, 16, vg.rgb(240, 40, 90))
 	circle(c, r, 14, 6, 14, vg.rgb(40, 90, 240))
-	clear(&r.glyphs)
-	small := vg.font_scale_for_em(&r.font, 12)
-	vg.layout_simple(&r.font, "glow", -14, 30, small, &r.glyphs)
-	vg.fill_glyph_outlines(c, &r.font, r.glyphs[:], small, vg.paint_color(vg.rgb(255, 255, 255)), &r.scratch)
+	f, g, em := lay(r, "glow", -14, 30, 12)
+	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgb(255, 255, 255)), &r.scratch)
 	vg.layer_pop(ls, c)
 	vg.restore(c)
 	// Nested: a sharp group holding blurred children and a stroke.
