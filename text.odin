@@ -173,7 +173,12 @@ font_shapes :: proc(f: ^Font) -> ^Font_Shapes {
 
 // The glyph for `r`, or 0 when the face lacks it or has only a bitmap for it.
 font_glyph_index_drawable :: proc(f: ^Font, r: rune) -> Glyph_Index {
-	g := font_glyph_index(f, r)
+	return glyph_drawable(f, font_glyph_index(f, r))
+}
+
+// `g`, or 0 when the face has only a bitmap for it.
+@(private)
+glyph_drawable :: #force_inline proc(f: ^Font, g: Glyph_Index) -> Glyph_Index {
 	if g != 0 && f.bitmap_colour && ft.glyph_empty(&f.face, ft.Glyph(g)) {
 		return 0
 	}

@@ -53,14 +53,14 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.4), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.5), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.4 https://github.com/defnotmid/oglyph
+git clone -b v0.0.5 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -300,7 +300,8 @@ at any size, under any transform):
 vg.font_collection_set_emoji(&fonts, vg.EMOJI_FONT_DATA) // optional emoji fallback
 vg.text_layout(&fonts, {{text = "Hello 👋🔥 👩‍💻 🇯🇵", style = {size = 48}}}, {x = 10, y = 60}, &layout)
 for run in layout.runs {
-	vg.fill_glyph_outlines(&c, run.font, layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &path)
+	font := vg.font_collection_font(&fonts, run.face)
+	vg.fill_glyph_outlines(&c, font, layout.glyphs[run.first:][:run.count], run.em, vg.paint_color(vg.BLACK), &path)
 }
 ```
 
@@ -775,7 +776,11 @@ every part follows:
   features, layout tables), so layouts may run concurrently on one
   collection; a warm shaper does not allocate.
   Every call shapes what it is given: a `Text_Layout` is data out, kept
-  by the caller and drawn again while its text is unchanged. Variable
+  by the caller and drawn again while its text is unchanged. Its runs name
+  faces by `Face_Id` (`font_collection_font` gives the face's font to
+  draw with): ids stay with their faces as faces are added before or after
+  them, so a layout outlives faces added to its collection, and an id
+  names no face (nil) once its face is removed. Variable
   fonts draw the instance they were loaded at:
   `font_load(data, 0, variations = {{"wght", 700}})`, or
   `font_collection_add(&fonts, data, variations = ...)`, which gives the
@@ -793,8 +798,8 @@ every part follows:
   text with advances and kerning (UI labels).
 - **Shaping** is oglyph's (`deps:oglyph/shape`; its README has the
   details): HarfBuzz's shapers and lookups, checked against HarfBuzz with
-  no differences over its corpora, about HarfBuzz's speed (1.01-1.05x its
-  time on sentences, 0.70-0.89x on words and random strings).
+  no differences over its corpora, about HarfBuzz's speed (0.99-1.10x its
+  time on sentences, 0.66-0.90x on words and random strings).
 - **Text on a path** (`text_path.odin`, SVG textPath): `text_path_set`
   measures a path (flattened, each point's distance along it) into a
   `Text_Path`; `text_layout_on_path` moves a layout made from x = 0, y = 0

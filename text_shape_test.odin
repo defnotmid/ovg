@@ -163,7 +163,7 @@ test_shape_fallback_and_bidi :: proc(t: ^testing.T) {
 	testing.expect(t, len(l.runs) >= 3)
 	found := false
 	for run in l.runs {
-		if run.font == arabic {
+		if font_collection_font(&s.fonts, run.face) == arabic {
 			found = true
 			testing.expect_value(t, run.count, 3)
 		}
@@ -296,7 +296,7 @@ test_shape_mark_cluster_fallback :: proc(t: ^testing.T) {
 	// run starts at the base (codepoint 1), not at a lone mark (2).
 	testing.expect_value(t, len(l.runs), 3)
 	if len(l.runs) == 3 {
-		testing.expect(t, l.runs[0].font != l.runs[1].font)
+		testing.expect(t, l.runs[0].face != l.runs[1].face)
 		testing.expect_value(t, l.runs[0].count, 1)
 		testing.expect_value(t, l.clusters[l.runs[1].first], 1)
 	}
@@ -380,6 +380,44 @@ test_font_collection_place_and_remove :: proc(t: ^testing.T) {
 		font_collection_destroy(&fonts)
 	}
 	testing.expect_value(t, len(own.allocation_map), 0)
+}
+
+// Layouts name faces by id: a face added before another moves it but
+// keeps its id, so a layout made earlier still draws with it, and each
+// face shapes with its own plans; a removed face's id names none.
+@(test)
+test_font_collection_face_ids :: proc(t: ^testing.T) {
+	mono := #load("demo/media/JetBrainsMono-Regular.ttf")
+	bebas := #load("demo/media/BebasNeue-Regular.ttf")
+	fonts, alone: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	font_collection_init(&alone)
+	defer font_collection_destroy(&alone)
+	l, again: Text_Layout
+	defer text_layout_destroy(&l)
+	defer text_layout_destroy(&again)
+	testing.expect_value(t, font_collection_add(&fonts, mono), 1)
+	text_layout(&fonts, {{text = "office", style = {family = "JetBrains Mono", size = 20}}}, {}, &l)
+	testing.expect_value(t, len(l.runs), 1)
+	id := l.runs[0].face
+	testing.expect(t, id == fonts.faces[0].id && id != fonts.fallback.id)
+
+	testing.expect_value(t, font_collection_add(&fonts, bebas, before = 0), 1)
+	testing.expect_value(t, fonts.faces[1].family, "JetBrains Mono")
+	testing.expect(t, font_collection_font(&fonts, id) == &fonts.faces[1].font)
+	text_layout(&fonts, {{text = "office", style = {family = "JetBrains Mono", size = 20}}}, {}, &again)
+	testing.expect(t, again.runs[0].face == id && slice.equal(again.glyphs[:], l.glyphs[:]))
+	// Bebas Neue, where JetBrains Mono was, shapes as it does alone.
+	text_layout(&fonts, {{text = "office", style = {family = "Bebas Neue", size = 20}}}, {}, &again)
+	testing.expect_value(t, font_collection_add(&alone, bebas), 1)
+	text_layout(&alone, {{text = "office", style = {family = "Bebas Neue", size = 20}}}, {}, &l)
+	testing.expect(t, again.runs[0].face == fonts.faces[0].id && slice.equal(again.glyphs[:], l.glyphs[:]))
+
+	font_collection_remove(&fonts, 1)
+	testing.expect(t, font_collection_font(&fonts, id) == nil)
+	testing.expect(t, font_collection_font(&fonts, fonts.faces[0].id) == &fonts.faces[0].font)
+	testing.expect(t, font_collection_font(&fonts, fonts.fallback.id) == &fonts.fallback.font)
 }
 
 // Paths, flattened paths, layouts and morphs made with an init allocate
@@ -612,7 +650,7 @@ test_font_variation :: proc(t: ^testing.T) {
 	testing.expect_value(t, font_collection_add(&fonts, data, variations = large[:]), 1)
 	pick :: proc(fonts: ^Font_Collection, l: ^Text_Layout, v: []Font_Variation) -> ^Font {
 		text_layout(fonts, {{text = "a", style = {family = "Adwaita Sans", size = 50, variations = v}}}, {}, l)
-		return l.runs[0].font
+		return font_collection_font(fonts, l.runs[0].face)
 	}
 	// The smallest size is the default instance's or the third face.
 	testing.expect(t, pick(&fonts, &l, small[:]) == (&fonts.faces[0].font if opsz.min == opsz.default else &fonts.faces[2].font))

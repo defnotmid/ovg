@@ -3,6 +3,7 @@ package ovg
 import "core:unicode"
 
 import ft "deps:oglyph/font"
+import sh "deps:oglyph/shape"
 
 // Text layout over a Font_Collection: styled pieces (SVG text + tspans),
 // lines, baselines, alignment and per-glyph font fallback. The result is a
@@ -77,9 +78,11 @@ Text_Options :: struct {
 	line_height: f32,
 }
 
-// Consecutive glyphs of one font, size and paint.
+// Consecutive glyphs of one face, size and paint. The face is named by its
+// id in the collection laid out with (font_collection_font), so the layout
+// stays valid as faces are added to it.
 Text_Run :: struct {
-	font:         ^Font,
+	face:         Face_Id,
 	em:           f32, // font units to pixels
 	paint:        u32,
 	first, count: int, // into Text_Layout.glyphs
@@ -138,41 +141,62 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 
 	s := shaper_acquire(fonts)
 	defer shaper_release(fonts, s)
-	clear(&s.piece_start)
-	clear(&s.piece_font)
-	clear(&s.piece_size)
-	clear(&s.piece_features)
 	clear(&s.features)
-	clear(&s.runes)
-	clear(&s.piece)
-	clear(&s.font)
 
-	// Codepoints with their piece and font: the piece's face, else the first
-	// face covering them (per-glyph fallback).
+	// Codepoints with their piece and face: the piece's face, else the first
+	// face covering them (per-glyph fallback). Sized for one per byte,
+	// filled, then cut to the count.
+	bytes := 0
+	for piece in pieces {
+		bytes += len(piece.text)
+	}
+	scratch_size(&s.piece_start, len(pieces))
+	scratch_size(&s.piece_size, len(pieces))
+	scratch_size(&s.piece_features, len(pieces))
+	scratch_size(&s.runes, bytes)
+	scratch_size(&s.piece, bytes)
+	scratch_size(&s.face, bytes)
+	n: i32
+	// The highest codepoint: emoji and mark fallback have nothing to do
+	// below the first they look at.
+	top: rune
+	first: Face_Id
 	for piece, pi in pieces {
-		font, size := resolve_face(fonts, l, piece.style)
-		append(&s.piece_start, i32(len(s.runes)))
-		append(&s.piece_font, font)
-		append(&s.piece_size, size)
-		shaper_add_piece_features(s, piece.style)
+		face, size := resolve_face(fonts, l, piece.style)
+		if pi == 0 {
+			first = face.id
+		}
+		s.piece_start[pi] = n
+		s.piece_size[pi] = size
+		s.piece_features[pi] = shaper_add_piece_features(s, piece.style)
+		// The face's characters, as its shaping tables map them.
+		cmap := &font_shaping(fonts, &face.font).cmap
 		for r in piece.text {
-			f := font
-			if r != '\n' && r != ' ' && r != '\t' && font_glyph_index_drawable(font, r) == 0 {
-				f, _ = font_collection_glyph(fonts, r, font)
+			id := face.id
+			if r != '\n' && r != ' ' && r != '\t' && glyph_drawable(&face.font, Glyph_Index(sh.two_level_get(cmap, int(r)))) == 0 {
+				if f, g := collection_glyph(fonts, r, face); g != 0 {
+					id = f.id
+				}
 			}
-			append(&s.runes, r)
-			append(&s.piece, i32(pi))
-			append(&s.font, f)
+			s.runes[n], s.piece[n], s.face[n] = r, i32(pi), id
+			top = max(top, r)
+			n += 1
 		}
 	}
-	n := i32(len(s.runes))
-	emoji_fallback(fonts, s.runes[:], s.font[:])
-	mark_fallback(s)
-	resize(&s.script, int(n))
-	resize(&s.level, int(n))
-	resize(&s.bidi, int(n))
+	scratch_size(&s.runes, int(n))
+	scratch_size(&s.piece, int(n))
+	scratch_size(&s.face, int(n))
+	if top >= 0x200D {
+		emoji_fallback(fonts, s.runes[:], s.face[:])
+	}
+	if top >= 0x300 {
+		mark_fallback(fonts, s)
+	}
+	scratch_size(&s.script, int(n))
+	scratch_size(&s.level, int(n))
+	scratch_size(&s.bidi, int(n))
 
-	first_font, first_size := s.piece_font[0], s.piece_size[0]
+	first_font, first_size := font_collection_font(fonts, first), s.piece_size[0]
 	first_em := font_scale_for_em(first_font, first_size)
 	line_height := (opts.line_height if opts.line_height > 0 else 1.2) * first_size
 
@@ -236,21 +260,21 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 // colour face) takes a colour face, and joiners, variation selectors,
 // skin-tone modifiers, keycaps and tags stay in the face of the rune before.
 @(private = "file")
-emoji_fallback :: proc(fonts: ^Font_Collection, runes: []rune, font: []^Font) {
+emoji_fallback :: proc(fonts: ^Font_Collection, runes: []rune, face: []Face_Id) {
 	continues :: proc(r: rune) -> bool {
 		return r == 0x200D || r == 0xFE0E || r == 0xFE0F || r == 0x20E3 || (r >= 0x1F3FB && r <= 0x1F3FF) || (r >= 0xE0020 && r <= 0xE007F)
 	}
 	for i in 0 ..< len(runes) {
 		r := runes[i]
 		if i > 0 && runes[i - 1] != '\n' && continues(r) {
-			font[i] = font[i - 1]
+			face[i] = face[i - 1]
 			continue
 		}
 		wants := i + 1 < len(runes) && runes[i + 1] == 0xFE0F
-		wants ||= i > 0 && runes[i - 1] == 0x200D && font[i - 1].colr != nil
-		if wants && font[i].colr == nil {
-			if f, g := font_collection_emoji_glyph(fonts, r); g != 0 {
-				font[i] = f
+		wants ||= i > 0 && runes[i - 1] == 0x200D && font_collection_font(fonts, face[i - 1]).colr != nil
+		if wants && font_collection_font(fonts, face[i]).colr == nil {
+			if f, g := collection_emoji_glyph(fonts, r); g != 0 {
+				face[i] = f.id
 			}
 		}
 	}
@@ -259,6 +283,9 @@ emoji_fallback :: proc(fonts: ^Font_Collection, runes: []rune, font: []^Font) {
 // Invisible format characters (Unicode Default_Ignorable_Code_Point, the
 // ones met in text): they steer shaping and draw nothing.
 rune_is_default_ignorable :: proc "contextless" (r: rune) -> bool {
+	if r < 0x00AD {
+		return false
+	}
 	switch r {
 	case 0x00AD, 0x034F, 0x180B ..= 0x180F, 0x200B ..= 0x200F, 0x202A ..= 0x202E, 0x2060 ..= 0x2064, 0xFE00 ..= 0xFE0F, 0xFEFF, 0xE0000 ..= 0xE0FFF:
 		return true
@@ -277,30 +304,32 @@ text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 
 // Appends the outlines of the laid-out glyphs to `out`, where drawing the
 // layout puts them (positions, alignment, baseline, letter spacing and
-// fallback faces as laid out). Fill them with the non-zero rule. A colour
-// glyph (COLR emoji) adds its base glyph's plain outline, which is often
-// empty: emoji mostly add nothing. Glyphs placed on a path turn with it.
-text_layout_path :: proc(l: ^Text_Layout, out: ^Path) {
+// fallback faces as laid out); `fonts` is the collection it was laid out
+// with. Fill them with the non-zero rule. A colour glyph (COLR emoji) adds
+// its base glyph's plain outline, which is often empty: emoji mostly add
+// nothing. Glyphs placed on a path turn with it.
+text_layout_path :: proc(fonts: ^Font_Collection, l: ^Text_Layout, out: ^Path) {
 	for run in l.runs {
+		font := font_collection_font(fonts, run.face)
 		for g, k in l.glyphs[run.first:][:run.count] {
 			if len(l.turns) == 0 {
-				font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, out)
+				font_glyph_path(font, g.glyph, g.x, g.y, run.em, out)
 			} else if turn := l.turns[run.first + k] * run.em; turn != {} {
-				font_glyph_path_transformed(run.font, g.glyph, {turn.x, turn.y, turn.y, -turn.x, g.x, g.y}, out)
+				font_glyph_path_transformed(font, g.glyph, {turn.x, turn.y, turn.y, -turn.x, g.x, g.y}, out)
 			}
 		}
 	}
 }
 
 @(private = "file")
-resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (font: ^Font, size: f32) {
+resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (face: ^Font_Face, size: f32) {
 	found: bool
-	font, found = font_collection_find(fonts, st.family, st.weight, st.italic, st.variations)
+	face, found = collection_find(fonts, st.family, st.weight, st.italic, st.variations)
 	if !found {
 		append(&l.missing, st.family)
 	}
 	size = st.size if st.size > 0 else 16
-	return font, size
+	return face, size
 }
 
 // Shapes the codepoints [a, b) of one line and places their glyphs from the
@@ -315,18 +344,24 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 	}
 	shaper_itemize(s, a, b)
 	for i := a; i < b; {
-		f, size, script, level := s.font[i], s.piece_size[s.piece[i]], s.script[i], s.level[i]
+		face, size, script, level := s.face[i], s.piece_size[s.piece[i]], s.script[i], s.level[i]
 		j := i + 1
-		for j < b && s.font[j] == f && s.piece_size[s.piece[j]] == size && s.script[j] == script && s.level[j] == level {
+		for j < b && s.face[j] == face && s.piece_size[s.piece[j]] == size && s.script[j] == script && s.level[j] == level {
 			j += 1
 		}
-		append(&s.segs, Shape_Segment{first = i, count = j - i, font = f, em = font_scale_for_em(f, size), script = script, level = level})
+		f := font_collection_font(fonts, face)
+		append(&s.segs, Shape_Segment{first = i, count = j - i, face = face, font = f, em = font_scale_for_em(f, size), script = script, level = level})
 		i = j
 	}
 	for &seg in s.segs {
 		shaper_shape(fonts, s, &seg)
 	}
 	shaper_reorder(s)
+	// The line's glyphs, at most one per shaped glyph: placed, then cut to
+	// those drawn.
+	k := len(l.glyphs)
+	scratch_size(&l.glyphs, k + len(s.glyphs))
+	scratch_size(&l.clusters, k + len(s.glyphs))
 	for si in s.order {
 		seg := &s.segs[si]
 		em := seg.em
@@ -340,7 +375,13 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 				next_piece^ += 1
 			}
 			style := &pieces[s.piece[g.cluster]].style
-			layout_add_glyph(l, seg.font, em, style.paint, {g.id, pen.x + f32(g.offset.x) * em, pen.y - f32(g.offset.y) * em}, g.cluster)
+			if n := len(l.runs); n == 0 || l.runs[n - 1].face != seg.face || l.runs[n - 1].em != em || l.runs[n - 1].paint != style.paint {
+				append(&l.runs, Text_Run{seg.face, em, style.paint, k, 0})
+			}
+			l.runs[len(l.runs) - 1].count += 1
+			l.glyphs[k] = {Glyph_Index(g.id), pen.x + f32(g.offset.x) * em, pen.y - f32(g.offset.y) * em}
+			l.clusters[k] = g.cluster
+			k += 1
 			pen.x += f32(g.advance) * em
 			if !g.mark {
 				pen.x += style.letter_spacing
@@ -348,17 +389,8 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 			}
 		}
 	}
-}
-
-@(private = "file")
-layout_add_glyph :: proc(l: ^Text_Layout, font: ^Font, em: f32, paint: u32, g: Positioned_Glyph, cluster: i32) {
-	n := len(l.runs)
-	if n == 0 || l.runs[n - 1].font != font || l.runs[n - 1].em != em || l.runs[n - 1].paint != paint {
-		append(&l.runs, Text_Run{font, em, paint, len(l.glyphs), 0})
-	}
-	append(&l.glyphs, g)
-	append(&l.clusters, cluster)
-	l.runs[len(l.runs) - 1].count += 1
+	scratch_size(&l.glyphs, k)
+	scratch_size(&l.clusters, k)
 }
 
 @(private = "file")
@@ -410,13 +442,13 @@ font_x_height :: proc(font: ^Font, em, size: f32) -> f32 {
 // all: marks attach to their base only when shaped with it. Runes that kept
 // their neighbour's face cost one comparison.
 @(private = "file")
-mark_fallback :: proc(s: ^Text_Shaper) {
+mark_fallback :: proc(fonts: ^Font_Collection, s: ^Text_Shaper) {
 	is_mark :: proc(r: rune) -> bool {
 		return unicode.is_nonspacing_mark(r) || unicode.is_enclosing_mark(r) || unicode.is_spacing_mark(r)
 	}
 	n := len(s.runes)
 	for i := 1; i < n; i += 1 {
-		if s.font[i] == s.font[i - 1] || !is_mark(s.runes[i]) {
+		if s.face[i] == s.face[i - 1] || !is_mark(s.runes[i]) {
 			continue
 		}
 		// The cluster: back to its base, on to its last mark (one piece).
@@ -433,7 +465,8 @@ mark_fallback :: proc(s: ^Text_Shaper) {
 			continue
 		}
 		for k in base ..< end {
-			f := s.font[k]
+			id := s.face[k]
+			f := font_collection_font(fonts, id)
 			has_all := true
 			for j in base ..< end {
 				if font_glyph_index_drawable(f, s.runes[j]) == 0 {
@@ -443,7 +476,7 @@ mark_fallback :: proc(s: ^Text_Shaper) {
 			}
 			if has_all {
 				for j in base ..< end {
-					s.font[j] = f
+					s.face[j] = id
 				}
 				break
 			}

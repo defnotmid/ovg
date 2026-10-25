@@ -94,9 +94,11 @@ svg_renderer_destroy :: proc(r: ^Svg_Renderer, c: ^Canvas) {
 // stage between parsing and drawing: data out of layout, data in to
 // `svg_draw`. Positioned glyphs in one array, runs of one face over it,
 // and per document text (`doc.texts` order) its range of runs. The fonts
-// are borrowed: lay out again after the collection changes (faces added,
-// the emoji face set) and for each document.
+// are borrowed: faces added keep the layout; lay out again after faces are
+// removed or the emoji face set, and for each document.
 Svg_Layout :: struct {
+	// The collection laid out with, whose faces the runs name.
+	fonts:   ^Font_Collection,
 	glyphs:  [dynamic]Positioned_Glyph,
 	// Per glyph of a run along a path: its direction (cos, sin), {0, 0}
 	// off the path (text_layout_on_path).
@@ -115,7 +117,7 @@ Svg_Layout :: struct {
 // Glyphs of one face and one document piece (`doc.pieces[piece]`, whose
 // style paints them).
 Svg_Glyph_Run :: struct {
-	font:   ^Font,
+	face:   Face_Id,
 	em:     f32, // font units to pixels
 	glyphs: Range,
 	piece:  u32,
@@ -125,6 +127,7 @@ Svg_Glyph_Run :: struct {
 
 // Lays out every text of `doc` with `fonts` into `out` (cleared first).
 svg_layout :: proc(doc: ^Svg_Document, fonts: ^Font_Collection, out: ^Svg_Layout) {
+	out.fonts = fonts
 	clear(&out.glyphs)
 	clear(&out.turns)
 	clear(&out.runs)
@@ -150,7 +153,7 @@ svg_layout :: proc(doc: ^Svg_Document, fonts: ^Font_Collection, out: ^Svg_Layout
 				if turned {
 					copy(out.turns[start:], out.line.turns[run.first:][:run.count])
 				}
-				append(&out.runs, Svg_Glyph_Run{run.font, run.em, {u32(start), u32(run.count)}, ch.pieces.start + run.paint, turned})
+				append(&out.runs, Svg_Glyph_Run{run.face, run.em, {u32(start), u32(run.count)}, ch.pieces.start + run.paint, turned})
 			}
 		}
 		append(&out.texts, Range{u32(first), u32(len(out.runs) - first)})
@@ -243,13 +246,14 @@ svg_path_node :: proc(w: ^Svg_Path_Walk, i: i32, parent: Transform2D) {
 			if pc.hidden || pc.style.fill.kind == .None {
 				continue
 			}
+			font := font_collection_font(w.text.fonts, run.face)
 			for g, k in w.text.glyphs[run.glyphs.start:][:run.glyphs.count] {
 				c0 := len(w.out.coords)
 				if pc.rotate == 0 && !run.turned {
-					font_glyph_path(run.font, g.glyph, g.x, g.y, run.em, w.out)
+					font_glyph_path(font, g.glyph, g.x, g.y, run.em, w.out)
 					svg_path_transform(w.out, c0, t)
 				} else if gt, drawn := svg_glyph_transform(w.text, run, pc, k); drawn {
-					font_glyph_path(run.font, g.glyph, 0, 0, run.em, w.out)
+					font_glyph_path(font, g.glyph, 0, 0, run.em, w.out)
 					svg_path_transform(w.out, c0, transform_multiply(gt, t))
 				}
 			}
@@ -795,6 +799,7 @@ svg_draw_text :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Colo
 			continue
 		}
 		glyphs := text.glyphs[run.glyphs.start:][:run.glyphs.count]
+		font := font_collection_font(text.fonts, run.face)
 		s := &pc.style
 		fo := fill_ov if pc.fill_inherited else nil
 		so := stroke_ov if pc.stroke_inherited else nil
@@ -808,10 +813,10 @@ svg_draw_text :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Colo
 		}
 		if pc.rotate == 0 && !run.turned {
 			if has_fill {
-				fill_glyph_outlines(c, run.font, glyphs, run.em, fill, &r.path)
+				fill_glyph_outlines(c, font, glyphs, run.em, fill, &r.path)
 			}
 			if has_stroke {
-				stroke_glyph_outlines(c, run.font, glyphs, run.em, stroke, &r.path)
+				stroke_glyph_outlines(c, font, glyphs, run.em, stroke, &r.path)
 			}
 			continue
 		}
@@ -824,10 +829,10 @@ svg_draw_text :: proc(d: ^Svg_Draw, n: ^Svg_Node, fill_ov, stroke_ov: Maybe(Colo
 			apply_transform(c, gt)
 			one := [1]Positioned_Glyph{{g.glyph, 0, 0}}
 			if has_fill {
-				fill_glyph_outlines(c, run.font, one[:], run.em, fill, &r.path)
+				fill_glyph_outlines(c, font, one[:], run.em, fill, &r.path)
 			}
 			if has_stroke {
-				stroke_glyph_outlines(c, run.font, one[:], run.em, stroke, &r.path)
+				stroke_glyph_outlines(c, font, one[:], run.em, stroke, &r.path)
 			}
 			restore(c)
 		}

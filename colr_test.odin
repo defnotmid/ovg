@@ -136,7 +136,7 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	// sequence and a flag shape into one glyph each.
 	text_layout(&fonts, {{text = "a\U0001F525 \U0001F469‍\U0001F4BB\U0001F1EF\U0001F1F5", style = {size = 100}}}, {x = 10, y = 100}, &l)
 	testing.expect_value(t, len(l.runs), 4) // a, fire, space, the rest
-	testing.expect(t, l.runs[0].font == &fonts.fallback.font && l.runs[1].font == &fonts.emoji.font)
+	testing.expect(t, l.runs[0].face == fonts.fallback.id && l.runs[1].face == fonts.emoji.id)
 	testing.expect_value(t, len(l.glyphs), 5) // a, fire, space, technologist, flag
 	for g in l.glyphs[1:] {
 		testing.expect(t, g.glyph == l.glyphs[2].glyph || font_glyph_is_colour(&fonts.emoji.font, g.glyph))
@@ -145,7 +145,7 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	// missing from it, leaves no glyph).
 	text_layout(&fonts, {{text = "1️⃣", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 1)
-	testing.expect(t, l.runs[0].font == &fonts.emoji.font)
+	testing.expect(t, l.runs[0].face == fonts.emoji.id)
 
 	// Drawn: the fire is orange, not the text colour.
 	sw: Software_Backend
@@ -160,7 +160,7 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	path: Path
 	defer path_destroy(&path)
 	for run in l.runs {
-		fill_glyph_outlines(&c, run.font, l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &path)
+		fill_glyph_outlines(&c, font_collection_font(&fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &path)
 	}
 	flush(&c)
 	orange := 0
@@ -190,7 +190,7 @@ test_colr_emoji_reset :: proc(t: ^testing.T) {
 	emoji_plans :: proc(fonts: ^Font_Collection) -> (n: int) {
 		for s in fonts.shapers {
 			for p in s.plans {
-				n += int(p.font == &fonts.emoji.font)
+				n += int(p.face == fonts.emoji.id)
 			}
 		}
 		return

@@ -97,15 +97,17 @@ text_path_at :: proc(tp: ^Text_Path, d: f32) -> (p, dir: Vec2, ok: bool) {
 // sin), a glyph whose middle falls off the path getting {0, 0} (it isn't
 // drawn). Drawing turns each glyph about its origin; `text_layout_path`
 // follows the turns, and the layout's extent covers the turned glyphs.
-text_layout_on_path :: proc(l: ^Text_Layout, tp: ^Text_Path, opts: Text_Path_Options) {
+// `fonts` is the collection it was laid out with.
+text_layout_on_path :: proc(fonts: ^Font_Collection, l: ^Text_Layout, tp: ^Text_Path, opts: Text_Path_Options) {
 	resize(&l.turns, len(l.glyphs))
 	total := text_path_length(tp)
 	l.min, l.max = {math.F32_MAX, math.F32_MAX}, {-math.F32_MAX, -math.F32_MAX}
 	for run in l.runs {
-		asc, desc := font_extent(run.font, run.em)
+		font := font_collection_font(fonts, run.face)
+		asc, desc := font_extent(font, run.em)
 		for &g, k in l.glyphs[run.first:][:run.count] {
 			turn := &l.turns[run.first + k]
-			adv, _ := font_glyph_advance(run.font, g.glyph)
+			adv, _ := font_glyph_advance(font, g.glyph)
 			half := f32(adv) * run.em * 0.5
 			d := opts.start + g.x + half
 			if opts.side == .Right {

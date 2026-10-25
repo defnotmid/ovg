@@ -957,7 +957,7 @@ test_sw_no_allocation_when_warm :: proc(t: ^testing.T) {
 		layer_pop(ls, c)
 		text_layout(fonts, {{text = "warm frame", style = {size = 12}}}, {x = 4, y = 56}, l)
 		for run in l.runs {
-			fill_glyph_outlines(c, run.font, l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), p)
+			fill_glyph_outlines(c, font_collection_font(fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), p)
 		}
 		layer_stack_end(ls, c)
 		flush(c)

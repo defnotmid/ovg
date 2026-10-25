@@ -634,7 +634,7 @@ test_lottie_text_emoji :: proc(t: ^testing.T) {
 	lay := &s.r.text.layout
 	colour := false
 	for run in lay.runs {
-		colour ||= run.font == &fonts.emoji.font
+		colour ||= run.face == fonts.emoji.id
 	}
 	testing.expect(t, colour)
 	// The heart draws in its own red.

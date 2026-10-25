@@ -231,9 +231,9 @@ test_path_morph_text :: proc(t: ^testing.T) {
 	defer path_destroy(&b)
 	defer path_destroy(&out)
 	text_layout(&fonts, {{text = "A", style = {size = 200}}}, {x = 20, y = 200}, &l)
-	text_layout_path(&l, &a)
+	text_layout_path(&fonts, &l, &a)
 	text_layout(&fonts, {{text = "B", style = {size = 200}}}, {x = 20, y = 200}, &l)
-	text_layout_path(&l, &b)
+	text_layout_path(&fonts, &l, &b)
 	m: Path_Morph
 	defer path_morph_destroy(&m)
 	path_morph_prepare(&m, &a, &b)
@@ -280,7 +280,7 @@ test_text_layout_path :: proc(t: ^testing.T) {
 	defer path_destroy(&scratch)
 	pieces := [?]Text_Piece{{text = "Ag", style = {size = 40, letter_spacing = 3}}, {text = "\nfi", style = {size = 30}}}
 	text_layout(&fonts, pieces[:], {x = 60, y = 50, align = .Center, baseline = .Middle}, &l)
-	text_layout_path(&l, &p)
+	text_layout_path(&fonts, &l, &p)
 	testing.expect(t, !path_is_empty(&p))
 
 	draw :: proc(c: ^Canvas, sw: ^Software_Backend) -> []u8 {
@@ -290,7 +290,7 @@ test_text_layout_path :: proc(t: ^testing.T) {
 	set_size(&c, 120, 100)
 	clear_rect(&c, 0, 0, 120, 100, WHITE)
 	for run in l.runs {
-		fill_glyph_outlines(&c, run.font, l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &scratch)
+		fill_glyph_outlines(&c, font_collection_font(&fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &scratch)
 	}
 	drawn := draw(&c, &sw)
 	defer delete(drawn)

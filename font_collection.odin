@@ -11,11 +11,18 @@ import ft "deps:oglyph/font"
 // matching), with per-glyph fallback through every face. Face data is
 // borrowed and must outlive the collection.
 
+// A face of a Font_Collection for as long as the collection holds it:
+// faces added before or after it keep it, and text layouts name faces by
+// it (Text_Run.face; font_collection_font resolves it). The fallback face
+// is 0; ids aren't reused.
+Face_Id :: distinct u32
+
 Font_Face :: struct {
 	family: string, // owned
 	weight: int,
 	italic: bool,
 	font:   Font,
+	id:     Face_Id,
 }
 
 Font_Collection :: struct {
@@ -36,14 +43,26 @@ Font_Collection :: struct {
 	shape_lock: sync.Mutex,
 	// Idle shapers (text_shape.odin), one per concurrent layout.
 	shapers:    [dynamic]^Text_Shaper,
+	// Per face id, where its face is: its index in `faces`, else
+	// PLACE_FALLBACK, PLACE_EMOJI or PLACE_GONE (removed, or an emoji face
+	// replaced).
+	places:     [dynamic]i32,
 }
+
+@(private = "file")
+PLACE_FALLBACK :: -1
+@(private = "file")
+PLACE_EMOJI :: -2
+@(private = "file")
+PLACE_GONE :: -3
 
 font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator) {
 	c.faces = make([dynamic]Font_Face, allocator)
+	c.places = make([dynamic]i32, allocator)
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
 	font, _ := font_load(data, 0, allocator)
 	family, weight, italic := font_identity(data, &font, allocator)
-	c.fallback = {family, weight, italic, font}
+	c.fallback = {family, weight, italic, font, face_id_new(c, PLACE_FALLBACK)}
 }
 
 font_collection_destroy :: proc(c: ^Font_Collection) {
@@ -57,6 +76,7 @@ font_collection_destroy :: proc(c: ^Font_Collection) {
 		font_destroy(&f.font)
 	}
 	delete(c.faces)
+	delete(c.places)
 	delete(c.fallback.family, allocator)
 	font_destroy(&c.fallback.font)
 	delete(c.emoji.family, allocator)
@@ -81,10 +101,13 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 		return false
 	}
 	drop_shapers(c)
+	if c.emoji.font.data != nil {
+		c.places[c.emoji.id] = PLACE_GONE
+	}
 	delete(c.emoji.family, allocator)
 	font_destroy(&c.emoji.font)
 	family, weight, italic := font_identity(data, &font, allocator)
-	c.emoji = {family, weight, italic, font}
+	c.emoji = {family, weight, italic, font, face_id_new(c, PLACE_EMOJI)}
 	return true
 }
 
@@ -93,7 +116,7 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 // (font_load). Family, weight and style come from the font's tables, the
 // weight from a wght setting and the style from ital or slnt when given.
 // Returns the number of faces added. Not while layouts run on the
-// collection (faces move).
+// collection (faces move; their ids stay).
 font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int), variations: []Font_Variation = nil) -> int {
 	allocator := collection_allocator(c)
 	// A collection never initialized takes its allocator here, not from
@@ -116,30 +139,73 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 				italic = v.value != 0
 			}
 		}
-		append(&c.faces, Font_Face{family, weight, italic, font})
+		append(&c.faces, Font_Face{family, weight, italic, font, face_id_new(c, i32(len(c.faces)))})
 		added += 1
 	}
 	if at := len(c.faces) - added; before < at {
 		slice.rotate_right(c.faces[max(before, 0):], added)
+		face_places(c, max(before, 0))
 	}
 	return added
 }
 
-// Removes and frees face `i`; a `default_family` that is its name becomes
-// empty. Not while layouts run on the collection.
+// Removes and frees face `i` (of `faces`), whose id names no face after
+// it; a `default_family` that is its name becomes empty. Not while layouts
+// run on the collection.
 font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 	drop_shapers(c)
 	face := &c.faces[i]
 	if raw_data(c.default_family) == raw_data(face.family) {
 		c.default_family = ""
 	}
+	c.places[face.id] = PLACE_GONE
 	delete(face.family, collection_allocator(c))
 	font_destroy(&face.font)
 	ordered_remove(&c.faces, i)
+	face_places(c, i)
 }
 
-// Pooled shapers hold plans made for faces (keyed by the font's address,
-// which a new face may reuse): a face going takes them with it.
+// The font of face `id`, for immediate use (adding faces moves it); nil
+// once the face is removed or, for an emoji face, replaced.
+font_collection_font :: proc(c: ^Font_Collection, id: Face_Id) -> ^Font {
+	if id == 0 {
+		return &c.fallback.font
+	}
+	switch at := c.places[id]; at {
+	case PLACE_EMOJI:
+		return &c.emoji.font
+	case PLACE_GONE:
+		return nil
+	case:
+		return &c.faces[at].font
+	}
+}
+
+// A new face id, its face at `place` (the id of the fallback, made first,
+// is 0).
+@(private = "file")
+face_id_new :: proc(c: ^Font_Collection, place: i32) -> Face_Id {
+	if c.places.allocator.procedure == nil {
+		c.places.allocator = collection_allocator(c)
+	}
+	if len(c.places) == 0 && place != PLACE_FALLBACK {
+		// A collection never initialized: id 0 stays the fallback's.
+		append(&c.places, PLACE_FALLBACK)
+	}
+	append(&c.places, place)
+	return Face_Id(len(c.places) - 1)
+}
+
+// The places of faces[from:], after they moved.
+@(private = "file")
+face_places :: proc(c: ^Font_Collection, from: int) {
+	for f, i in c.faces[from:] {
+		c.places[f.id] = i32(from + i)
+	}
+}
+
+// Pooled shapers hold plans made for faces (keyed by face id): a face
+// going takes them with it.
 @(private = "file")
 drop_shapers :: proc(c: ^Font_Collection) {
 	sync.mutex_lock(&c.shape_lock)
@@ -157,8 +223,15 @@ drop_shapers :: proc(c: ^Font_Collection) {
 // ties). `found = false` returns the fallback face, which is also found by
 // its own family (so `default_family` may name it).
 font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic := false, variations: []Font_Variation = nil) -> (font: ^Font, found: bool) {
+	face, ok := collection_find(c, family, weight, italic, variations)
+	return &face.font, ok
+}
+
+// font_collection_find's face.
+@(private)
+collection_find :: proc(c: ^Font_Collection, family: string, weight: int, italic: bool, variations: []Font_Variation) -> (^Font_Face, bool) {
 	if family == "" && c.default_family != "" {
-		if f, ok := font_collection_find(c, c.default_family, weight, italic, variations); ok {
+		if f, ok := collection_find(c, c.default_family, weight, italic, variations); ok {
 			return f, true
 		}
 	}
@@ -183,9 +256,9 @@ font_collection_find :: proc(c: ^Font_Collection, family: string, weight: int, i
 	}
 	if best < 0 {
 		// The fallback face answers to its own family too.
-		return &c.fallback.font, family == "" || strings.equal_fold(family, c.fallback.family)
+		return &c.fallback, family == "" || strings.equal_fold(family, c.fallback.family)
 	}
-	return &c.faces[best].font, true
+	return &c.faces[best], true
 }
 
 // Whether `variations` pick the instance the font draws (a font without
@@ -203,37 +276,55 @@ font_collection_glyph :: proc(c: ^Font_Collection, r: rune, primary: ^Font) -> (
 	if g := font_glyph_index_drawable(primary, r); g != 0 {
 		return primary, g
 	}
+	if f, g := collection_glyph(c, r, nil); g != 0 {
+		return &f.font, g
+	}
+	return primary, 0
+}
+
+// The first face but `skip` (then the emoji face, then the fallback) with
+// a glyph for `r`; nil without one.
+@(private)
+collection_glyph :: proc(c: ^Font_Collection, r: rune, skip: ^Font_Face) -> (^Font_Face, Glyph_Index) {
 	for &f in c.faces {
-		if &f.font != primary {
+		if &f != skip {
 			if g := font_glyph_index_drawable(&f.font, r); g != 0 {
-				return &f.font, g
+				return &f, g
 			}
 		}
 	}
 	if c.emoji.font.data != nil {
 		if g := font_glyph_index(&c.emoji.font, r); g != 0 {
-			return &c.emoji.font, g
+			return &c.emoji, g
 		}
 	}
 	if g := font_glyph_index(&c.fallback.font, r); g != 0 {
-		return &c.fallback.font, g
+		return &c.fallback, g
 	}
-	return primary, 0
+	return nil, 0
 }
 
 // The first colour (COLR) face with a glyph for `r`: added faces, then the
 // emoji face.
 font_collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (^Font, Glyph_Index) {
+	if f, g := collection_emoji_glyph(c, r); g != 0 {
+		return &f.font, g
+	}
+	return nil, 0
+}
+
+@(private)
+collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (^Font_Face, Glyph_Index) {
 	for &f in c.faces {
 		if f.font.colr != nil {
 			if g := font_glyph_index(&f.font, r); g != 0 {
-				return &f.font, g
+				return &f, g
 			}
 		}
 	}
 	if c.emoji.font.colr != nil {
 		if g := font_glyph_index(&c.emoji.font, r); g != 0 {
-			return &c.emoji.font, g
+			return &c.emoji, g
 		}
 	}
 	return nil, 0

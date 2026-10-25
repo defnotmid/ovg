@@ -22,20 +22,21 @@ import sh "deps:oglyph/shape"
 // global).
 @(private)
 Shape_Plan :: struct {
-	font:         ^Font,
+	face:         Face_Id,
 	script:       sh.Script,
 	direction:    sh.Direction,
 	first, count: i32,
 	plan:         sh.Plan,
 }
 
-// A run of codepoints in one font, size, script and direction, and the
+// A run of codepoints in one face, size, script and direction, and the
 // glyphs it shaped into (visual order, left to right).
 @(private)
 Shape_Segment :: struct {
 	first, count:             i32, // codepoints
 	glyph_first, glyph_count: i32,
-	font:                     ^Font,
+	face:                     Face_Id,
+	font:                     ^Font, // the face's, for the layout's call
 	em:                       f32,
 	script:                   sh.Script,
 	level:                    u8, // bidi embedding level: 0 LTR, 1 RTL, 2 numbers in RTL
@@ -46,12 +47,10 @@ Text_Shaper :: struct {
 	shaper:         sh.Shaper,
 	plans:          [dynamic]Shape_Plan,
 	plan_features:  [dynamic]sh.Feature,
-	// The segment being shaped: its feature settings and glyphs.
+	// The segment being shaped: its feature settings.
 	seg_features:   [dynamic]sh.Feature,
-	out:            [dynamic]sh.Glyph,
 	// Per piece.
 	piece_start:    [dynamic]i32, // first codepoint
-	piece_font:     [dynamic]^Font,
 	piece_size:     [dynamic]f32,
 	// The piece's feature settings: features[first:][:count] (letter
 	// spacing's, then Text_Style.features; the last of a tag wins).
@@ -60,27 +59,16 @@ Text_Shaper :: struct {
 	// Per codepoint of the text.
 	runes:          [dynamic]rune,
 	piece:          [dynamic]i32,
-	font:           [dynamic]^Font, // after fallback
+	face:           [dynamic]Face_Id, // after fallback
 	script:         [dynamic]sh.Script,
 	level:          [dynamic]u8, // bidi level (text_bidi.odin)
 	bidi:           [dynamic]Bidi_Class, // scratch
 	// Segments of the current line, and their visual order.
 	segs:           [dynamic]Shape_Segment,
 	order:          [dynamic]i32,
-	// Shaped glyphs of the current line.
-	glyphs:         [dynamic]Shaped_Glyph,
-}
-
-// One shaped glyph, in font units (y up). The layout reads every field per
-// glyph, so these are rows.
-@(private)
-Shaped_Glyph :: struct {
-	id:      Glyph_Index,
-	cluster: i32, // first codepoint
-	offset:  [2]i32,
-	advance: i32,
-	// Attached to a base glyph (takes no letter-spacing).
-	mark:    bool,
+	// Shaped glyphs of the current line, clusters indexing `runes`. The
+	// layout reads every field per glyph, so these are rows.
+	glyphs:         [dynamic]sh.Glyph,
 }
 
 @(private)
@@ -98,15 +86,13 @@ shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
 	s.plans.allocator = allocator
 	s.plan_features.allocator = allocator
 	s.seg_features.allocator = allocator
-	s.out.allocator = allocator
 	s.piece_start.allocator = allocator
-	s.piece_font.allocator = allocator
 	s.piece_size.allocator = allocator
 	s.piece_features.allocator = allocator
 	s.features.allocator = allocator
 	s.runes.allocator = allocator
 	s.piece.allocator = allocator
-	s.font.allocator = allocator
+	s.face.allocator = allocator
 	s.script.allocator = allocator
 	s.level.allocator = allocator
 	s.bidi.allocator = allocator
@@ -136,15 +122,13 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 	delete(s.plans)
 	delete(s.plan_features)
 	delete(s.seg_features)
-	delete(s.out)
 	delete(s.piece_start)
-	delete(s.piece_font)
 	delete(s.piece_size)
 	delete(s.piece_features)
 	delete(s.features)
 	delete(s.runes)
 	delete(s.piece)
-	delete(s.font)
+	delete(s.face)
 	delete(s.script)
 	delete(s.level)
 	delete(s.bidi)
@@ -152,6 +136,17 @@ shaper_destroy :: proc(s: ^Text_Shaper) {
 	delete(s.order)
 	delete(s.glyphs)
 	free(s, allocator)
+}
+
+// Sizes scratch to `n` rows, which the caller fills: its length set,
+// growing (geometrically) only when it is short. Rows it gains keep
+// whatever they held.
+@(private)
+scratch_size :: #force_inline proc(a: ^[dynamic]$T, n: int) {
+	if n > cap(a) {
+		reserve(a, max(n, 2 * cap(a)))
+	}
+	(^runtime.Raw_Dynamic_Array)(a).len = n
 }
 
 @(private)
@@ -215,25 +210,26 @@ shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 // Shapes one segment, appending its glyphs to the shaper's line glyphs.
 @(private)
 shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segment) {
-	seg.glyph_first = i32(len(s.glyphs))
-	defer seg.glyph_count = i32(len(s.glyphs)) - seg.glyph_first
+	first := len(s.glyphs)
+	seg.glyph_first = i32(first)
+	defer seg.glyph_count = i32(len(s.glyphs) - first)
 
 	direction: sh.Direction = .RTL if seg.level & 1 == 1 else .LTR
 	shaper_segment_features(s, seg)
-	plan := shaper_plan(fonts, s, seg.font, seg.script, direction)
-	clear(&s.out)
-	sh.shape(&s.shaper, plan, &seg.font.face, s.runes[seg.first:][:seg.count], s.seg_features[:], &s.out)
+	plan := shaper_plan(fonts, s, seg, direction)
+	sh.shape(&s.shaper, plan, &seg.font.face, s.runes[seg.first:][:seg.count], s.seg_features[:], &s.glyphs)
 	if !s.shaper.ok {
 		// Past the shaper's limits: one glyph per codepoint.
+		resize(&s.glyphs, first)
 		for i in seg.first ..< seg.first + seg.count {
 			g := font_glyph_index(seg.font, s.runes[i])
 			adv, _ := font_glyph_advance(seg.font, g)
-			append(&s.glyphs, Shaped_Glyph{id = g, cluster = i, advance = adv})
+			append(&s.glyphs, sh.Glyph{id = u16(g), cluster = i, advance = adv})
 		}
 		return
 	}
-	for g in s.out {
-		append(&s.glyphs, Shaped_Glyph{Glyph_Index(g.id), seg.first + g.cluster, g.offset, g.advance, g.mark})
+	for &g in s.glyphs[first:] {
+		g.cluster += seg.first
 	}
 }
 
@@ -277,13 +273,14 @@ features_equal :: proc(a, b: []sh.Feature) -> bool {
 	return true
 }
 
-// The shaper's plan for a face, script, direction and the segment's
-// feature settings, made on first use.
+// The shaper's plan for the segment's face, script and feature settings
+// and `direction`, made on first use.
 @(private)
-shaper_plan :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, f: ^Font, script: sh.Script, direction: sh.Direction) -> ^sh.Plan {
+shaper_plan :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segment, direction: sh.Direction) -> ^sh.Plan {
 	feats := s.seg_features[:]
+	script := seg.script
 	search: for &p in s.plans {
-		if p.font != f || p.script != script || p.direction != direction || int(p.count) != len(feats) {
+		if p.face != seg.face || p.script != script || p.direction != direction || int(p.count) != len(feats) {
 			continue
 		}
 		for k, i in s.plan_features[p.first:][:p.count] {
@@ -293,20 +290,22 @@ shaper_plan :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, f: ^Font, script: 
 		}
 		return &p.plan
 	}
-	p := Shape_Plan{font = f, script = script, direction = direction, first = i32(len(s.plan_features)), count = i32(len(feats))}
+	p := Shape_Plan{face = seg.face, script = script, direction = direction, first = i32(len(s.plan_features)), count = i32(len(feats))}
 	for k in feats {
 		// Ranged settings are kept as covering one codepoint.
 		append(&s.plan_features, sh.Feature{k.tag, k.value, 0, 0 if sh.feature_is_global(k) else 1})
 	}
+	f := seg.font
 	sh.plan_init(&p.plan, font_shaping(fonts, f), &f.face, script, direction, 0, feats, s.plans.allocator)
 	append(&s.plans, p)
 	return &s.plans[len(s.plans) - 1].plan
 }
 
-// Records a piece's feature settings: liga, clig and dlig off when
-// letter-spaced (CSS), then its style's (the last of a tag wins).
+// Adds a piece's feature settings, returning where they lie in
+// `features`: liga, clig and dlig off when letter-spaced (CSS), then its
+// style's (the last of a tag wins).
 @(private)
-shaper_add_piece_features :: proc(s: ^Text_Shaper, st: Text_Style) {
+shaper_add_piece_features :: proc(s: ^Text_Shaper, st: Text_Style) -> [2]i32 {
 	first := i32(len(s.features))
 	if st.letter_spacing != 0 {
 		append(&s.features, sh.Feature{tag = sh.tag("liga")}, sh.Feature{tag = sh.tag("clig")}, sh.Feature{tag = sh.tag("dlig")})
@@ -316,7 +315,7 @@ shaper_add_piece_features :: proc(s: ^Text_Shaper, st: Text_Style) {
 		copy(tag[:], f.tag)
 		append(&s.features, sh.Feature{tag = sh.tag(string(tag[:])), value = f.value})
 	}
-	append(&s.piece_features, [2]i32{first, i32(len(s.features)) - first})
+	return {first, i32(len(s.features)) - first}
 }
 
 // Visual order of the line's segments (UAX #9 rule L2 over their levels).

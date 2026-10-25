@@ -183,13 +183,14 @@ lottie_text_layout :: proc(fonts: ^Font_Collection, s: ^Lottie_Text_Scratch, sty
 		s.xs[i], s.adv[i] = max(f32), 0
 	}
 	for run in l.runs {
+		font := font_collection_font(fonts, run.face)
 		for k in run.first ..< run.first + run.count {
 			c := l.clusters[k]
 			if c < 0 || int(c) >= n {
 				continue
 			}
 			g := l.glyphs[k]
-			adv, _ := font_glyph_advance(run.font, g.glyph)
+			adv, _ := font_glyph_advance(font, g.glyph)
 			s.adv[c] += f32(adv) * run.em
 			s.xs[c] = min(s.xs[c], g.x)
 		}
@@ -393,6 +394,7 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 	path := &r.path
 	paints := [2]bool{false, true} if td.stroke_over else [2]bool{true, false}
 	for run in lay.runs {
+		font := font_collection_font(fonts, run.face)
 		glyphs := lay.glyphs[run.first:][:run.count]
 		if !animated {
 			for stroke in paints {
@@ -401,9 +403,9 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 					p.stroke.line_width = td.stroke_width
 					p.stroke.line_join = .Round
 					p.stroke.line_cap_start, p.stroke.line_cap_end = .Butt, .Butt
-					stroke_glyph_outlines(c, run.font, glyphs, run.em, p, path)
+					stroke_glyph_outlines(c, font, glyphs, run.em, p, path)
 				} else if !stroke && has_fill {
-					fill_glyph_outlines(c, run.font, glyphs, run.em, paint_color(fill_col), path)
+					fill_glyph_outlines(c, font, glyphs, run.em, paint_color(fill_col), path)
 				}
 			}
 			continue
@@ -424,9 +426,9 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 					p.stroke.line_width = lt.stroke_width
 					p.stroke.line_join = .Round
 					p.stroke.line_cap_start, p.stroke.line_cap_end = .Butt, .Butt
-					stroke_glyph_outlines(c, run.font, one[:], run.em, p, path)
+					stroke_glyph_outlines(c, font, one[:], run.em, p, path)
 				} else if !stroke && has_fill {
-					fill_glyph_outlines(c, run.font, one[:], run.em, paint_color(lt.fill), path)
+					fill_glyph_outlines(c, font, one[:], run.em, paint_color(lt.fill), path)
 				}
 			}
 			restore(c)

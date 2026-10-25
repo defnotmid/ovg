@@ -443,7 +443,7 @@ scene_emoji :: proc(c: ^vg.Canvas, r: ^Resources) {
 		l := &r.emoji_layout
 		vg.text_layout(&r.emoji_fonts, {{text = s, style = {size = size}}}, {x = x, y = y}, l)
 		for run in l.runs {
-			vg.fill_glyph_outlines(c, run.font, l.glyphs[run.first:][:run.count], run.em, paint, &r.scratch)
+			vg.fill_glyph_outlines(c, vg.font_collection_font(&r.emoji_fonts, run.face), l.glyphs[run.first:][:run.count], run.em, paint, &r.scratch)
 		}
 	}
 	text(c, r, "Hi 👋🔥😂 👩‍💻🇯🇵", 26, 8, 34, vg.paint_color(vg.rgb(20, 20, 40)))
