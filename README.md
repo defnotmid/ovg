@@ -745,8 +745,9 @@ every part follows:
   exact coverage of the glyph's shape into its Gray8 `pixels` and `glyph_atlas_take_dirty` reports the rows changed since
   the last take, so a renderer of its own can upload them into its own
   texture once a frame (an atlas made with a canvas keeps that canvas's
-  image, which `fill_glyph_run` updates). Glyphs are keyed by face data and
-  index, so `text_layout`'s runs and a `Font_Store`'s fonts share one atlas.
+  image, which `fill_glyph_run` updates). Glyphs are keyed by the font's
+  serial (one per `font_load`, kept by copies and never reused), so fonts
+  from anywhere share one atlas and freed fonts leave no stale entries.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set) and
@@ -776,11 +777,15 @@ every part follows:
   features, layout tables), so layouts may run concurrently on one
   collection; a warm shaper does not allocate.
   Every call shapes what it is given: a `Text_Layout` is data out, kept
-  by the caller and drawn again while its text is unchanged. Its runs name
-  faces by `Face_Id` (`font_collection_font` gives the face's font to
-  draw with): ids stay with their faces as faces are added before or after
-  them, so a layout outlives faces added to its collection, and an id
-  names no face (nil) once its face is removed. Variable
+  by the caller and drawn again while its text is unchanged. A collection
+  names its faces by `Face_Id` (runs, `font_collection_find`,
+  `font_collection_glyph`), and `font_collection_face` /
+  `font_collection_font` give a face's record or font for immediate use:
+  keep the id, not the pointer. Ids stay with their faces as faces are
+  added before or after them, so a layout outlives faces added to its
+  collection; a removed face's id, a replaced emoji face's
+  (`Font_Collection.emoji` is a `Maybe`), `Face_Id{}` and another
+  collection's ids name no face (nil). Variable
   fonts draw the instance they were loaded at:
   `font_load(data, 0, variations = {{"wght", 700}})`, or
   `font_collection_add(&fonts, data, variations = ...)`, which gives the

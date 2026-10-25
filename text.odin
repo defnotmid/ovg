@@ -40,10 +40,22 @@ Font :: struct {
 	// context's at `font_load`; the heap for a font made otherwise.
 	allocator:      mem.Allocator,
 	// The variable font instance it draws, as a key: 0 for the default,
-	// else a hash of the face's coordinates (glyph atlases tell instances
-	// of one face apart by it).
+	// else a hash of the face's coordinates.
 	instance:       u64,
+	// Which `font_load` made it: copies share it, separate loads (another
+	// face or instance of the same data too) don't, and none is reused; 0
+	// for a font font_load didn't make. Glyph atlases key glyphs by it.
+	serial:         u32,
 }
+
+// The next of the process's serials (fonts and font collections), from 1.
+@(private)
+serial_next :: proc "contextless" () -> u32 {
+	return sync.atomic_add(&serials, 1) + 1
+}
+
+@(private = "file")
+serials: u32
 
 @(private)
 Font_Shapes :: struct {
@@ -96,6 +108,7 @@ font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator, va
 	font.data = data
 	font.index = index
 	font.allocator = allocator
+	font.serial = serial_next()
 	font.colr = colr_open(&font)
 	if font.colr == nil {
 		font.bitmap_colour = face.tables[.sbix].at != 0 || face.tables[.CBDT].at != 0
@@ -325,20 +338,17 @@ Cached_Glyph :: struct {
 	visible:          bool,
 }
 
-// A glyph at one scale in one face and instance. Faces are told apart by
-// their data address, face index and instance, so fonts from a Font_Store
-// or a Font_Collection (text_layout's runs) share an atlas; reset it when
-// font data is freed, as new data may reuse the address.
+// A glyph at one scale in one font (its `serial`, which no other font
+// has), so fonts from anywhere (a Font_Store, a Font_Collection, a
+// `font_load` of their own) share an atlas.
 Glyph_Key :: struct {
-	data:       rawptr,
-	index:      i32,
+	font:       u32,
 	glyph:      Glyph_Index,
 	scale_bits: u32,
-	instance:   u64,
 }
 
 glyph_key :: proc "contextless" (f: ^Font, g: Glyph_Index, scale: f32) -> Glyph_Key {
-	return {raw_data(f.data), f.index, g, transmute(u32)scale, f.instance}
+	return {f.serial, g, transmute(u32)scale}
 }
 
 // Rasterized glyph coverage packed into one Gray8 bitmap, `pixels` (row-major,

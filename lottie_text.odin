@@ -352,7 +352,8 @@ lottie_draw_text :: proc(d: ^Lottie_Draw, l: ^Lottie_Layer, li: i32, t: f32) {
 		lottie_text_wrap(s, td.box_size.x, style.letter_spacing)
 		asc := ascent_pct * td.size / 100
 		if asc == 0 {
-			f, _ := font_collection_find(fonts, style.family, style.weight, style.italic)
+			face, _ := font_collection_find(fonts, style.family, style.weight, style.italic)
+			f := font_collection_font(fonts, face)
 			asc, _ = font_extent(f, font_scale_for_em(f, td.size))
 		}
 		opts.y = td.box_pos.y + asc

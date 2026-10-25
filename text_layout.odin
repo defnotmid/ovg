@@ -164,18 +164,19 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	for piece, pi in pieces {
 		face, size := resolve_face(fonts, l, piece.style)
 		if pi == 0 {
-			first = face.id
+			first = face
 		}
 		s.piece_start[pi] = n
 		s.piece_size[pi] = size
 		s.piece_features[pi] = shaper_add_piece_features(s, piece.style)
 		// The face's characters, as its shaping tables map them.
-		cmap := &font_shaping(fonts, &face.font).cmap
+		font := font_collection_font(fonts, face)
+		cmap := &font_shaping(fonts, font).cmap
 		for r in piece.text {
-			id := face.id
-			if r != '\n' && r != ' ' && r != '\t' && glyph_drawable(&face.font, Glyph_Index(sh.two_level_get(cmap, int(r)))) == 0 {
-				if f, g := collection_glyph(fonts, r, face); g != 0 {
-					id = f.id
+			id := face
+			if r != '\n' && r != ' ' && r != '\t' && glyph_drawable(font, Glyph_Index(sh.two_level_get(cmap, int(r)))) == 0 {
+				if f, g := font_collection_glyph(fonts, r, face); g != 0 {
+					id = f
 				}
 			}
 			s.runes[n], s.piece[n], s.face[n] = r, i32(pi), id
@@ -273,8 +274,8 @@ emoji_fallback :: proc(fonts: ^Font_Collection, runes: []rune, face: []Face_Id) 
 		wants := i + 1 < len(runes) && runes[i + 1] == 0xFE0F
 		wants ||= i > 0 && runes[i - 1] == 0x200D && font_collection_font(fonts, face[i - 1]).colr != nil
 		if wants && font_collection_font(fonts, face[i]).colr == nil {
-			if f, g := collection_emoji_glyph(fonts, r); g != 0 {
-				face[i] = f.id
+			if f, g := font_collection_emoji_glyph(fonts, r); g != 0 {
+				face[i] = f
 			}
 		}
 	}
@@ -322,9 +323,9 @@ text_layout_path :: proc(fonts: ^Font_Collection, l: ^Text_Layout, out: ^Path) {
 }
 
 @(private = "file")
-resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (face: ^Font_Face, size: f32) {
+resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -> (face: Face_Id, size: f32) {
 	found: bool
-	face, found = collection_find(fonts, st.family, st.weight, st.italic, st.variations)
+	face, found = font_collection_find(fonts, st.family, st.weight, st.italic, st.variations)
 	if !found {
 		append(&l.missing, st.family)
 	}

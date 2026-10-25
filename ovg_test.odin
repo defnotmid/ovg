@@ -588,13 +588,17 @@ test_glyph_atlas_cpu :: proc(t: ^testing.T) {
 	_, _, dirty = glyph_atlas_take_dirty(&atlas)
 	testing.expect(t, !dirty)
 
-	// The same face through another Font value (as text_layout's runs give
-	// it) hits the cache: nothing new to upload.
+	// The same font through another Font value (a copy) hits the cache:
+	// nothing new to upload. Another load of the same data is another font
+	// (its data may be freed and the address reused while the atlas lives).
 	copy_of := f^
 	again, _ := glyph_atlas_get(&atlas, &copy_of, font_glyph_index(f, 'A'), sc)
 	testing.expect_value(t, again, a)
 	_, _, dirty = glyph_atlas_take_dirty(&atlas)
 	testing.expect(t, !dirty)
+	reloaded, _ := font_load(f.data)
+	defer font_destroy(&reloaded)
+	testing.expect(t, glyph_key(&reloaded, 1, sc) != glyph_key(f, 1, sc) && glyph_key(&copy_of, 1, sc) == glyph_key(f, 1, sc))
 
 	glyph_atlas_reset(&atlas)
 	y0, y1, dirty = glyph_atlas_take_dirty(&atlas)

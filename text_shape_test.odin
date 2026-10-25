@@ -52,6 +52,13 @@ fx_add_noto :: proc(t: ^testing.T, s: ^Shape_Fx, name: string) -> bool {
 	return false
 }
 
+// The font of the face font_collection_find gives for `family`.
+@(private = "file")
+fx_find :: proc(s: ^Shape_Fx, family: string) -> ^Font {
+	face, _ := font_collection_find(&s.fonts, family, 400)
+	return font_collection_font(&s.fonts, face)
+}
+
 @(private = "file")
 concat :: proc(a, b: string) -> string {
 	out := make([]u8, len(a) + len(b))
@@ -79,7 +86,7 @@ test_shape_latin_ligatures :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(fx_layout(&s, "fi", "Noto Serif")), 1)
 	testing.expect_value(t, len(fx_layout(&s, "ffl", "Noto Serif")), 1)
 	testing.expect_value(t, len(fx_layout(&s, "office", "Noto Serif")), 4)
-	font, _ := font_collection_find(&s.fonts, "Noto Serif", 400)
+	font := fx_find(&s, "Noto Serif")
 	testing.expect(t, fx_layout(&s, "fi", "Noto Serif")[0].glyph != font_glyph_index(font, 'f'))
 	// Letter-spacing turns optional ligatures off (CSS).
 	testing.expect_value(t, len(fx_layout(&s, "ffl", "Noto Serif", 2)), 3)
@@ -93,7 +100,7 @@ test_shape_gpos_kerning :: proc(t: ^testing.T) {
 	if !fx_add_noto(t, &s, "NotoSans-Regular.ttf") {
 		return
 	}
-	font, _ := font_collection_find(&s.fonts, "Noto Sans", 400)
+	font := fx_find(&s, "Noto Sans")
 	em := font_scale_for_em(font, 100)
 	for pair in ([?]string{"AV", "To"}) {
 		g := fx_layout(&s, pair, "Noto Sans")
@@ -129,7 +136,7 @@ test_shape_arabic_joining :: proc(t: ^testing.T) {
 	if !fx_add_noto(t, &s, "NotoSansArabic-Regular.ttf") {
 		return
 	}
-	font, _ := font_collection_find(&s.fonts, "Noto Sans Arabic", 400)
+	font := fx_find(&s, "Noto Sans Arabic")
 	// "سلم": seen, lam, meem join (initial, medial, final forms).
 	word := "سلم"
 	g := fx_layout(&s, word, "Noto Sans Arabic")
@@ -153,7 +160,7 @@ test_shape_fallback_and_bidi :: proc(t: ^testing.T) {
 	if !fx_add_noto(t, &s, "NotoSansArabic-Regular.ttf") {
 		return
 	}
-	arabic, _ := font_collection_find(&s.fonts, "Noto Sans Arabic", 400)
+	arabic := fx_find(&s, "Noto Sans Arabic")
 	// Vera (the fallback face) has no Arabic: those glyphs fall back to Noto
 	// Sans Arabic, in their own run, placed right to left between the Latin.
 	text := "ab سلم cd"
@@ -384,7 +391,8 @@ test_font_collection_place_and_remove :: proc(t: ^testing.T) {
 
 // Layouts name faces by id: a face added before another moves it but
 // keeps its id, so a layout made earlier still draws with it, and each
-// face shapes with its own plans; a removed face's id names none.
+// face shapes with its own plans. A removed face's id names none, nor does
+// a replaced emoji face's, Face_Id{} or another collection's id.
 @(test)
 test_font_collection_face_ids :: proc(t: ^testing.T) {
 	mono := #load("demo/media/JetBrainsMono-Regular.ttf")
@@ -418,6 +426,16 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 	testing.expect(t, font_collection_font(&fonts, id) == nil)
 	testing.expect(t, font_collection_font(&fonts, fonts.faces[0].id) == &fonts.faces[0].font)
 	testing.expect(t, font_collection_font(&fonts, fonts.fallback.id) == &fonts.fallback.font)
+	testing.expect(t, font_collection_font(&fonts, {}) == nil)
+	testing.expect(t, font_collection_font(&fonts, alone.faces[0].id) == nil)
+	testing.expect(t, font_collection_font(&alone, fonts.fallback.id) == nil)
+
+	testing.expect(t, fonts.emoji == nil)
+	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
+	first := fonts.emoji.?.id
+	testing.expect(t, font_collection_font(&fonts, first) == &(&fonts.emoji.?).font)
+	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
+	testing.expect(t, font_collection_font(&fonts, first) == nil && fonts.emoji.?.id != first)
 }
 
 // Paths, flattened paths, layouts and morphs made with an init allocate
@@ -479,7 +497,7 @@ test_shape_features :: proc(t: ^testing.T) {
 	}
 	// By glyph name (fontTools' and HarfBuzz's): their ids differ between
 	// Noto Sans builds.
-	font, _ := font_collection_find(&s.fonts, "Noto Sans", 400)
+	font := fx_find(&s, "Noto Sans")
 	names := font_glyph_names(font)
 	defer delete(names)
 	named :: proc(names: []string, g: []Positioned_Glyph) -> (out: [4]string) {
@@ -576,13 +594,13 @@ test_fallback_family :: proc(t: ^testing.T) {
 	defer fx_close(&s)
 	vera := s.fonts.fallback.family
 	f, found := font_collection_find(&s.fonts, vera, 400)
-	testing.expect(t, found && f == &s.fonts.fallback.font)
+	testing.expect(t, found && f == s.fonts.fallback.id)
 	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
 	f, found = font_collection_find(&s.fonts, "", 400)
-	testing.expect(t, found && f != &s.fonts.fallback.font)
+	testing.expect(t, found && f != s.fonts.fallback.id)
 	s.fonts.default_family = vera
 	f, found = font_collection_find(&s.fonts, "", 400)
-	testing.expect(t, found && f == &s.fonts.fallback.font)
+	testing.expect(t, found && f == s.fonts.fallback.id)
 	text_layout(&s.fonts, {{text = "a", style = {family = vera}}}, {}, &s.layout)
 	testing.expect_value(t, len(s.layout.missing), 0)
 	s.fonts.default_family = ""
