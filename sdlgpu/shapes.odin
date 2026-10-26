@@ -85,6 +85,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 		// The last frame was dropped before its upload: what it placed may
 		// be gone, so start over.
 		restart(st)
+		b.stats.shape_restarts = 1
 	}
 	place :: proc(st: ^Shape_Store, data: []u32) -> u32 {
 		offset := st.top
@@ -119,8 +120,9 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 			break
 		}
 		// It doesn't fit: start over with only this frame's shapes, in a
-		// buffer twice their size (store_upload makes it).
+		// buffer four times their size (store_upload makes it).
 		restart(st)
+		b.stats.shape_restarts = 1
 	}
 	// Sizes in bytes are 32-bit.
 	return grids, st.top <= 1 << 28
@@ -132,7 +134,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	st := &b.shapes
 	if st.top > st.capacity {
-		capacity := u32(math.next_power_of_two(int(max(2 * st.top, 1 << 16))))
+		capacity := u32(math.next_power_of_two(int(max(4 * st.top, 1 << 16))))
 		buffer := sdl.CreateGPUBuffer(b.device, {usage = {.GRAPHICS_STORAGE_READ}, size = capacity * 4})
 		if buffer == nil {
 			return false
@@ -165,8 +167,13 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	if words == nil {
 		return false
 	}
+	// Each word placed went on at the top of the store, so the words wait
+	// as one run of it: one copy (a copy a shape cost the GPU about 1.2 µs
+	// each: 18 ms for 15,000 shapes).
+	first := st.pending[0].offset
 	at: u32
 	for p in st.pending {
+		assert(p.offset == first + at, "the store's pending words are one run")
 		copy(words[at:][:len(p.data)], p.data)
 		at += u32(len(p.data))
 	}
@@ -175,12 +182,7 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	if pass == nil {
 		return false
 	}
-	at = 0
-	for p in st.pending {
-		n := u32(len(p.data))
-		sdl.UploadToGPUBuffer(pass, {transfer_buffer = st.transfer, offset = at * 4}, {buffer = st.buffer, offset = p.offset * 4, size = n * 4}, false)
-		at += n
-	}
+	sdl.UploadToGPUBuffer(pass, {transfer_buffer = st.transfer}, {buffer = st.buffer, offset = first * 4, size = total * 4}, false)
 	sdl.EndGPUCopyPass(pass)
 	clear(&st.pending)
 	return true
