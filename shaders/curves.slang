@@ -4,7 +4,8 @@
 // arithmetic, except that a pixel's crossing pieces are integrated after
 // the scan (see curves_coverage), so sums may round differently. `words`
 // holds any number of shapes; `s` is a shape's first word. The layout is
-// documented in curves.odin.
+// documented in curves.odin, and its number is curves.FORMAT: a renderer
+// compiling this file checks it against the curves package it builds with.
 // Include this file; it binds nothing.
 
 float curves_f(StructuredBuffer<uint> words, uint i) { return asfloat(words[i]); }

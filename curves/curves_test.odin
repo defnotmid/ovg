@@ -46,6 +46,37 @@ test_winding :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_format :: proc(t: ^testing.T) {
+	// One shape's words, built from multiples of 1/16 in an 8 x 8 box on a
+	// 4 x 4 grid, so building rounds nothing on any machine. When they
+	// change, either the layout did (bump FORMAT if a reader of the old one
+	// would misread them) or only what build chooses (update the hash).
+	b: Builder
+	defer builder_destroy(&b)
+	square(&b, 0, 0, 8, 0.5)
+	square(&b, 0, 0, 0.5, 8)
+	for k in 0 ..< 8 {
+		square(&b, 0.5 + 0.5 * f32(k), 1 + 0.75 * f32(k), 1.5, 0.5)
+	}
+	words, _, extent, ok := build(&b, search = false)
+	testing.expect(t, ok && extent == 8)
+	defer delete(words)
+	testing.expect_value(t, words[0], 4)
+	testing.expect_value(t, words[1], 4)
+	steps: u32
+	for k in 0 ..< 16 {
+		steps += words[HEADER + 4 * k + 3]
+	}
+	testing.expect(t, steps > 0)
+	h: u64 = 0xcbf29ce484222325
+	for w in words {
+		h = (h ~ u64(w)) * 0x100000001b3
+	}
+	testing.expect_value(t, FORMAT, 1)
+	testing.expectf(t, h == 0x7484eba48dbad64e, "words hash %x (%d words)", h, len(words))
+}
+
+@(test)
 test_full_cell :: proc(t: ^testing.T) {
 	// 66,000 thin rectangles across the first column line, at distinct
 	// heights in the first row, from the bottom up (their steps in reverse

@@ -59,6 +59,12 @@ Curve :: struct {
 }
 
 HEADER :: 12
+// The layout of the words `build` writes and shaders/curves.slang reads:
+// bumped whenever a reader of one layout would misread the other's words,
+// so a shader compiled from another curves.slang refuses to build (a
+// renderer compiling its own #asserts it). test_format pins one shape's
+// words: when they change, bump this if the layout did.
+FORMAT :: 1
 // Columns or rows at most.
 MAX_CELLS :: 64
 
