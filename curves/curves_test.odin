@@ -46,6 +46,33 @@ test_winding :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_full_cell :: proc(t: ^testing.T) {
+	// 66,000 thin rectangles across the first column line, at distinct
+	// heights in the first row, from the bottom up (their steps in reverse
+	// order): the first cell lists their left sides and steps where each
+	// crosses the line, 66,000 pieces and 132,000 steps. A tall square at
+	// the right keeps the grid at its coarsest (cells 1000 / 64 a side).
+	b: Builder
+	defer builder_destroy(&b)
+	N :: 66_000
+	for k := N - 1; k >= 0; k -= 1 {
+		square(&b, 0, 1 + f32(k) * (14.0 / N), 20, 0.0001)
+	}
+	square(&b, 990, 0, 10, 1000)
+	words, origin, extent, ok := build(&b, search = false)
+	testing.expect(t, ok)
+	defer delete(words)
+	testing.expect_value(t, words[0], MAX_CELLS)
+	testing.expect_value(t, words[HEADER + 1], N)
+	testing.expect_value(t, words[HEADER + 3], 2 * N)
+	for k in ([3]int{0, N / 2, N - 1}) {
+		p := Vec2{12, 1 + f32(k) * (14.0 / N) + 0.00005}
+		testing.expect_value(t, abs(winding(words, (p - origin) / extent)), 1)
+		testing.expect_value(t, winding(words, (p + {0, 0.0001} - origin) / extent), 0)
+	}
+}
+
+@(test)
 test_mean_coverage :: proc(t: ^testing.T) {
 	b: Builder
 	defer builder_destroy(&b)

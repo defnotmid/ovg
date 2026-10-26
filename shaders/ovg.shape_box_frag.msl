@@ -314,11 +314,11 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 
 
     int _S14 = int(words_3[_S13 + 2U]);
-    uint _S15 = s_2 + words_3[_S13 + 3U];
-    uint _S16 = _S13 + 1U;
+    uint _S15 = _S13 + 1U;
 
-#line 474
-    uint _S17 = words_3[_S16] >> 16U;
+#line 473
+    uint _S16 = s_2 + words_3[_S13] + words_3[_S15];
+    uint _S17 = words_3[_S13 + 3U];
 
 #line 474
     uint k_0 = 0U;
@@ -340,7 +340,7 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
         }
 
 #line 476
-        uint _S18 = _S15 + 2U * k_0;
+        uint _S18 = _S16 + 2U * k_0;
 
 #line 476
         if((curves_f_0(words_3, _S18)) <= (p_0.y))
@@ -361,7 +361,7 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 
     uint _S19 = s_2 + words_3[s_2 + 6U];
     uint _S20 = s_2 + words_3[_S13];
-    uint _S21 = words_3[_S16] & 65535U;
+    uint _S21 = words_3[_S15];
 
 #line 480
     k_0 = 0U;
@@ -1528,8 +1528,8 @@ float curves_backdrop_box_0(uint device* words_6, uint s_5, uint cell_0, float r
 
 #line 54
     int _S127 = int(words_6[cell_0 + 2U]);
-    uint _S128 = words_6[cell_0 + 1U] >> 16U;
-    uint _S129 = s_5 + words_6[cell_0 + 3U];
+    uint _S128 = words_6[cell_0 + 3U];
+    uint _S129 = s_5 + words_6[cell_0] + words_6[cell_0 + 1U];
 
 #line 56
     float pos_0 = a_2;
@@ -1775,7 +1775,7 @@ float curves_coverage_0(uint device* words_7, uint s_6, float2 rc_4, float2 foot
             uint _S142 = curves_cell_0(s_6, &_S141, i_6, j_2);
 
             uint _S143 = s_6 + words_7[_S142];
-            uint _S144 = words_7[_S142 + 1U] & 65535U;
+            uint _S144 = words_7[_S142 + 1U];
 
 #line 182
             uint k_2 = 0U;

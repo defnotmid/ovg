@@ -34,11 +34,11 @@
 //	[6] word offset of the curves [7] mean coverage (f32)
 //	[8..11] bounds min x, min y, max x, max y (f32)
 //	[12..] each cell, row by row: word offset of its piece list, piece
-//	       count | step count << 16, backdrop at its bottom (i32), word
-//	       offset of its steps; then the lists (piece indices), the steps
-//	       (y f32, change i32: the backdrop is the bottom value plus the
-//	       changes at or below y), and the pieces, six f32 each (p1, p2, p3;
-//	       p2 within the box of p1 and p3).
+//	       count, backdrop at its bottom (i32), step count; then each
+//	       cell's list (piece indices) and right after it its steps (y f32,
+//	       change i32: the backdrop is the bottom value plus the changes at
+//	       or below y), and the pieces, six f32 each (p1, p2, p3; p2 within
+//	       the box of p1 and p3).
 //
 // Cell (i, j) spans x in [i, i + 1] * width, y in [j, j + 1] * height;
 // pieces are in shape units: the source scaled so the shape's larger side is
@@ -380,9 +380,15 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 	kept := 0
 	for k in 0 ..< cells {
 		mine := steps[step_ats[k]:step_ats[k + 1]]
-		for m in 1 ..< len(mine) {
-			for n := m; n > 0 && mine[n].y < mine[n - 1].y; n -= 1 {
-				mine[n], mine[n - 1] = mine[n - 1], mine[n]
+		// A few sort fastest in place; a crowded cell (a huge path's) in
+		// n log n.
+		if len(mine) > 32 {
+			slice.sort_by(mine, proc(a, b: Step) -> bool {return a.y < b.y})
+		} else {
+			for m in 1 ..< len(mine) {
+				for n := m; n > 0 && mine[n].y < mine[n - 1].y; n -= 1 {
+					mine[n], mine[n - 1] = mine[n - 1], mine[n]
+				}
 			}
 		}
 		step_ats[k] = kept
@@ -436,11 +442,11 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 		list := lists[starts[k]:starts[k + 1]]
 		cell[0] = u32(at)
 		mine := steps[step_ats[k]:step_ats[k + 1]]
-		cell[1] = u32(len(list)) | u32(len(mine)) << 16
+		cell[1] = u32(len(list))
 		cell[2] = u32(backdrop[k])
+		cell[3] = u32(len(mine))
 		copy(d[at:], list)
 		at += len(list)
-		cell[3] = u32(at)
 		for e in mine {
 			d[at], d[at + 1] = transmute(u32)e.y, u32(e.delta)
 			at += 2
@@ -604,8 +610,8 @@ backdrop_integral :: #force_inline proc "contextless" (s: []u32, cell: u32, ry, 
 		return 0
 	}
 	v := i32(s[cell + 2])
-	n := s[cell + 1] >> 16
-	at := s[cell + 3]
+	n := s[cell + 3]
+	at := s[cell] + s[cell + 1]
 	k: u32
 	for k < n && transmute(f32)s[at + 2 * k] - ry <= a {
 		v += i32(s[at + 2 * k + 1])
@@ -695,7 +701,7 @@ coverage :: proc "contextless" (s: []u32, rc: Vec2, footprint: Vec2, even_odd: b
 		for i in g.i0 ..= g.i1 {
 			cell := HEADER + 4 * u32(j * g.nx + i)
 			list := s[cell]
-			for k in 0 ..< s[cell + 1] & 0xffff {
+			for k in 0 ..< s[cell + 1] {
 				area += box_curve(s, s[6] + 6 * s[list + k], rc, ylo, yhi, x0, x1)
 			}
 		}
@@ -828,7 +834,7 @@ coverage_affine :: proc "contextless" (s: []u32, rc: Vec2, u, v: Vec2, even_odd:
 		for i in g.i0 ..= g.i1 {
 			cell := HEADER + 4 * u32(j * g.nx + i)
 			list := s[cell]
-			for k in 0 ..< s[cell + 1] & 0xffff {
+			for k in 0 ..< s[cell + 1] {
 				area += affine_curve(s, s[6] + 6 * s[list + k], rc, &fp, ylo, yhi)
 			}
 		}
@@ -1079,14 +1085,14 @@ winding :: proc "contextless" (s: []u32, p: Vec2) -> i32 {
 	cell := HEADER + 4 * u32(g.j0 * g.nx + g.i0)
 	// The backdrop at p.y, then the cell's pieces right of p.
 	w := i32(s[cell + 2])
-	at := s[cell + 3]
-	for k in 0 ..< s[cell + 1] >> 16 {
+	at := s[cell] + s[cell + 1]
+	for k in 0 ..< s[cell + 3] {
 		if transmute(f32)s[at + 2 * k] <= p.y {
 			w += i32(s[at + 2 * k + 1])
 		}
 	}
 	list := s[cell]
-	for k in 0 ..< s[cell + 1] & 0xffff {
+	for k in 0 ..< s[cell + 1] {
 		c := s[6] + 6 * s[list + k]
 		p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - p
 		p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - p

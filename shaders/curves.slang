@@ -52,8 +52,8 @@ uint curves_cell(uint s, Curves_Span g, int i, int j) {
 float curves_backdrop_box(StructuredBuffer<uint> words, uint s, uint cell, float ry, float a, float b) {
     if (a >= b) return 0.0;
     int v = int(words[cell + 2]);
-    uint n = words[cell + 1] >> 16;
-    uint at = s + words[cell + 3];
+    uint n = words[cell + 3];
+    uint at = s + words[cell] + words[cell + 1];
     float area = 0.0;
     float pos = a;
     for (uint k = 0; k < n; k++) {
@@ -179,7 +179,7 @@ float curves_coverage(StructuredBuffer<uint> words, uint s, float2 rc, float2 fo
         for (int i = g.i0; i <= g.i1; i++) {
             uint cell = curves_cell(s, g, i, j);
             uint list = s + words[cell];
-            uint count = words[cell + 1] & 0xffffu;
+            uint count = words[cell + 1];
             for (uint k = 0; k < count; k++) {
                 uint c = curves + 6 * words[list + k];
                 float x1c = curves_f(words, c) - rc.x;
@@ -348,8 +348,8 @@ float curves_footprint_piece(Curves_Footprint fp, int k, Curves_Quadratic q, flo
 float curves_backdrop_fp(StructuredBuffer<uint> words, uint s, uint cell, float ry, float a, float b, Curves_Footprint fp) {
     if (a >= b) return 0.0;
     int v = int(words[cell + 2]);
-    uint n = words[cell + 1] >> 16;
-    uint at = s + words[cell + 3];
+    uint n = words[cell + 3];
+    uint at = s + words[cell] + words[cell + 1];
     float area = 0.0;
     float pos = a;
     for (uint k = 0; k < n; k++) {
@@ -413,7 +413,7 @@ float curves_coverage_affine(StructuredBuffer<uint> words, uint s, float2 rc, fl
         for (int i = g.i0; i <= g.i1; i++) {
             uint cell = curves_cell(s, g, i, j);
             uint list = s + words[cell];
-            uint count = words[cell + 1] & 0xffffu;
+            uint count = words[cell + 1];
             for (uint k = 0; k < count; k++) {
                 uint c = curves + 6 * words[list + k];
                 float x1c = curves_f(words, c) - rc.x;
@@ -470,14 +470,14 @@ int curves_winding(StructuredBuffer<uint> words, uint s, float2 p) {
     uint cell = curves_cell(s, g, g.i0, g.j0);
     // The backdrop at p.y, then the cell's pieces right of p.
     int w = int(words[cell + 2]);
-    uint at = s + words[cell + 3];
-    uint steps = words[cell + 1] >> 16;
+    uint at = s + words[cell] + words[cell + 1];
+    uint steps = words[cell + 3];
     for (uint k = 0; k < steps; k++) {
         if (curves_f(words, at + 2 * k) <= p.y) w += int(words[at + 2 * k + 1]);
     }
     uint curves = s + words[s + 6];
     uint list = s + words[cell];
-    uint count = words[cell + 1] & 0xffffu;
+    uint count = words[cell + 1];
     for (uint k = 0; k < count; k++) {
         uint c = curves + 6 * words[list + k];
         float2 p1 = curves_point(words, c, p);
