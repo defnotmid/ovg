@@ -687,7 +687,10 @@ every part follows:
   path long-lived owns its shape, built once and drawn under any transform
   (`fill_shape`; `fill_shapes` draws one at many transforms with one paint
   row, as an editor's anchors): fonts own glyph shapes, SVG documents their
-  elements' fills and strokes. `fill_path` and `stroke_path` build one for paths
+  elements' fills and strokes; their cubics and stroke outlines are within
+  1/4096 of their size, or the `tol` they are built with (`shape_from_path`,
+  `shape_from_stroke`: a shape drawn magnified wants the pixel fraction it
+  may miss by at its largest scale). `fill_path` and `stroke_path` build one for paths
   made on the fly (in drawing coordinates, cubics within 1/16 px). A
   stroke is its outline (`stroke.odin`: lines and quadratics offset as
   such, joins, caps, dashes along the curves) filled non-zero, so each

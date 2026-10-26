@@ -168,8 +168,10 @@ shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
 	s^ = {}
 }
 
-// Builds a path's shape.
-shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true, scratch: ^Shape_Scratch = nil) -> (Shape, bool) {
+// Builds a path's shape, its cubics within `tol` path units (0: each within
+// 1/4096 of its size; a shape drawn magnified wants the pixel fraction it
+// may miss by at its largest scale).
+shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true, scratch: ^Shape_Scratch = nil, tol: f32 = 0) -> (Shape, bool) {
 	temp: Shape_Scratch
 	sc := scratch
 	if sc == nil {
@@ -177,16 +179,17 @@ shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true
 		sc = &temp
 	}
 	shape_builder_reset(&sc.builder)
-	sc.builder.tol = 0
+	sc.builder.tol = tol
 	shape_add_path(&sc.builder, p)
 	return shape_build(&sc.builder, allocator, search)
 }
 
-// Builds the shape of `p`'s stroke with `s` (stroke.odin), in path units
-// within 1/4096 of its size; false (and no shape) when it covers nothing.
+// Builds the shape of `p`'s stroke with `s` (stroke.odin), within `tol`
+// path units (0: 1/4096 of its size, as shape_from_path); false (and no
+// shape) when it covers nothing.
 // `complete` is false when the dashes ran past `max_dashes` (the stroke is
 // then undashed).
-shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.allocator, search := true, max_dashes := DEFAULT_LIMITS[.Dash_Segments], scratch: ^Shape_Scratch = nil) -> (shape: Shape, ok, complete: bool) {
+shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.allocator, search := true, max_dashes := DEFAULT_LIMITS[.Dash_Segments], scratch: ^Shape_Scratch = nil, tol: f32 = 0) -> (shape: Shape, ok, complete: bool) {
 	temp: Shape_Scratch
 	sc := scratch
 	if sc == nil {
@@ -199,7 +202,10 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 	for q in p.coords {
 		lo, hi = {min(lo.x, q.x), min(lo.y, q.y)}, {max(hi.x, q.x), max(hi.y, q.y)}
 	}
-	tol := max(hi.x - lo.x, hi.y - lo.y, s.line_width) / 4096
+	tol := tol
+	if tol <= 0 {
+		tol = max(hi.x - lo.x, hi.y - lo.y, s.line_width) / 4096
+	}
 	complete = stroke_add(sc, p, TRANSFORM_IDENTITY, s, tol, max_dashes)
 	shape, ok = shape_build(&sc.builder, allocator, search)
 	return

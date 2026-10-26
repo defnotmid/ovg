@@ -1,5 +1,6 @@
 package ovg
 
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:testing"
@@ -167,6 +168,71 @@ test_sw_fill_shape :: proc(t: ^testing.T) {
 	// Half the pixel at x = 22 is inside the second square.
 	half := at(&b, 22, 9)
 	testing.expectf(t, abs(int(half[0]) - 128) <= 1 && half[0] == half[1] && half[2] == 255, "half-covered pixel %v", half)
+}
+
+@(test)
+test_shape_tolerance :: proc(t: ^testing.T) {
+	// A quarter circle of radius 1000 as one cubic. Built within 1/1000 of
+	// a unit, points 1/500 of a unit either side of it fall on their sides
+	// (as a shape magnified 500x must); within the default 1/4096 of its
+	// size some do not.
+	k :: 0.5522847498
+	pts := [4]Vec2{{1000, 0}, {1000, 1000 * k}, {1000 * k, 1000}, {0, 1000}}
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	path_move_to(&p, 0, 0)
+	path_line_to(&p, pts[0].x, pts[0].y)
+	path_bezier_to(&p, pts[1].x, pts[1].y, pts[2].x, pts[2].y, pts[3].x, pts[3].y)
+	path_close(&p)
+	wrong :: proc(s: ^Shape, pts: [4]Vec2) -> (n: int) {
+		for i in 1 ..< 100 {
+			a := f32(i) / 100
+			b := 1 - a
+			q := b * b * b * pts[0] + 3 * b * b * a * pts[1] + 3 * b * a * a * pts[2] + a * a * a * pts[3]
+			// Nearly the normal: the cubic is nearly the circle.
+			out := q / math.hypot(q.x, q.y) * 0.002
+			if cv.winding(s.data, (q - out - s.origin) / s.extent) == 0 {
+				n += 1
+			}
+			if cv.winding(s.data, (q + out - s.origin) / s.extent) != 0 {
+				n += 1
+			}
+		}
+		return
+	}
+	fine, ok := shape_from_path(&p, tol = 0.001)
+	testing.expect(t, ok)
+	defer shape_destroy(&fine)
+	coarse, _ := shape_from_path(&p)
+	defer shape_destroy(&coarse)
+	testing.expect_value(t, wrong(&fine, pts), 0)
+	testing.expect(t, wrong(&coarse, pts) > 0)
+	// A stroke's outline too: 5 units either side of the cubic (along its
+	// normal, away from the joins), 1/500 of a unit in is in, out is out.
+	st := DEFAULT_STROKE
+	st.line_width = 10
+	stroke, sok, _ := shape_from_stroke(&p, st, tol = 0.001)
+	testing.expect(t, sok)
+	defer shape_destroy(&stroke)
+	off := 0
+	for i in 5 ..< 96 {
+		a := f32(i) / 100
+		b := 1 - a
+		q := b * b * b * pts[0] + 3 * b * b * a * pts[1] + 3 * b * a * a * pts[2] + a * a * a * pts[3]
+		d := 3 * b * b * (pts[1] - pts[0]) + 6 * b * a * (pts[2] - pts[1]) + 3 * a * a * (pts[3] - pts[2])
+		n := Vec2{d.y, -d.x} / math.hypot(d.x, d.y)
+		for side in ([2]f32{-1, 1}) {
+			edge := q + n * (5 * side)
+			if cv.winding(stroke.data, (edge - n * (0.002 * side) - stroke.origin) / stroke.extent) == 0 {
+				off += 1
+			}
+			if cv.winding(stroke.data, (edge + n * (0.002 * side) - stroke.origin) / stroke.extent) != 0 {
+				off += 1
+			}
+		}
+	}
+	testing.expect_value(t, off, 0)
 }
 
 @(test)
