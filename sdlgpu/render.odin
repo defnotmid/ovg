@@ -20,11 +20,12 @@ Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
 	format:  sdl.GPUTextureFormat,
 	// The shape pipeline (shapes.odin) instead of the triangle one, its
-	// box variant (instances without rotation or skew), its group one and
-	// its hairline one.
+	// box variant (instances without rotation or skew), its group one (of
+	// markers: `marker`) and its hairline one.
 	shapes:   bool,
 	box:      bool,
 	group:    bool,
+	marker:   bool,
 	hairline: bool,
 }
 
@@ -482,8 +483,9 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 		side += (ib.maxx - ib.minx) + (ib.maxy - ib.miny)
 	}
 	side = max(side / f32(2 * n), 1)
-	nx := clamp(int(math.ceil(w / side)), 1, GROUP_MAX_CELLS)
-	ny := clamp(int(math.ceil(h / side)), 1, GROUP_MAX_CELLS)
+	most := MARKER_MAX_CELLS if p.frame.shapes[c.instances.start].marker != .None else GROUP_MAX_CELLS
+	nx := clamp(int(math.ceil(w / side)), 1, most)
+	ny := clamp(int(math.ceil(h / side)), 1, most)
 	cw, ch := w / f32(nx), h / f32(ny)
 	cells :: proc(b: vg.Bounds, area: vg.Bounds, cw, ch: f32, nx, ny: int) -> (i0, j0, i1, j1: int) {
 		i0 = clamp(int((b.minx - area.minx) / cw), 0, nx - 1)
@@ -503,11 +505,15 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	for k in at ..< lists {
 		words[k] = 0
 	}
-	for ib in bounds {
+	// Each member's cells, counted, then listed: the spans are clamped to the
+	// grid and the lists sized by the counts, so the indices need no checks.
+	spans := make([][4]i32, n, context.temp_allocator)
+	for ib, k in bounds {
 		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
+		spans[k] = {i32(i0), i32(j0), i32(i1), i32(j1)}
 		for j in j0 ..= j1 {
 			for i in i0 ..= i1 {
-				words[at + j * nx + i + 1] += 1
+				#no_bounds_check words[at + j * nx + i + 1] += 1
 			}
 		}
 	}
@@ -517,17 +523,19 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	resize(words, lists + int(words[lists - 1]))
 	fill := make([]u32, nx * ny, context.temp_allocator)
 	copy(fill, words[at:lists - 1])
-	for ib, k in bounds {
-		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
-		for j in j0 ..= j1 {
-			for i in i0 ..= i1 {
-				words[lists + int(fill[j * nx + i])] = u32(k)
-				fill[j * nx + i] += 1
+	for sp, k in spans {
+		for j in int(sp[1]) ..= int(sp[3]) {
+			for i in int(sp[0]) ..= int(sp[2]) {
+				#no_bounds_check {
+					words[lists + int(fill[j * nx + i])] = u32(k)
+					fill[j * nx + i] += 1
+				}
 			}
 		}
 	}
 	row := base
 	row.key.group = true
+	row.key.marker = p.frame.shapes[c.instances.start].marker != .None
 	first := len(b.groups)
 	listed :: proc(words: ^[dynamic]u32, cell: int) -> bool {
 		return words[cell] != words[cell + 1]
@@ -555,9 +563,12 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	append(&b.rows, row)
 }
 
-// A group's grid is at most this many cells a side.
+// A group's grid is at most this many cells a side; a group of markers'
+// (small, many, often piled up) takes cells about a marker's size.
 @(private = "file")
 GROUP_MAX_CELLS :: 64
+@(private = "file")
+MARKER_MAX_CELLS :: 256
 
 // One filter quad from `src` (and `backdrop`) into `dst`, a pass of its own
 // with Copy blend.
@@ -1132,7 +1143,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		// No vertex input: the shader pulls its instances.
 		info := sdl.GPUGraphicsPipelineCreateInfo {
 			vertex_shader = b.shape_vert,
-			fragment_shader = b.shape_group_frag if key.group else (b.shape_hairline_frag if key.hairline else (b.shape_box_frag if key.box else b.shape_frag)),
+			fragment_shader = (b.marker_group_frag if key.marker else b.shape_group_frag) if key.group else (b.shape_hairline_frag if key.hairline else (b.shape_box_frag if key.box else b.shape_frag)),
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},

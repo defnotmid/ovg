@@ -320,6 +320,46 @@ test_sw_hairline_shape :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_sw_fill_markers :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 60, 30)
+	clear_rect(&c, 0, 0, 60, 30, WHITE)
+	at :: proc(b: ^Software_Backend, x, y: int) -> [4]u8 {
+		i := (y * int(b.width) + x) * 4
+		return {b.pixels[i], b.pixels[i + 1], b.pixels[i + 2], b.pixels[i + 3]}
+	}
+	// Two circles overlapping (one batch: one group, one paint row), the
+	// scale of the transform not changing their size, and an outlined
+	// square; the marker off the target is left out.
+	scale(&c, 2, 2)
+	points := [?]Vec2{{6.25, 7.5}, {8.75, 7.5}, {100, 100}}
+	paints := len(c.paints)
+	fill_markers(&c, .Circle, 5, 0, paint_color(rgb(0, 0, 255)), points[:])
+	testing.expect_value(t, len(c.paints) - paints, 2)
+	if d, ok := c.commands[len(c.commands) - 1].type.(Cmd_Draw_Shapes); testing.expect(t, ok) {
+		testing.expect_value(t, d.instances.count, 2)
+		testing.expect(t, d.group != 0)
+	}
+	reset_transform(&c)
+	fill_markers(&c, .Square, 6, 2, paint_color(rgb(255, 0, 0)), []Vec2{{45, 15}})
+	flush(&c)
+	// Inside the circles, and where they overlap: blue once, not twice.
+	testing.expect_value(t, at(&b, 12, 15), [4]u8{0, 0, 255, 255})
+	testing.expect_value(t, at(&b, 15, 15), [4]u8{0, 0, 255, 255})
+	testing.expect_value(t, at(&b, 30, 15), [4]u8{255, 255, 255, 255})
+	// The square, radius 6 around (45, 15), outlined 2 px on its edge: 5 to
+	// 7 px from its center red, its inside and outside white.
+	testing.expect_value(t, at(&b, 39, 15), [4]u8{255, 0, 0, 255})
+	testing.expect_value(t, at(&b, 45, 15), [4]u8{255, 255, 255, 255})
+	testing.expect_value(t, at(&b, 36, 15), [4]u8{255, 255, 255, 255})
+}
+
+@(test)
 test_font_glyph_shape :: proc(t: ^testing.T) {
 	font, _ := font_load(DEFAULT_FONT_DATA)
 	defer font_destroy(&font)

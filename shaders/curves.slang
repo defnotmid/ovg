@@ -570,3 +570,35 @@ float curves_hairline(StructuredBuffer<uint> words, uint s, float2 rc, float2 u,
     }
     return cov;
 }
+
+// The coverage of the pixel at `rc` by a marker (curves.odin's marker): in
+// its own units the square [-1, 1]^2 or the unit circle, u and v the
+// pixel's sides there, drawn unrotated; filled, or with `outline` > 0 a
+// ring that many pixels wide on its edge.
+float curves_marker(bool circle, float2 rc, float2 u, float2 v, float outline) {
+    float det = u.x * v.y - u.y * v.x;
+    if (det == 0.0) return 0.0;
+    float2 d = float2(v.y * rc.x - v.x * rc.y, u.x * rc.y - u.y * rc.x) / det;
+    float r = sqrt(v.y * v.y + u.y * u.y) / abs(det);
+    float h = 0.5 * outline;
+    if (circle) {
+        float dist = sqrt(dot(d, d));
+        float2 n = dist > 1e-6 ? d / dist : float2(1.0, 0.0);
+        float wa = max(abs(n.x), abs(n.y));
+        float wb = max(min(abs(n.x), abs(n.y)), 1e-3);
+        if (outline > 0.0) {
+            return clamp(curves_projected_box(r + h - dist, wa, wb) - curves_projected_box(r - h - dist, wa, wb), 0.0, 1.0);
+        }
+        return curves_projected_box(r - dist, wa, wb);
+    }
+    float2 a = float2(r + h, r + h);
+    float ox = clamp(min(d.x + 0.5, a.x) - max(d.x - 0.5, -a.x), 0.0, 1.0);
+    float oy = clamp(min(d.y + 0.5, a.y) - max(d.y - 0.5, -a.y), 0.0, 1.0);
+    if (outline > 0.0) {
+        float b = max(r - h, 0.0);
+        float ix = clamp(min(d.x + 0.5, b) - max(d.x - 0.5, -b), 0.0, 1.0);
+        float iy = clamp(min(d.y + 0.5, b) - max(d.y - 0.5, -b), 0.0, 1.0);
+        return ox * oy - ix * iy;
+    }
+    return ox * oy;
+}

@@ -3290,314 +3290,314 @@ struct pixelInput_0
 };
 
 
-#line 868
+#line 907
 [[fragment]] pixelOutput_0 fs_shape_group(pixelInput_0 _S248 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 868
+#line 907
     thread KernelContext_0 kernelContext_24;
 
-#line 868
+#line 907
     (&kernelContext_24)->members_0 = members_1;
 
-#line 868
+#line 907
     (&kernelContext_24)->shapes_0 = shapes_1;
 
-#line 868
+#line 907
     (&kernelContext_24)->paints_0 = paints_1;
 
-#line 868
+#line 907
     (&kernelContext_24)->tex_texture_0 = tex_texture_1;
 
-#line 868
+#line 907
     (&kernelContext_24)->tex_sampler_0 = tex_sampler_1;
 
-#line 868
+#line 907
     thread VS_Shape_Out_0 _S249;
 
-#line 868
+#line 907
     (&_S249)->position_0 = position_1;
 
-#line 868
+#line 907
     (&_S249)->rc_0 = _S248.rc_7;
 
-#line 868
+#line 907
     (&_S249)->fpos_0 = _S248.fpos_4;
 
-#line 868
+#line 907
     (&_S249)->uv_0 = _S248.uv_2;
 
-#line 868
+#line 907
     (&_S249)->data_0 = _S248.data_3;
 
-#line 868
+#line 907
     shape_clip_0(&_S249, &kernelContext_24);
 
     uint _S250 = _S248.data_3.x;
 
-#line 870
+#line 909
     uint dims_0 = (&kernelContext_24)->shapes_0[_S250];
     uint nx_1 = dims_0 & 65535U;
     uint _S251 = dims_0 >> 16U;
 
-#line 872
+#line 911
     uint2 cell_2 = min(uint2(max(_S248.rc_7, float2(0.0f) )), uint2(nx_1, _S251) - uint2(1U) );
     uint _S252 = _S250 + 1U;
 
-#line 873
+#line 912
     uint at_0 = _S252 + cell_2.y * nx_1 + cell_2.x;
     uint _S253 = _S252 + nx_1 * _S251 + 1U;
 
     uint _S254 = (&kernelContext_24)->shapes_0[at_0];
 
-#line 876
+#line 915
     float4 acc_0 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 876
+#line 915
     uint k_6 = _S254;
 
-#line 876
+#line 915
     for(;;)
     {
 
-#line 876
+#line 915
         if(k_6 < ((&kernelContext_24)->shapes_0)[at_0 + 1U])
         {
         }
         else
         {
 
-#line 876
+#line 915
             break;
         }
 
-#line 877
+#line 916
         Shape_Instance_natural_0 s_9 = (&kernelContext_24)->members_0[_S248.data_3.z + (&kernelContext_24)->shapes_0[_S253 + k_6]];
 
-#line 877
+#line 916
         float4 _S255 = float4(s_9.t_0) ;
 
         float2 d_5 = _S248.fpos_4 - _S255.xy;
 
-#line 879
+#line 918
         float4 _S256 = float4(s_9.m_0) ;
         float _S257 = _S256.w;
 
-#line 880
+#line 919
         float _S258 = d_5.x;
 
-#line 880
+#line 919
         float _S259 = _S256.z;
 
-#line 880
+#line 919
         float _S260 = d_5.y;
 
-#line 880
+#line 919
         float _S261 = _S256.x;
 
-#line 880
+#line 919
         float _S262 = _S256.y;
 
-#line 880
+#line 919
         float2 rc_8 = float2(_S257 * _S258 - _S259 * _S260, _S261 * _S260 - _S262 * _S258) / float2((_S261 * _S257 - _S259 * _S262)) ;
         float2 epp_0 = _S255.zw;
 
-#line 881
+#line 920
         float4 _S263 = float4(s_9.bounds_0) ;
 
-#line 881
+#line 920
         bool _S264;
         if(any(rc_8 < (_S263.xy - epp_0)))
         {
 
-#line 882
+#line 921
             _S264 = true;
 
-#line 882
+#line 921
         }
         else
         {
 
-#line 882
+#line 921
             _S264 = any(rc_8 > (_S263.zw + epp_0));
 
-#line 882
+#line 921
         }
 
-#line 882
+#line 921
         if(_S264)
         {
 
-#line 883
+#line 922
             k_6 = k_6 + 1U;
 
-#line 876
+#line 915
             continue;
         }
 
-#line 876
+#line 915
         uint4 _S265 = uint4(s_9.data_1) ;
 
-#line 885
+#line 924
         uint _S266 = _S265.z;
 
-#line 885
+#line 924
         bool even_odd_3 = (_S266 & 1U) != 0U;
 
-#line 885
+#line 924
         bool _S267;
 
-#line 885
+#line 924
         float coverage_0;
 
         if((_S266 & 2U) != 0U)
         {
 
-#line 887
+#line 926
             float4 _S268 = float4(s_9.uv_1) ;
             int w_3 = curves_winding_0((&kernelContext_24)->shapes_0, _S265.x, rc_8 + (_S268.xy + _S268.zw) / float2(64.0f) );
             if(even_odd_3)
             {
 
-#line 889
+#line 928
                 _S267 = (w_3 & int(1)) != int(0);
 
-#line 889
+#line 928
             }
             else
             {
 
-#line 889
+#line 928
                 _S267 = w_3 != int(0);
 
-#line 889
+#line 928
             }
 
-#line 889
+#line 928
             if(_S267)
             {
 
-#line 889
+#line 928
                 coverage_0 = 1.0f;
 
-#line 889
+#line 928
             }
             else
             {
 
-#line 889
+#line 928
                 coverage_0 = 0.0f;
 
-#line 889
+#line 928
             }
 
-#line 887
+#line 926
         }
         else
         {
             if(_S262 == 0.0f)
             {
 
-#line 890
+#line 929
                 _S267 = _S259 == 0.0f;
 
-#line 890
+#line 929
             }
             else
             {
 
-#line 890
+#line 929
                 _S267 = false;
 
-#line 890
+#line 929
             }
 
-#line 890
+#line 929
             if(_S267)
             {
 
-#line 890
+#line 929
                 float4 _S269 = float4(s_9.uv_1) ;
 
-#line 890
+#line 929
                 coverage_0 = curves_coverage_0((&kernelContext_24)->shapes_0, _S265.x, rc_8, float2(abs(_S269.x), abs(_S269.w)), even_odd_3);
 
-#line 890
+#line 929
             }
             else
             {
 
-#line 890
+#line 929
                 float4 _S270 = float4(s_9.uv_1) ;
 
-#line 890
+#line 929
                 coverage_0 = curves_coverage_affine_0((&kernelContext_24)->shapes_0, _S265.x, rc_8, _S270.xy, _S270.zw, even_odd_3);
 
-#line 890
+#line 929
             }
 
-#line 887
+#line 926
         }
 
-#line 895
+#line 934
         if(coverage_0 < 0.00196078442968428f)
         {
 
-#line 896
+#line 935
             k_6 = k_6 + 1U;
 
-#line 876
+#line 915
             continue;
         }
 
-#line 898
+#line 937
         (&kernelContext_24)->paint_index_0 = _S265.y;
 
-#line 898
+#line 937
         int _S271 = shader_type_0(&kernelContext_24);
 
-#line 898
+#line 937
         float4 _S272 = fill_color_0(_S271, _S248.fpos_4, &kernelContext_24);
 
-#line 898
+#line 937
         float _S273 = stroke_mask_0(float2(0.5f, coverage_0), &kernelContext_24);
 
-#line 898
+#line 937
         float _S274 = scissor_mask_0(_S248.fpos_4, &kernelContext_24);
         float4 c_9 = _S272 * float4((_S273 * _S274)) ;
 
-#line 899
+#line 938
         acc_0 = c_9 + acc_0 * float4((1.0f - c_9.w)) ;
 
-#line 876
+#line 915
         k_6 = k_6 + 1U;
 
-#line 876
+#line 915
     }
 
-#line 902
+#line 941
     if((acc_0.w) < 0.00196078442968428f)
     {
 
-#line 903
+#line 942
         discard_fragment();
 
-#line 902
+#line 941
     }
 
 
     (&kernelContext_24)->paint_index_0 = _S248.data_3.y;
 
-#line 905
+#line 944
     int _S275 = shader_type_0(&kernelContext_24);
 
-#line 905
+#line 944
     float4 _S276 = fill_color_0(_S275, _S248.fpos_4, &kernelContext_24);
 
-#line 905
+#line 944
     float _S277 = scissor_mask_0(_S248.fpos_4, &kernelContext_24);
 
-#line 905
+#line 944
     pixelOutput_0 _S278 = { acc_0 * (_S276 * float4(_S277) ) };
     return _S278;
 }

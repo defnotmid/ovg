@@ -149,3 +149,28 @@ scene_hairlines :: proc(c: ^vg.Canvas, r: ^Resources) {
 		vg.hairline_shapes(c, ring, vg.paint_color(vg.rgb(30, 30, 30)), 1, locals[:])
 	}
 }
+
+// Markers (vg.fill_markers): circles piled thick enough that most pixels
+// see dozens, squares filled and outlined, a gradient paint shading a
+// batch once, under a scale (the markers keep their pixel size).
+scene_markers :: proc(c: ^vg.Canvas, r: ^Resources) {
+	vg.clear_rect(c, 0, 0, W, H, vg.rgb(245, 243, 238))
+	points: [400]vg.Vec2
+	for &q, k in points {
+		a := f32(k) * 2.399963
+		d := 6 * math.sqrt(f32(k))
+		q = {64 + d * math.cos(a) * 0.45, 96 + d * math.sin(a) * 0.6}
+	}
+	vg.fill_markers(c, .Circle, 4.5, 0, vg.paint_linear_gradient(20, 0, 110, 0, vg.rgb(30, 90, 220), vg.rgb(200, 40, 120)), points[:])
+	vg.fill_markers(c, .Circle, 3, 1.25, vg.paint_color(vg.rgba(0, 0, 0, 200)), points[:60])
+	vg.save(c)
+	vg.translate(c, 150, 30)
+	vg.scale(c, 1.7, 1.7)
+	squares: [24]vg.Vec2
+	for &q, k in squares {
+		q = {f32(k % 6) * 9.5, f32(k / 6) * 9.25}
+	}
+	vg.fill_markers(c, .Square, 3.5, 0, vg.paint_color(vg.rgb(255, 255, 255)), squares[:])
+	vg.fill_markers(c, .Square, 3.5, 1.5, vg.paint_color(vg.rgb(20, 90, 230)), squares[:])
+	vg.restore(c)
+}

@@ -179,6 +179,48 @@ test_hairline_outline :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_marker_coverage :: proc(t: ^testing.T) {
+	// Markers of radius 2.5 to 9 px at a fractional center, filled and
+	// outlined, against 128 x 128 samples of the true square and disk:
+	// the square exact (within the sampling), the circle within a few
+	// hundredths (its edge taken as straight across a pixel).
+	N :: 128
+	worst_square, worst_circle: f64
+	for r in ([3]f32{2.5, 4.2, 9}) {
+		for outline in ([2]f32{0, 1.5}) {
+			cx, cy: f32 = 20.37, 19.81
+			u, v := Vec2{1 / r, 0}, Vec2{0, 1 / r}
+			for y in 6 ..< 34 {
+				for x in 6 ..< 34 {
+					rc := (Vec2{f32(x) + 0.5, f32(y) + 0.5} - {cx, cy}) / r
+					for circle in ([2]bool{false, true}) {
+						got := f64(marker(circle, rc, u, v, outline))
+						hits := 0
+						for sy in 0 ..< N {
+							for sx in 0 ..< N {
+								p := [2]f64{f64(x) + (f64(sx) + 0.5) / N - f64(cx), f64(y) + (f64(sy) + 0.5) / N - f64(cy)}
+								d := max(abs(p.x), abs(p.y)) if !circle else math.sqrt(p.x * p.x + p.y * p.y)
+								lo, hi := f64(r) - f64(outline) / 2, f64(r) + f64(outline) / 2
+								inside := d <= f64(r) if outline == 0 else (d <= hi && d >= lo)
+								hits += 1 if inside else 0
+							}
+						}
+						e := abs(got - f64(hits) / (N * N))
+						if circle {
+							worst_circle = max(worst_circle, e)
+						} else {
+							worst_square = max(worst_square, e)
+						}
+					}
+				}
+			}
+		}
+	}
+	testing.expectf(t, worst_square < 1.0 / 64, "square: worst %v", worst_square)
+	testing.expectf(t, worst_circle < 0.06, "circle: worst %v", worst_circle)
+}
+
+@(test)
 test_format :: proc(t: ^testing.T) {
 	// One shape's words, built from multiples of 1/16 in an 8 x 8 box on a
 	// 4 x 4 grid, so building rounds nothing on any machine. When they

@@ -241,7 +241,9 @@ Cmd_Draw_Shapes :: struct {
 // coverage is its footprint's, `widen` pixels wider than the pixel (a
 // feathered edge), or with `aliased` its center's winding; with `hairline`
 // its share within hairline / 2 pixels of the shape's outline
-// (`hairline_shape`) instead.
+// (`hairline_shape`) instead. A `marker` has no words: it is the unit
+// square or circle its transform scales and places, filled, or outlined
+// `hairline` pixels wide (`fill_markers`, cv.marker).
 Shape_Instance :: struct {
 	shape:     ^Shape,
 	words:     Range,
@@ -249,8 +251,15 @@ Shape_Instance :: struct {
 	paint:     u32,
 	even_odd:  bool,
 	aliased:   bool,
+	marker:    Marker_Kind,
 	widen:     f32,
 	hairline:  f32,
+}
+
+Marker_Kind :: enum u8 {
+	None,
+	Square,
+	Circle,
 }
 
 // The instance's shape words; `frame_words` is the frame's `shape_words`.
@@ -263,6 +272,11 @@ instance_words :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) 
 
 // The pixels the instance's coverage reaches.
 instance_bounds :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> Bounds {
+	if inst.marker != .None {
+		t, g := inst.transform, instance_reach(inst)
+		ex, ey := abs(t[0]) + abs(t[2]) + g, abs(t[1]) + abs(t[3]) + g
+		return {t[4] - ex, t[5] - ey, t[4] + ex, t[5] + ey}
+	}
 	return device_bounds(instance_words(inst, frame_words), inst.transform, instance_reach(inst))
 }
 

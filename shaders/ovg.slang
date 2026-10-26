@@ -858,6 +858,45 @@ float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
     return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
 }
 
+// A group of markers (ovg fill_markers): as a group of shapes, each a
+// marker's closed-form coverage (its kind in data.x, an outline's width in
+// data.z), and a pixel stops once covered: the markers are white, so later
+// ones would leave it as it is.
+[shader("fragment")]
+float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
+    shape_clip(i);
+    uint dims = shapes[i.data.x];
+    uint nx = dims & 0xffffu;
+    uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, dims >> 16) - 1u);
+    uint at = i.data.x + 1u + cell.y * nx + cell.x;
+    uint lists = i.data.x + 1u + nx * (dims >> 16) + 1u;
+    float4 acc = float4(0, 0, 0, 0);
+    for (uint k = shapes[at]; k < shapes[at + 1u]; k++) {
+        Shape_Instance s = members[i.data.z + shapes[lists + k]];
+        float2 d = i.fpos - s.t.xy;
+        float2 rc = float2(s.m.w * d.x - s.m.z * d.y, s.m.x * d.y - s.m.y * d.x) / (s.m.x * s.m.w - s.m.z * s.m.y);
+        float2 epp = s.t.zw;
+        if (any(rc < s.bounds.xy - epp) || any(rc > s.bounds.zw + epp)) {
+            continue;
+        }
+        float coverage = curves_marker(s.data.x == 2u, rc, s.uv.xy, s.uv.zw, asfloat(s.data.z));
+        if (coverage < 1.0 / 510.0) {
+            continue;
+        }
+        paint_index = s.data.y;
+        float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
+        acc = c + acc * (1.0 - c.a);
+        if (acc.a >= 1.0) {
+            break;
+        }
+    }
+    if (acc.a < 1.0 / 510.0) {
+        discard;
+    }
+    paint_index = i.data.y;
+    return acc * (fill_color(shader_type(), i.fpos) * scissor_mask(i.fpos));
+}
+
 // A group (ovg Cmd_Draw_Shapes.group): a record over its instances'
 // bounds, in cells (rc: cell units; data: its grid's word offset in
 // `shapes`, the grid's columns and rows its first word, the tint's paint

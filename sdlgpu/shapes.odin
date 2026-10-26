@@ -195,17 +195,24 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, c
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
-	x0, y0, x1, y1 := cv.bounds(words)
 	flags: u32 = (1 if inst.even_odd else 0) | (2 if inst.aliased else 0)
 	if inst.hairline > 0 {
 		flags = transmute(u32)inst.hairline
+	}
+	// A marker: the unit square or circle, its kind where a shape's words are.
+	at := offset
+	x0, y0, x1, y1: f32 = -1, -1, 1, 1
+	if inst.marker != .None {
+		at = u32(inst.marker)
+	} else {
+		x0, y0, x1, y1 = cv.bounds(words)
 	}
 	return {
 		m = {t[0], t[1], t[2], t[3]},
 		t = {t[4], t[5], epp.x, epp.y},
 		bounds = {x0, y0, x1, y1},
 		uv = {u.x, u.y, v.x, v.y},
-		data = {offset, inst.paint, flags, 0},
+		data = {at, inst.paint, flags, 0},
 		clip = clip,
 	}
 }

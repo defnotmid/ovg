@@ -1347,6 +1347,40 @@ band_coverage :: #force_inline proc "contextless" (p1, p2, p3: Vec2, w: f32) -> 
 	return clamp(projected_box(d + 0.5 * w, wa, wb) - projected_box(d - 0.5 * w, wa, wb), 0, 1)
 }
 
+// The coverage of the pixel centered at `rc` by a marker: in its own units
+// the square [-1, 1]² (`circle` false) or the unit circle, `u` and `v` the
+// pixel's sides there, drawn unrotated; filled, or with `outline` > 0 a
+// ring that many pixels wide centered on its edge. Exact for the square
+// (the pixel box against the square's, an axis at a time), the circle's
+// edge taken as straight across the pixel (`band_coverage`'s projection).
+marker :: proc "contextless" (circle: bool, rc: Vec2, u, v: Vec2, outline: f32) -> f32 {
+	det := u.x * v.y - u.y * v.x
+	if det == 0 {
+		return 0
+	}
+	// In pixels: the pixel center from the marker's, and its radius.
+	d := Vec2{v.y * rc.x - v.x * rc.y, u.x * rc.y - u.y * rc.x} / det
+	r := math.sqrt(v.y * v.y + u.y * u.y) / abs(det)
+	h := 0.5 * outline
+	if circle {
+		dist := math.sqrt(d.x * d.x + d.y * d.y)
+		n := d / dist if dist > 1e-6 else Vec2{1, 0}
+		wa, wb := max(abs(n.x), abs(n.y)), max(min(abs(n.x), abs(n.y)), 1e-3)
+		if outline > 0 {
+			return clamp(projected_box(r + h - dist, wa, wb) - projected_box(r - h - dist, wa, wb), 0, 1)
+		}
+		return projected_box(r - dist, wa, wb)
+	}
+	span :: #force_inline proc "contextless" (d, a: f32) -> f32 {
+		return clamp(min(d + 0.5, a) - max(d - 0.5, -a), 0, 1)
+	}
+	if outline > 0 {
+		a, b := r + h, max(r - h, 0)
+		return span(d.x, a) * span(d.y, a) - span(d.x, b) * span(d.y, b)
+	}
+	return span(d.x, r) * span(d.y, r)
+}
+
 // The share of a unit box's projection, of widths a >= b along its sides,
 // at or below x (x from its center): P(X + Y <= x), X and Y uniform on
 // [-a/2, a/2] and [-b/2, b/2].

@@ -236,7 +236,8 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 
 // A group, as the shape shader draws it: each pixel the instances
 // source-over in order (each as `raster_shape` shades it), then times the
-// tint, blended once.
+// tint, blended once. Markers' white instances leave a covered pixel as it
+// is, so a pixel of theirs stops there (as their shader does).
 @(private = "file")
 raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
 	instances := frame.shapes[c.instances.start:][:c.instances.count]
@@ -275,6 +276,9 @@ raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, fra
 		for y in iy0 ..< iy1 {
 			py := f32(y) + 0.5
 			for x in ix0 ..< ix1 {
+				if inst.marker != .None && acc[int(y - y0) * w + int(x - x0)][3] >= 1 {
+					continue
+				}
 				px := f32(x) + 0.5
 				cov := instance_coverage(inst, words, transform_point(inv, px, py), u, v)
 				if cov < 1.0 / 510 {
@@ -345,6 +349,9 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, frame_words: []u32) {
 // sides `u` and `v` (instance_footprint): the shape shader's.
 @(private = "file")
 instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc, u, v: Vec2) -> f32 {
+	if inst.marker != .None {
+		return cv.marker(inst.marker == .Circle, rc, u, v, inst.hairline)
+	}
 	if inst.hairline > 0 {
 		return cv.hairline(words, rc, u, v, inst.hairline)
 	}

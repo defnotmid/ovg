@@ -476,6 +476,44 @@ hairline_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, locals:
 	}
 }
 
+// Markers `radius` pixels (half a square's side, a circle's radius) at each
+// of `points` (current units), filled, or with `outline` > 0 outlined that
+// many pixels wide, whatever the transform scales or turns: an editor's
+// anchors and handles. One batch, one paint: the markers are a group, so a
+// pixel takes their union once (the paint shading it) and stops once it is
+// covered, and each costs its pixels' closed-form coverage (cv.marker)
+// where a shape costs its curves.
+fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint: Paint, points: []Vec2) {
+	if kind == .None || !(radius > 0) {
+		return
+	}
+	cmd: Command
+	row, white := max(u32), u32(0)
+	t := state(c).transform
+	// The target, grown by what a marker's coverage reaches past its center.
+	w, h := render_target_size(c)
+	reach := radius + 1 + 0.5 * max(outline, 0)
+	x0, y0 := f32(c.current_render_origin.x) - reach, f32(c.current_render_origin.y) - reach
+	x1, y1 := x0 + f32(w) + 2 * reach, y0 + f32(h) + 2 * reach
+	start := len(c.shapes)
+	for q in points {
+		at := transform_point(t, q.x, q.y)
+		if at.x < x0 || at.x > x1 || at.y < y0 || at.y > y1 {
+			continue
+		}
+		if row == max(u32) {
+			p := paint
+			p.feather, p.fill_rule = 0, .Non_Zero
+			cmd, row = shape_paint(c, p)
+			white = solid_paint(c, {1, 1, 1, 1})
+		}
+		append(&c.shapes, Shape_Instance{transform = {radius, 0, 0, radius, at.x, at.y}, paint = white, marker = kind, hairline = max(outline, 0)})
+	}
+	if n := len(c.shapes) - start; n > 0 {
+		push_instances(c, cmd, n, row + 1)
+	}
+}
+
 // Instances of `s` at each of `locals` with one paint row: fills, or
 // hairlines `hairline` pixels wide.
 @(private)
@@ -608,6 +646,22 @@ push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 =
 	}
 	cmd := base
 	cmd.type = Cmd_Draw_Shapes{{at, 1}, group}
+	append(&c.commands, cmd)
+}
+
+// `push_shape` for the last `n` instances appended at once.
+@(private)
+push_instances :: proc(c: ^Canvas, base: Command, n: int, group: u32 = 0) {
+	at := u32(len(c.shapes) - n)
+	if k := len(c.commands); k > 0 {
+		last := &c.commands[k - 1]
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+			d.instances.count += u32(n)
+			return
+		}
+	}
+	cmd := base
+	cmd.type = Cmd_Draw_Shapes{{at, u32(n)}, group}
 	append(&c.commands, cmd)
 }
 
