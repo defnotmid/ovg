@@ -119,14 +119,28 @@ Curves_Quadratic curves_quadratic(float2 p1, float2 p2, float2 p3) {
     return q;
 }
 
-// The area a piece [t0, t1] of a curve adds to the box [x0, x1].
+// `q` as a polynomial in s = t - t0.
+Curves_Quadratic curves_from(Curves_Quadratic q, float t0) {
+    Curves_Quadratic r;
+    r.A = q.A;
+    r.B = 2.0 * q.A * t0 + q.B;
+    r.C = (q.A * t0 + q.B) * t0 + q.C;
+    r.D = q.D;
+    r.E = 2.0 * q.D * t0 + q.E;
+    r.F = (q.D * t0 + q.E) * t0 + q.F;
+    return r;
+}
+
+// The area a piece [t0, t1] of a curve adds to the box [x0, x1], the part
+// inside in a parameter starting at t0 (as curves_affine_curve's).
 float curves_box_piece(Curves_Quadratic q, float x0, float x1, float t0, float t1) {
     if (t1 <= t0) return 0.0;
     float tm = (t0 + t1) * 0.5;
     float xm = (q.A * tm + q.B) * tm + q.C;
     if (xm <= x0) return 0.0;
     if (xm >= x1) return (x1 - x0) * (((q.D * t1 + q.E) * t1 + q.F) - ((q.D * t0 + q.E) * t0 + q.F));
-    return curves_area_term(q.A, q.B, q.C - x0, q.D, q.E, t0, t1);
+    Curves_Quadratic r = curves_from(q, t0);
+    return curves_area_term(r.A, r.B, r.C - x0, r.D, r.E, 0.0, t1 - t0);
 }
 
 // The area a curve crossing the box adds over its rows [ca, cb].
@@ -367,17 +381,6 @@ float curves_backdrop_fp(StructuredBuffer<uint> words, uint s, uint cell, float 
 // The area a curve crossing the footprint adds over its rows [ca, cb]: its
 // parameters at the rows' ends and where they cross the pieces'
 // boundaries (no solve where those coincide), then each piece.
-// `q` as a polynomial in s = t - t0.
-Curves_Quadratic curves_from(Curves_Quadratic q, float t0) {
-    Curves_Quadratic r;
-    r.A = q.A;
-    r.B = 2.0 * q.A * t0 + q.B;
-    r.C = (q.A * t0 + q.B) * t0 + q.C;
-    r.D = q.D;
-    r.E = 2.0 * q.D * t0 + q.E;
-    r.F = (q.D * t0 + q.E) * t0 + q.F;
-    return r;
-}
 
 float curves_affine_curve(StructuredBuffer<uint> words, uint c, float2 rc, Curves_Footprint fp, float ca, float cb) {
     Curves_Quadratic q = curves_quadratic(curves_point(words, c, rc), curves_point(words, c + 2, rc), curves_point(words, c + 4, rc));

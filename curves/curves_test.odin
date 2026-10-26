@@ -73,6 +73,24 @@ test_full_cell :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_small_box_coverage :: proc(t: ^testing.T) {
+	// A box 1/10,000 of the shape's size centered on a sloped edge covers
+	// half of itself: its area must not drown in the edge's own size.
+	b: Builder
+	defer builder_destroy(&b)
+	move_to(&b, {0, 0})
+	line_to(&b, {1, 0.5})
+	line_to(&b, {0, 1})
+	words, origin, extent := built(t, &b)
+	defer delete(words)
+	testing.expect(t, origin == {} && extent == 1)
+	for x in ([4]f32{0.1, 0.37, 0.7, 0.93}) {
+		cov := coverage(words, {x, 0.5 * x}, {1e-4, 1e-4}, false)
+		testing.expectf(t, abs(cov - 0.5) < 2e-3, "at x = %v: %v", x, cov)
+	}
+}
+
+@(test)
 test_mean_coverage :: proc(t: ^testing.T) {
 	b: Builder
 	defer builder_destroy(&b)

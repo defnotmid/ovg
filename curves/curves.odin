@@ -795,7 +795,9 @@ quadratic :: #force_inline proc "contextless" (p1, p2, p3: Vec2) -> Quadratic {
 }
 
 // The area a piece [t0, t1] of a curve adds to the box [x0, x1]: none left
-// of it, the full width right of it, the part left of the curve inside.
+// of it, the full width right of it, the part left of the curve inside (in
+// a parameter starting at t0, as affine_curve's: a box small beside the
+// curve would lose its area to rounding in t far from 0).
 @(private)
 box_piece :: #force_inline proc "contextless" (q: Quadratic, x0, x1, t0, t1: f32) -> f32 {
 	if t1 <= t0 {
@@ -809,7 +811,8 @@ box_piece :: #force_inline proc "contextless" (q: Quadratic, x0, x1, t0, t1: f32
 	if xm >= x1 {
 		return (x1 - x0) * (((q.D * t1 + q.E) * t1 + q.F) - ((q.D * t0 + q.E) * t0 + q.F))
 	}
-	return area_term(q.A, q.B, q.C - x0, q.D, q.E, t0, t1)
+	r := from(q, t0)
+	return area_term(r.A, r.B, r.C - x0, r.D, r.E, 0, t1 - t0)
 }
 
 // Exact coverage of the parallelogram `rc + a u + b v`, a, b in [-1/2, 1/2]:
