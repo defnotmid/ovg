@@ -40,7 +40,10 @@ local function render(f, lb)
       circle { cx = 18, cy = 18, r = 6, fill = "#ffffff", fill_opacity = 0.35 }
     end } }
   end)
-  text { "mask = function() text{…} end", x = 500, y = 800, align = "center", font = ui.MONO, size = 24, fill = ui.DIM }
+  -- under the word, sliding up with it
+  group({ transform = { translate = { 0, (1 - s) * 200 } } }, function()
+    text { "mask = function() text{…} end", x = 500, y = 800, align = "center", font = ui.MONO, size = 24, fill = ui.DIM }
+  end)
 
   -- right: the star clip path
   local rot = lb * 22 + (1 - soft(lb - 2)) * 90

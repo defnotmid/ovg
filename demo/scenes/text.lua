@@ -42,12 +42,12 @@ local function render(f, lb)
     text { WORD, x = 960, y = 790, align = "center", font = ui.ARABIC, size = 170, fill = ui.B }
   end)
   group({ opacity = prog(lb, T.ARABIC + 1, T.ARABIC + 1.3) }, function()
-    text { "Arabic joining, right-to-left runs · kb_text_shape", x = 960, y = 860, align = "center",
+    text { "Arabic joining, right-to-left runs · oglyph", x = 960, y = 888, align = "center",
       font = ui.MONO, size = 24, fill = ui.DIM }
   end)
   ui.label(lb, 5, "shaped text · ligatures · Arabic")
-  ui.fact(lb, 6, string.format("a 42-character line: %s cached, %s shaped from scratch", facts.TEXT_CACHED,
-    facts.TEXT_COLD), "ovg README · Text layout")
+  ui.fact(lb, 6, string.format("a variable font at a new weight: %s, from %s", facts.TEXT_WEIGHT,
+    facts.TEXT_WEIGHT_BEFORE), "ovg README · Text layout")
 end
 
 return { name = "Text", start = T.TEXT, stop = T.PARITY, render = render }

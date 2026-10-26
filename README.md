@@ -745,7 +745,7 @@ every part follows:
   evaluates the fragment shader's formulas and the same coverage function,
   samples textures like the GPU and uses the top-left fill rule.
   `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
-  and diffs them; on an RX 9070 XT (Vulkan, RADV) all 28 checks match, with
+  and diffs them; on an RX 9070 XT (Vulkan, RADV) all 35 checks match, with
   a mean difference under 0.1 / 255 in each: most pixels within one or two
   8-bit steps, a few edge pixels of text, emoji and filters further apart.
 - **Layers cover what is drawn into them** (`layers.odin`, Skia's

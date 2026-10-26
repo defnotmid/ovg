@@ -1,8 +1,9 @@
--- ovg in 28 seconds: an onimite script (Odin + Lua video framework,
+-- ovg in 35 seconds: an onimite script (Odin + Lua video framework,
 -- https://github.com/defnotmid/onimite) showing the vector canvas it draws with. Music included:
--- the soundtrack is an odawg song (track.lua), 128 BPM, and every cut and
--- pop sits on its grid (beat.lua, timeline.lua): the picture pumps on the
--- kicks the drums really play and flashes on the impacts.
+-- the soundtrack is an odawg song (track.lua) after Reich's Music for 18
+-- Musicians, 104 BPM, and every cut and pop sits on its grid (beat.lua,
+-- timeline.lua): the picture pulses on the piano's bass and flashes on the
+-- timpani's impacts.
 -- Numbers on screen come from ovg's README (facts.lua).
 --
 --     onimite render demo/video.lua -o demo/demo.mp4
@@ -28,13 +29,13 @@ local SECTIONS = { "01 / TITLE", "02 / SVG", "03 / FILTERS + BLEND", "04 / MASKS
 -- Cuts that glitch for three frames. The impacts flash; inspect checks the
 -- song really hits there.
 local GLITCH_CUTS = { T.SVG, T.FILTERS, T.MASKS, T.TEXT, T.PARITY, T.OUTRO }
-cue("impact", score.hits { part = "fx", note = "C2" }, { hit = "score" })
+cue("impact", score.hits { part = "fx" }, { hit = "score" })
 
-local KICK = { part = "drums", note = "kick", decay = 9 }
-local IMPACT = { part = "fx", note = "C2", decay = 5 }
+local BASS = { part = "bass", decay = 9 }
+local IMPACT = { part = "fx", decay = 5 }
 
 local function energy(f, b)
-  local s = 1 + score.pulse(f, KICK) * 0.008
+  local s = 1 + score.pulse(f, BASS) * 0.008
   local since_cut
   for _, c in ipairs(GLITCH_CUTS) do
     local fr = f.global_index - beat.beat_frame(c)
@@ -76,10 +77,9 @@ end
 video {
   width = 1920, height = 1080, fps = beat.FPS, background = ui.BG,
   audio = { { "score", fade_out = 0.5 } },
-  -- the song mixes near -21 LUFS: lifted to about -15 under the limiter
+  -- lifts the song to about -14.3 LUFS under the limiter's -2 dBTP
   -- (audio analyze in README.md)
-  master_gain_db = 7,
-  limiter = { ceiling_db = -1.5 },
+  master_gain_db = 2.8,
   render = function(f)
     local b = beat.gbeat(f)
     rect { x = 0, y = 0, w = 1920, h = 1080, fill = ui.BG }
