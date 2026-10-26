@@ -245,6 +245,44 @@ test_use_references_draw :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_use_before_target :: proc(t: ^testing.T) {
+	// Uses before their target (an editor's clones below the original).
+	src := `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="20">
+		<use id="u1" href="#cell" x="20"/>
+		<g fill="blue"><use id="u2" href="#cell" x="40"/></g>
+		<rect id="cell" width="10" height="10"/>
+		<use id="u3" href="#cell" x="60"/>
+	</svg>`
+	doc, err := parse(transmute([]u8)string(src))
+	defer destroy(&doc)
+	testing.expect_value(t, err, Error.None)
+	// The definition u1 made is the drawing's node of #cell, as if u1 came
+	// after it; u2's style differs (blue inherits): its own, outside.
+	cell := find(&doc, "cell")
+	testing.expect_value(t, doc.nodes[cell].parent, 0)
+	u1, u2, u3 := doc.nodes[find(&doc, "u1")], doc.nodes[find(&doc, "u2")], doc.nodes[find(&doc, "u3")]
+	testing.expect_value(t, u1.data, cell)
+	testing.expect_value(t, u3.data, cell)
+	testing.expect(t, u2.kind == .Use && u2.data != cell && doc.nodes[u2.data].parent == -1)
+	testing.expect_value(t, len(doc.shapes), 2)
+	box, _ := element_bbox(&doc, "cell")
+	testing.expect_value(t, box, vg.Rect{0, 0, 10, 10})
+	box, _ = element_bbox(&doc, "u1")
+	testing.expect_value(t, box, vg.Rect{20, 0, 10, 10})
+
+	s: Fx
+	defer fx_close(&s)
+	fx_open(&s, src)
+	fx_draw(&s)
+	BLUE, BLACK, WHITE :: [4]u8{0, 0, 255, 255}, [4]u8{0, 0, 0, 255}, [4]u8{255, 255, 255, 255}
+	for q in ([][2]int{{5, 5}, {25, 5}, {65, 5}}) {
+		testing.expect(t, close_to(px(&s, q.x, q.y), BLACK))
+	}
+	testing.expect(t, close_to(px(&s, 45, 5), BLUE))
+	testing.expect(t, close_to(px(&s, 15, 5), WHITE))
+}
+
+@(test)
 test_svg_parse_errors :: proc(t: ^testing.T) {
 	_, err := parse(transmute([]u8)string("<html></html>"))
 	testing.expect_value(t, err, Error.Not_Svg)

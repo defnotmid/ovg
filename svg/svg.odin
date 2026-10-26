@@ -1539,15 +1539,23 @@ new_node :: proc(p: ^Parser, kind: Node_Kind, parent: i32) -> i32 {
 		},
 	)
 	if parent >= 0 {
-		par := &doc.nodes[parent]
-		if par.last_child < 0 {
-			par.first_child = idx
-		} else {
-			doc.nodes[par.last_child].next = idx
-		}
-		par.last_child = idx
+		link_node(p, idx, parent)
 	}
 	return idx
+}
+
+// Makes node `n` the last child of `parent`.
+@(private)
+link_node :: proc(p: ^Parser, n, parent: i32) {
+	doc := p.doc
+	doc.nodes[n].parent, doc.nodes[n].next = parent, -1
+	par := &doc.nodes[parent]
+	if par.last_child < 0 {
+		par.first_child = n
+	} else {
+		doc.nodes[par.last_child].next = n
+	}
+	par.last_child = n
 }
 
 // The element's own transform: the attribute, or a CSS transform.
@@ -1712,7 +1720,11 @@ convert_element :: proc(p: ^Parser, el: u32, parent_st: ^Computed, parent: i32) 
 		return
 	}
 	// A <use> names the element: its node is a definition for uses whose
-	// copy would start from the same style.
+	// copy would start from the same style. A use before it may have made
+	// that definition already, outside the drawing: it is this node.
+	if p.use_def_of[el] >= 0 && place_use_def(p, el, parent_st, parent) {
+		return
+	}
 	doc := p.doc
 	last := doc.nodes[parent].last_child
 	used, deepest := p.budget.used[.Svg_Elements], p.deepest
@@ -1724,6 +1736,29 @@ convert_element :: proc(p: ^Parser, el: u32, parent_st: ^Computed, parent: i32) 
 		add_use_def(p, el, &st, node, p.budget.used[.Svg_Elements] - used, p.deepest - p.depth)
 	}
 	p.deepest = max(deepest, p.deepest)
+}
+
+// Puts the definition of element `el` that a use before it converted
+// outside the drawing under `parent`, when it starts from the style `el`
+// gets here; its elements and depth count as converting it would. False
+// when there is none (a symbol's content never is the symbol's node).
+@(private)
+place_use_def :: proc(p: ^Parser, el: u32, parent_st: ^Computed, parent: i32) -> bool {
+	if local_name(p.x.elements[el].ident) == "symbol" {
+		return false
+	}
+	st := compute_style(p, el, parent_st)
+	k := find_use_def(p, el, &st)
+	if k < 0 {
+		return false
+	}
+	d := p.use_defs[k]
+	if p.doc.nodes[d.node].parent >= 0 || vg.budget_over(p.budget, .Depth, p.depth + d.depth) || !vg.budget_take(p.budget, .Svg_Elements, d.elements) {
+		return false
+	}
+	link_node(p, d.node, parent)
+	p.deepest = max(p.deepest, p.depth + d.depth)
+	return true
 }
 
 // Converts an element under `parent`; its computed style, when it got
@@ -3875,9 +3910,9 @@ filter_def :: proc(p: ^Parser, el: u32) -> i32 {
 @(private)
 finish :: proc(p: ^Parser) {
 	doc := p.doc
-	// Children come after their parent, so a sweep from the last node
-	// finishes each before its parent; a use's definition can come before
-	// it and is finished first.
+	// Children mostly come after their parent, so a sweep from the last
+	// node finishes most before their parent; the others (a use's
+	// definition, one a use before its target made) are finished first.
 	done := make([]bool, len(doc.nodes), p.tmp)
 	stack := make([dynamic]i32, p.tmp)
 	for i := len(doc.nodes) - 1; i >= 0; i -= 1 {

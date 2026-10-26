@@ -417,8 +417,9 @@ vg.layer_stack_end(&ls, &c)
   file holds a sprite's alternate parts.
 - A `<use>` of an element or a symbol is a `.Use` node drawing, under its
   own transform and effects, the node its target converted to (`data`):
-  the target's own node when it is in the drawing, else a definition
-  converted once outside it (parent -1). A use whose copy would start from
+  the target's own node when it is in the drawing (wherever the use is,
+  before it or after), else a definition converted once outside it
+  (parent -1). A use whose copy would start from
   the same computed style and viewport as a definition's draws that one,
   so an id names one node per style and an override reaches every use;
   a use under another inherited style gets its own definition, carrying
