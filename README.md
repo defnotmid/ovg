@@ -42,6 +42,11 @@ Added in ovg:
   as layers, with image, video or group children.
 - **Recording and playback**: record a frame's commands on one thread and play
   them on the GPU thread, for parallel frame building.
+- **Editor overlays**: a shape kept in document units drawn at many places
+  with one paint (`fill_shapes`), its outline as a hairline a constant
+  number of pixels wide at any zoom (`hairline_shape`), and anchors and
+  handles as markers, filled and outlined in one call (`draw_markers`),
+  each pixel's coverage in closed form (see Shapes below).
 
 Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
 Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Fonts are
@@ -132,8 +137,16 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   scissor's pixels, and the vertex shader marks those whose quad reaches
   out of them, whose pixels then test them, so shapes under different
   scissors draw in one call.
+- Shapes a caller keeps (`Shape`, found by its id) upload once into the
+  backend's shape store and are drawn from it every frame; a frame's new
+  words (new shapes, paths filled this frame, group grids) go up in one
+  copy. Nothing is freed shape by shape: when a frame's shapes don't fit,
+  the store starts over in a buffer four times their size. `gpu.stats`
+  counts a frame's shape instances, the words it uploaded and whether the
+  store started over (`shape_restarts`).
 - Pipelines are cached by blend factors, target format and kind (quads,
-  shapes, box shapes, groups). There is no depth or stencil buffer. Blur
+  shapes, box shapes, groups, hairlines, groups of markers). There is no
+  depth or stencil buffer. Blur
   intermediates are kept per image shape and released after 30 frames
   unused.
 - RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
@@ -790,9 +803,9 @@ every part follows:
   instanced draw, its instances pulled from a storage buffer (the box
   shader for upright instances, the parallelogram one for the rest); a
   pixel scans its cells and integrates the few pieces crossing it after the
-  scan, so pixels running together integrate together. A frame carries
-  the words of the shapes it draws (each once), uploaded with its other
-  streams. Against the
+  scan, so pixels running together integrate together. Shapes kept by
+  their owner upload once into the backend's store; a frame's own words
+  (paths filled this frame) go up with it. Against the
   two-ray estimate (4K, Linux / M4): dense upright text costs 17% / 18%
   more, rotated text 50% / 26% more. The software backend evaluates the
   same coverage function (parity: max diff 1 in the `curves` scene).
