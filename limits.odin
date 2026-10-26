@@ -29,9 +29,9 @@ Limit :: enum u8 {
 	Turbulence_Octaves,
 	// Points of one Lottie star or polygon.
 	Star_Points,
-	// Repeater copies drawn by one `lottie_draw`, nested repeaters multiplied.
+	// Repeater copies drawn by one `lottie.draw`, nested repeaters multiplied.
 	Repeater_Copies,
-	// Layers drawn by one `lottie_draw`, every precomp instance's included.
+	// Layers drawn by one `lottie.draw`, every precomp instance's included.
 	Lottie_Layers,
 	// Dashes of one stroke.
 	Dash_Segments,
@@ -147,7 +147,6 @@ budget_over :: #force_inline proc "contextless" (b: ^Budget, l: Limit, v: int) -
 }
 
 // Appends one warning per limit hit, its strings from `allocator`.
-@(private)
 budget_warn :: proc(b: ^Budget, warnings: ^[dynamic]string, allocator: mem.Allocator) {
 	info := LIMIT_INFO
 	for l in b.hit {

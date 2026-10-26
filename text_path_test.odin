@@ -83,8 +83,8 @@ test_text_on_path :: proc(t: ^testing.T) {
 	path_init(&out)
 	defer path_destroy(&out)
 	text_layout_path(&l, &out)
-	box := svg_path_bbox(out.verbs[:], out.coords[:])
-	testing.expect(t, box.y >= 50 - 1e-3 && box.y + box.h > 60)
+	box := path_device_bounds(nil, &out, TRANSFORM_IDENTITY)
+	testing.expect(t, box.miny >= 50 - 1e-3 && box.maxy > 60)
 }
 
 // A path of one closed contour takes one circuit of text, wrapping round

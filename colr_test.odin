@@ -201,3 +201,25 @@ test_colr_emoji_reset :: proc(t: ^testing.T) {
 	text_layout(&fonts, {{text = "a\U0001F600\U0001F44D\U0001F3FD", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 3)
 }
+
+// The fill cap is per glyph: a face keeps drawing colour glyphs after
+// thousands of fills are cached for earlier ones.
+@(test)
+test_colr_many_glyphs :: proc(t: ^testing.T) {
+	f, err := font_load(EMOJI_FONT_DATA)
+	testing.expect_value(t, err, nil)
+	defer font_destroy(&f)
+	cl := f.colr
+	testing.expect(t, cl != nil)
+	last := Colr_Glyph{}
+	colour := 0
+	for g in Glyph_Index(1) ..< 1000 {
+		if font_glyph_is_colour(&f, g) {
+			colour += 1
+			last = colr_glyph(cl, g)
+		}
+	}
+	testing.expect(t, colour > 500)
+	testing.expect(t, len(cl.fills) > 4096)
+	testing.expect(t, last.count > 0)
+}

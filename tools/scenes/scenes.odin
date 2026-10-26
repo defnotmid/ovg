@@ -5,6 +5,8 @@ package scenes
 import "core:fmt"
 import "core:math"
 
+import "../../svg"
+import "../../lottie"
 import vg "../.."
 import image "deps:odecs/image"
 
@@ -39,21 +41,21 @@ Resources :: struct {
 	// The layer scenes (layer_scenes.odin).
 	layers:   vg.Layer_Stack,
 	// The SVG scene (svg_scenes.odin), parsed on first use.
-	svg_doc:   vg.Svg_Document,
-	svg:       vg.Svg_Renderer,
-	svg_text:  vg.Svg_Layout,
+	svg_doc:   svg.Document,
+	svg_r:     svg.Renderer,
+	svg_text:  svg.Layout,
 	svg_fonts: vg.Font_Collection,
 	svg_ready: bool,
 	// The emoji scene: Vera with the bundled colour emoji face.
 	emoji_fonts:  vg.Font_Collection,
 	emoji_layout: vg.Text_Layout,
 	// The Lottie scene (lottie_scenes.odin), parsed on first use.
-	lottie_doc:   vg.Lottie_Document,
-	lottie:       vg.Lottie_Renderer,
-	lottie_fx:    vg.Lottie_Renderer,
+	lottie_doc:   lottie.Document,
+	lottie_r:     lottie.Renderer,
+	lottie_fx:    lottie.Renderer,
 	lottie_ready: bool,
 	// The Lottie text and effects scene.
-	lottie_fx_doc:   vg.Lottie_Document,
+	lottie_fx_doc:   lottie.Document,
 	lottie_fx_ready: bool,
 	// Shapes built for one frame, destroyed at the next `draw_frame`.
 	frame_shapes:    [dynamic]^vg.Shape,
@@ -109,13 +111,13 @@ draw_frame :: proc(c: ^vg.Canvas, s: Scene, r: ^Resources) {
 }
 
 resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
-	vg.svg_renderer_destroy(&r.svg, c)
-	vg.svg_layout_destroy(&r.svg_text)
-	vg.svg_destroy(&r.svg_doc)
-	vg.lottie_renderer_destroy(&r.lottie, c)
-	vg.lottie_renderer_destroy(&r.lottie_fx, c)
-	vg.lottie_destroy(&r.lottie_doc)
-	vg.lottie_destroy(&r.lottie_fx_doc)
+	svg.renderer_destroy(&r.svg_r, c)
+	svg.layout_destroy(&r.svg_text)
+	svg.destroy(&r.svg_doc)
+	lottie.renderer_destroy(&r.lottie_r, c)
+	lottie.renderer_destroy(&r.lottie_fx, c)
+	lottie.destroy(&r.lottie_doc)
+	lottie.destroy(&r.lottie_fx_doc)
 	vg.font_collection_destroy(&r.svg_fonts)
 	vg.font_collection_destroy(&r.emoji_fonts)
 	vg.text_layout_destroy(&r.emoji_layout)

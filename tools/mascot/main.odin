@@ -14,7 +14,7 @@
 //   mouth_smile   a long smile (on)          mouth_open  open for the tongue (off)
 //   tongue        the tongue out and curling up to a sticky tip (off)
 //   silhouette    every visible pixel as one outline (off): the shape to
-//                 morph, extrude or collide (svg_element_path by id)
+//                 morph, extrude or collide (svg.element_path by id)
 //
 // Each layer is one path per colour, its pixels traced into merged outlines.
 //
@@ -265,7 +265,7 @@ Layer :: struct {
 
 // Each layer's pixels of one colour as one path, and the visible layers'
 // union as `silhouette` (off): the whole chameleon as one outline, for
-// morphing, extruding or colliding (ovg svg_element_path(doc, &p, "silhouette")).
+// morphing, extruding or colliding (ovg svg.element_path(doc, &p, "silhouette")).
 svg :: proc(layers: []Layer) -> string {
 	b := strings.builder_make()
 	fmt.sbprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 %d %d" width="%d" height="%d" shape-rendering="crispEdges">`, W, H, W * 8, H * 8)

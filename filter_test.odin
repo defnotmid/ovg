@@ -362,3 +362,42 @@ test_filter_linear_keeps_darks :: proc(t: ^testing.T) {
 		testing.expect(t, string(px) == string(plain[:]), "nothing passes the threshold, so the ramp is unchanged")
 	}
 }
+
+@(test)
+test_filter_region_layer :: proc(t: ^testing.T) {
+	// The canvas API: a userSpaceOnUse region under a scale.
+	sw: Software_Backend
+	software_backend_init(&sw)
+	defer software_backend_destroy(&sw)
+	c: Canvas
+	canvas_init(&c, software_backend(&sw))
+	defer canvas_destroy(&c)
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, &c)
+	set_size(&c, 64, 64)
+	clear_rect(&c, 0, 0, 64, 64, TRANSPARENT)
+	layer_stack_begin(&ls, &c, 64, 64)
+	scale(&c, 2, 2)
+	prims := [?]Filter_Primitive{{op = .Flood, color = WHITE}}
+	f := Filter {
+		primitives = prims[:],
+		srgb       = true,
+		region     = {units = .User_Space_On_Use, x = 4, y = 4, w = 8, h = 8},
+	}
+	layer_push(&ls, &c, {filter = &f})
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 1, 1)
+	fill_path(&c, &p, paint_color(BLACK))
+	layer_pop(&ls, &c)
+	layer_stack_end(&ls, &c)
+	flush(&c)
+	at :: proc(sw: ^Software_Backend, x, y: int) -> u8 {
+		return sw.pixels[(y * 64 + x) * 4 + 3]
+	}
+	testing.expect_value(t, at(&sw, 8, 8), 255)
+	testing.expect_value(t, at(&sw, 23, 23), 255)
+	testing.expect_value(t, at(&sw, 7, 8), 0)
+	testing.expect_value(t, at(&sw, 24, 24), 0)
+	testing.expect_value(t, at(&sw, 40, 40), 0)
+}

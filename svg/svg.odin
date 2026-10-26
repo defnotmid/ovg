@@ -1,4 +1,4 @@
-package ovg
+package svg
 
 import "core:encoding/base64"
 import "core:encoding/xml"
@@ -8,37 +8,41 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:slice"
 import "core:strings"
-import image "deps:odecs/image"
 
-import cv "curves"
+import vg ".."
+import cv "../curves"
 
-// SVG import: `svg_parse` turns SVG markup into an `Svg_Document`, a
-// render-ready, data-oriented copy (like usvg's tree): `<use>` instances
-// expanded, styles computed (presentation attributes, `style`, `<style>`
-// rules, inheritance), units resolved, shapes converted to path data
+// SVG import: `parse` turns SVG markup into a `Document`, a
+// render-ready, data-oriented copy (like usvg's tree): a `<use>` draws
+// by reference what its target converted to (a Use node; uses that start
+// from the same style share it), styles computed (presentation attributes,
+// `style`, `<style>` rules, inheritance), units resolved, shapes converted to path data
 // stored once, paint servers, clip paths, masks and filters in tables
-// referenced by index. `svg_draw` (svg_draw.odin) walks it and issues
+// referenced by index. `draw` (draw.odin) walks it and issues
 // canvas and layer calls, with per-id overrides for animating parts.
 //
 // Supported: svg (nested, viewBox, preserveAspectRatio), g, a, switch, use
 // (elements, symbols, nested svg), path, rect, circle, ellipse, line,
 // polyline, polygon, text / tspan (x, y, dx, dy, font properties,
 // text-anchor, dominant-baseline, letter-spacing), image (data: URIs,
-// other hrefs through `Svg_Parse_Options.load_file`; raster or SVG), linearGradient,
+// other hrefs through `Parse_Options.load_file`; raster or SVG), linearGradient,
 // radialGradient (fx, fy, fr), pattern, clipPath, mask, filter (every SVG
 // 1.1 primitive; feImage of images, not elements),
 // opacity, fill / stroke properties with dashes, visibility, display,
 // mix-blend-mode, isolation, shape-rendering. Anything else is skipped with
-// a warning in `Svg_Document.warnings`.
+// a warning in `Document.warnings`.
 
-Svg_Node_Kind :: enum u8 {
+Node_Kind :: enum u8 {
 	Group,
 	Shape,
 	Text,
 	Image,
+	// A <use> drawn by reference: `data` is the node it draws, under this
+	// node's transform and effects (convert_use).
+	Use,
 }
 
-Svg_Node_Flag :: enum u8 {
+Node_Flag :: enum u8 {
 	// visibility="hidden": the node draws nothing (its children may).
 	Hidden,
 	// display="none" on an element with an id: kept but not drawn, with its
@@ -59,22 +63,25 @@ Svg_Node_Flag :: enum u8 {
 	Clip_Rect,
 }
 
-Svg_Node_Flags :: bit_set[Svg_Node_Flag;u8]
+Node_Flags :: bit_set[Node_Flag;u8]
 
 // One element of the render tree. Node 0 is the root; children follow
 // their parent (pre-order). Content of clip paths, masks and patterns hangs
-// off detached group nodes (parent -1).
-Svg_Node :: struct {
-	kind:        Svg_Node_Kind,
-	flags:       Svg_Node_Flags,
-	blend:       Blend_Mode,
+// off detached group nodes (parent -1), and so does what a <use> draws when
+// it is not in the drawing itself (an element in <defs>, a symbol's
+// content).
+Node :: struct {
+	kind:        Node_Kind,
+	flags:       Node_Flags,
+	blend:       vg.Blend_Mode,
 	parent:      i32,
 	first_child: i32,
 	last_child:  i32,
 	next:        i32,
-	// Index into `Svg_Document.ids`, or -1.
+	// Index into `Document.ids`, or -1.
 	id:          i32,
-	// Index into shapes / texts / images by kind.
+	// Index into shapes / texts / images by kind; for a Use, the node it
+	// draws.
 	data:        i32,
 	// Into clips / masks / filters, or -1.
 	clip:        i32,
@@ -82,69 +89,69 @@ Svg_Node :: struct {
 	filter:      i32,
 	opacity:     f32,
 	// Local to parent coordinates.
-	transform:   Transform2D,
+	transform:   vg.Transform2D,
 	// Object bounding box (fill geometry, no stroke) in local coordinates.
-	bbox:        Rect,
+	bbox:        vg.Rect,
 	// Local coordinates (Clip_Rect).
-	clip_rect:   Rect,
+	clip_rect:   vg.Rect,
 }
 
-Svg_Paint_Kind :: enum u8 {
+Paint_Kind :: enum u8 {
 	None,
 	Color,
-	// `server` indexes `Svg_Document.servers`.
+	// `server` indexes `Document.servers`.
 	Server,
 }
 
-Svg_Paint :: struct {
-	kind:   Svg_Paint_Kind,
+Paint :: struct {
+	kind:   Paint_Kind,
 	server: i32,
-	color:  Color,
+	color:  vg.Color,
 }
 
-Svg_Style :: struct {
-	fill:           Svg_Paint,
-	stroke:         Svg_Paint,
+Style :: struct {
+	fill:           Paint,
+	stroke:         Paint,
 	fill_opacity:   f32,
 	stroke_opacity: f32,
 	stroke_width:   f32,
 	miter_limit:    f32,
 	dash_offset:    f32,
-	// Into `Svg_Document.dashes`; empty is solid.
-	dash:           Range,
-	fill_rule:      Fill_Rule,
-	cap:            Line_Cap,
-	join:           Line_Join,
+	// Into `Document.dashes`; empty is solid.
+	dash:           vg.Range,
+	fill_rule:      vg.Fill_Rule,
+	cap:            vg.Line_Cap,
+	join:           vg.Line_Join,
 }
 
-Svg_Shape :: struct {
-	// Into `Svg_Document.verbs` / `coords`.
-	verbs:       Range,
-	coords:      Range,
-	style:       Svg_Style,
+Shape :: struct {
+	// Into `Document.verbs` / `coords`.
+	verbs:       vg.Range,
+	coords:      vg.Range,
+	style:       Style,
 	// SVG pathLength (dash units), 0 for none.
 	path_length: f32,
 	// The path and its stroke (stroke.odin) as shapes, filled by coverage
 	// (no words when empty).
-	fill:        Shape,
-	stroke:      Shape,
+	fill:        vg.Shape,
+	stroke:      vg.Shape,
 }
 
-Svg_Text :: struct {
-	chunks: Range,
+Text :: struct {
+	chunks: vg.Range,
 }
 
 // Text starting at an absolute position (the text element, or a tspan
 // with x or y), laid out as one line.
-Svg_Text_Chunk :: struct {
+Text_Chunk :: struct {
 	x, y:       f32,
 	// A missing coordinate continues where the previous chunk ended.
 	has_x:      bool,
 	has_y:      bool,
-	anchor:     Text_Align,
-	baseline:   Text_Baseline,
-	pieces:     Range,
-	// Into `Svg_Document.text_paths` when the chunk runs along a path (x is
+	anchor:     vg.Text_Align,
+	baseline:   vg.Text_Baseline,
+	pieces:     vg.Range,
+	// Into `Document.text_paths` when the chunk runs along a path (x is
 	// then a distance along it), else -1; `path_start`: the first chunk of
 	// its textPath, starting at the startOffset.
 	path:       i32,
@@ -152,16 +159,16 @@ Svg_Text_Chunk :: struct {
 }
 
 // A textPath's path, in the text's user space (into `verbs` and `coords`).
-Svg_Text_Path :: struct {
-	verbs, coords: Range,
+Text_Path :: struct {
+	verbs, coords: vg.Range,
 	start:         f32,
-	side:          Text_Path_Side,
+	side:          vg.Text_Path_Side,
 }
 
-Svg_Text_Piece :: struct {
+Text_Piece :: struct {
 	text:             string,
-	// Into `Svg_Document.families`: font-family candidates in order.
-	families:         Range,
+	// Into `Document.families`: font-family candidates in order.
+	families:         vg.Range,
 	size:             f32,
 	weight:           int,
 	italic:           bool,
@@ -169,70 +176,64 @@ Svg_Text_Piece :: struct {
 	dx, dy:           f32,
 	// Degrees, each glyph about its origin (SVG rotate).
 	rotate:           f32,
-	style:            Svg_Style,
+	style:            Style,
 	fill_inherited:   bool,
 	stroke_inherited: bool,
 	hidden:           bool,
 }
 
-Svg_Image_Fit :: enum u8 {
+Image_Fit :: enum u8 {
 	Meet,
 	Slice,
 	None,
 }
 
-Svg_Image :: struct {
+Image :: struct {
 	x, y, w, h: f32,
-	fit:        Svg_Image_Fit,
+	fit:        Image_Fit,
 	// Alignment of the image in its box, 0..1 per axis.
-	align:      Vec2,
+	align:      vg.Vec2,
 	bitmap:     i32,
 	pixelated:  bool,
 }
 
-// Decoded straight-alpha RGBA8, owned by the document.
-Svg_Bitmap :: struct {
-	pixels:        []u8,
-	width, height: u32,
-}
-
-Svg_Server_Kind :: enum u8 {
+Server_Kind :: enum u8 {
 	Linear,
 	Radial,
 	Pattern,
 }
 
-Svg_Server :: struct {
-	kind:         Svg_Server_Kind,
+Server :: struct {
+	kind:         Server_Kind,
 	// Coordinates are fractions of the painted element's bounding box.
 	bbox_units:   bool,
 	// Pattern content in bounding-box fractions (patternContentUnits).
 	content_bbox: bool,
 	has_view_box: bool,
-	spread:       Gradient_Spread,
+	spread:       vg.Gradient_Spread,
 	// gradientTransform / patternTransform.
-	transform:    Transform2D,
+	transform:    vg.Transform2D,
 	// Linear: x1 y1 x2 y2. Radial: cx cy r fx fy fr.
 	v:            [6]f32,
-	// Into `Svg_Document.stops`.
-	stops:        Range,
+	// Into `Document.stops`.
+	stops:        vg.Range,
 	// Pattern tile, viewBox, alignment and content group.
-	rect:         Rect,
-	view_box:     Rect,
-	aspect:       Svg_Aspect,
+	rect:         vg.Rect,
+	view_box:     vg.Rect,
+	aspect:       Aspect,
 	content:      i32,
 }
 
 // preserveAspectRatio.
-Svg_Aspect :: struct {
-	align: Vec2,
+Aspect :: struct {
+	align: vg.Vec2,
 	slice: bool,
 	none:  bool,
 }
 
-Svg_Clip :: struct {
+Clip :: struct {
 	bbox_units: bool,
-	transform:  Transform2D,
+	transform:  vg.Transform2D,
 	// Detached group of the clip's shapes (drawn white, clip-rule fills).
 	content:    i32,
 	// clip-path on the clipPath element: intersected.
@@ -241,26 +242,26 @@ Svg_Clip :: struct {
 	simple:     i32,
 }
 
-Svg_Mask :: struct {
+Mask :: struct {
 	bbox_units:   bool,
 	content_bbox: bool,
 	alpha:        bool,
-	rect:         Rect,
+	rect:         vg.Rect,
 	content:      i32,
 	mask:         i32,
 }
 
-Svg_Filter :: struct {
+Filter :: struct {
 	// Into `filter_prims` / `filter_refs`; lengths in user units (scaled by
 	// the bounding box for primitiveUnits="objectBoundingBox").
-	primitives: Range,
-	refs:       Range,
+	primitives: vg.Range,
+	refs:       vg.Range,
 	// Into `filter_values` and `filter_bitmaps`.
-	values:     Range,
-	bitmaps:    Range,
+	values:     vg.Range,
+	bitmaps:    vg.Range,
 	srgb:       bool,
 	// Units and rectangle; the bounding box is filled in when drawn.
-	region:     Filter_Region,
+	region:     vg.Filter_Region,
 	prim_bbox:  bool,
 	// Some primitive has a subregion (resolved per element when finishing).
 	subregions: bool,
@@ -268,41 +269,44 @@ Svg_Filter :: struct {
 
 // A primitive's x / y / width / height as written (`set` bit i: component
 // i given), in primitive units; parallel to `filter_prims`.
-Svg_Subregion :: struct {
+Subregion :: struct {
 	v:   [4]f32,
 	set: u8,
 }
 
-Svg_Document :: struct {
-	// Size in user units of the outer coordinate system (`svg_draw` draws
+Document :: struct {
+	// Size in user units of the outer coordinate system (`draw` draws
 	// into `width x height`).
 	width, height: f32,
-	nodes:         [dynamic]Svg_Node,
-	shapes:        [dynamic]Svg_Shape,
-	texts:         [dynamic]Svg_Text,
-	chunks:        [dynamic]Svg_Text_Chunk,
-	text_paths:    [dynamic]Svg_Text_Path,
-	pieces:        [dynamic]Svg_Text_Piece,
+	nodes:         [dynamic]Node,
+	shapes:        [dynamic]Shape,
+	texts:         [dynamic]Text,
+	chunks:        [dynamic]Text_Chunk,
+	text_paths:    [dynamic]Text_Path,
+	pieces:        [dynamic]Text_Piece,
 	families:      [dynamic]string,
-	images:        [dynamic]Svg_Image,
-	bitmaps:       [dynamic]Svg_Bitmap,
-	servers:       [dynamic]Svg_Server,
-	stops:         [dynamic]Gradient_Stop,
-	clips:         [dynamic]Svg_Clip,
-	masks:         [dynamic]Svg_Mask,
-	filters:       [dynamic]Svg_Filter,
-	filter_prims:  [dynamic]Filter_Primitive,
-	filter_refs:   [dynamic]Filter_Ref,
-	filter_subs:   [dynamic]Svg_Subregion,
+	images:        [dynamic]Image,
+	bitmaps:       [dynamic]vg.Bitmap,
+	servers:       [dynamic]Server,
+	stops:         [dynamic]vg.Gradient_Stop,
+	clips:         [dynamic]Clip,
+	masks:         [dynamic]Mask,
+	filters:       [dynamic]Filter,
+	filter_prims:  [dynamic]vg.Filter_Primitive,
+	filter_refs:   [dynamic]vg.Filter_Ref,
+	filter_subs:   [dynamic]Subregion,
 	// Component transfer tables and convolution kernels.
 	filter_values: [dynamic]f32,
 	// feImage bitmaps (into `bitmaps`).
 	filter_bitmaps: [dynamic]i32,
-	verbs:         [dynamic]Verb,
-	coords:        [dynamic]Vec2,
+	verbs:         [dynamic]vg.Verb,
+	coords:        [dynamic]vg.Vec2,
 	dashes:        [dynamic]f32,
 	// Element ids; `id_map` finds them.
 	ids:           [dynamic]string,
+	// The attributes `Parse_Options.keep_attributes` names, by node (in
+	// node order).
+	attributes:    [dynamic]Attribute,
 	id_map:        map[string]i32,
 	// Unsupported features met while parsing (unique).
 	warnings:      [dynamic]string,
@@ -314,7 +318,16 @@ Svg_Document :: struct {
 	allocator:     mem.Allocator,
 }
 
-Svg_Error :: enum u8 {
+// An attribute of the element node `node` came from, kept for the host
+// (an editor's layer names, locks and classes).
+Attribute :: struct {
+	node:  i32,
+	// Into `Parse_Options.keep_attributes`.
+	name:  i32,
+	value: string,
+}
+
+Error :: enum u8 {
 	None,
 	// Not well-formed XML.
 	Xml,
@@ -323,28 +336,35 @@ Svg_Error :: enum u8 {
 	Out_Of_Memory,
 }
 
-Svg_Parse_Options :: struct {
+Parse_Options :: struct {
 	// Reads the file an <image> href that is not a data: URI names (e.g.
 	// relative to the SVG): its bytes (PNG, JPEG, ... or SVG), allocated
 	// with `allocator` (scratch, freed after parsing).
-	load_file:  proc(user: rawptr, href: string, allocator: mem.Allocator) -> (data: []u8, ok: bool),
-	user:       rawptr,
+	load_file:       proc(user: rawptr, href: string, allocator: mem.Allocator) -> (data: []u8, ok: bool),
+	user:            rawptr,
 	// Lays out text at parse time for exact text bounding boxes (gradients
 	// and effects in objectBoundingBox units); without it they are estimated.
-	fonts:      ^Font_Collection,
+	fonts:           ^vg.Font_Collection,
 	// Bounds on the work the file can cause (limits.odin); nil is
 	// DEFAULT_LIMITS.
-	limits:     ^Limits,
+	limits:          ^vg.Limits,
+	// Attributes to keep in `Document.attributes`, by their names as
+	// written (e.g. "inkscape:label", "class"). An element with one gets a
+	// node of its own.
+	keep_attributes: []string,
+	// Every <g> and <a> gets a node of its own; otherwise one with no id,
+	// transform or effect folds into its parent, as drawing needs.
+	keep_groups:     bool,
 }
 
-svg_destroy :: proc(doc: ^Svg_Document) {
+destroy :: proc(doc: ^Document) {
 	context.allocator = doc.allocator
 	for b in doc.bitmaps {
 		delete(b.pixels)
 	}
 	for &sh in doc.shapes {
-		shape_destroy(&sh.fill)
-		shape_destroy(&sh.stroke)
+		vg.shape_destroy(&sh.fill)
+		vg.shape_destroy(&sh.stroke)
 	}
 	delete(doc.nodes)
 	delete(doc.shapes)
@@ -369,6 +389,7 @@ svg_destroy :: proc(doc: ^Svg_Document) {
 	delete(doc.coords)
 	delete(doc.dashes)
 	delete(doc.ids)
+	delete(doc.attributes)
 	delete(doc.id_map)
 	delete(doc.warnings)
 	if doc.arena != nil {
@@ -378,8 +399,9 @@ svg_destroy :: proc(doc: ^Svg_Document) {
 	doc^ = {}
 }
 
-// The node of the element with `id` (the first instance), or -1.
-svg_find :: proc(doc: ^Svg_Document, id: string) -> i32 {
+// The node of the element with `id`, or -1. An element a <use> draws has
+// one node, drawn by every use of it.
+find :: proc(doc: ^Document, id: string) -> i32 {
 	idx, ok := doc.id_map[id]
 	if !ok {
 		return -1
@@ -393,23 +415,38 @@ svg_find :: proc(doc: ^Svg_Document, id: string) -> i32 {
 }
 
 // The bounding box of the element with `id` in document coordinates (the
-// `width x height` space `svg_draw` draws), or false.
-svg_element_bbox :: proc(doc: ^Svg_Document, id: string) -> (Rect, bool) {
-	i := svg_find(doc, id)
+// `width x height` space `draw` draws), or false. An element a <use> draws
+// from outside the drawing is where its first use puts it.
+element_bbox :: proc(doc: ^Document, id: string) -> (vg.Rect, bool) {
+	i := find(doc, id)
 	if i < 0 {
 		return {}, false
 	}
 	b := doc.nodes[i].bbox
-	t := TRANSFORM_IDENTITY
-	for j := i; j >= 0; j = doc.nodes[j].parent {
-		t = transform_multiply(t, doc.nodes[j].transform)
+	t := vg.TRANSFORM_IDENTITY
+	for j := i; j >= 0; j = placed_in(doc, j) {
+		t = vg.transform_multiply(t, doc.nodes[j].transform)
 	}
-	return svg_rect_transform(b, t), true
+	return rect_transform(b, t), true
+}
+
+// The node that places node `i`: its parent, or for a definition outside
+// the drawing the first use drawing it (-1 for none, and for the root).
+placed_in :: proc(doc: ^Document, i: i32) -> i32 {
+	if p := doc.nodes[i].parent; p >= 0 || i == 0 {
+		return p
+	}
+	for n, k in doc.nodes {
+		if n.kind == .Use && n.data == i {
+			return i32(k)
+		}
+	}
+	return -1
 }
 
 // Parses SVG markup. Warnings about unsupported features land in
 // `doc.warnings`; the document draws what is supported.
-svg_parse :: proc(data: []u8, opts: Svg_Parse_Options = {}, allocator := context.allocator) -> (doc: Svg_Document, err: Svg_Error) {
+parse :: proc(data: []u8, opts: Parse_Options = {}, allocator := context.allocator) -> (doc: Document, err: Error) {
 	context.allocator = allocator
 	doc.allocator = allocator
 	doc.arena = new(virtual.Arena)
@@ -429,47 +466,47 @@ svg_parse :: proc(data: []u8, opts: Svg_Parse_Options = {}, allocator := context
 
 	doc.id_map = make(map[string]i32, 64)
 	warned := make(map[string]bool, 16, tmp)
-	p: Svg_Parser
-	if err = svg_parser_open(&p, &doc, data, opts, virtual.arena_allocator(doc.arena), tmp, &warned); err != nil {
-		svg_destroy(&doc)
+	p: Parser
+	if err = parser_open(&p, &doc, data, opts, virtual.arena_allocator(doc.arena), tmp, &warned); err != nil {
+		destroy(&doc)
 		return
 	}
-	defer path_destroy(&p.path)
-	budget: Budget
-	budget_init(&budget, opts.limits)
+	defer vg.path_destroy(&p.path)
+	budget: vg.Budget
+	vg.budget_init(&budget, opts.limits)
 	p.budget = &budget
 
 	// The root viewport.
 	root := &p.x.elements[0]
-	root_style := svg_initial_style()
-	st := svg_compute_style(&p, 0, &root_style)
-	w, h, vb, has_vb := svg_root_size(&p, &st)
+	root_style := initial_style()
+	st := compute_style(&p, 0, &root_style)
+	w, h, vb, has_vb := root_size(&p, &st)
 	doc.width, doc.height = w, h
-	append(&p.viewports, Vec2{vb.w, vb.h} if has_vb else Vec2{w, h})
-	root_xform := TRANSFORM_IDENTITY
+	append(&p.viewports, vg.Vec2{vb.w, vb.h} if has_vb else vg.Vec2{w, h})
+	root_xform := vg.TRANSFORM_IDENTITY
 	if has_vb {
-		root_xform = svg_view_box_transform(vb, svg_aspect(root), w, h)
+		root_xform = view_box_transform(vb, aspect(root), w, h)
 	}
-	n := svg_new_node(&p, .Group, -1)
+	n := new_node(&p, .Group, -1)
 	doc.nodes[n].transform = root_xform
-	svg_node_effects(&p, n, 0, &st, true)
+	node_effects(&p, n, 0, &st, true)
 	st.fill_decl, st.stroke_decl, st.visible_decl = false, false, false
-	svg_convert_children(&p, 0, &st, n)
+	convert_children(&p, 0, &st, n)
 
-	svg_finish(&p)
-	budget_warn(&budget, &doc.warnings, p.sa)
+	finish(&p)
+	vg.budget_warn(&budget, &doc.warnings, p.sa)
 	return doc, .None
 }
 
 // Text whitespace is significant in SVG, but the XML reader trims text
 // bodies and drops whitespace-only ones: in the copy it parses, whitespace
-// in the content of <text> elements becomes SVG_SPACE (a private-use
+// in the content of <text> elements becomes SPACE (a private-use
 // character), turned back into spaces by the text whitespace handling.
 @(private)
-SVG_SPACE :: "\uE000"
+SPACE :: "\uE000"
 
 @(private)
-svg_prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
+prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 	if !strings.contains(string(data), "<text") && !strings.contains(string(data), ":text") {
 		out := make([]u8, len(data), allocator)
 		copy(out, data)
@@ -514,7 +551,7 @@ svg_prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 			for k < len(data) && data[k] != ' ' && data[k] != '>' && data[k] != '/' && data[k] != '\t' && data[k] != '\n' && data[k] != '\r' {
 				k += 1
 			}
-			if svg_tag(string(data[j:k])) == "text" {
+			if local_name(string(data[j:k])) == "text" {
 				if closing {
 					depth = max(depth - 1, 0)
 				} else {
@@ -530,7 +567,7 @@ svg_prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 		}
 		if depth > 0 && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			append(&out, ..data[run:i])
-			append(&out, SVG_SPACE)
+			append(&out, SPACE)
 			run = i + 1
 		}
 	}
@@ -541,14 +578,14 @@ svg_prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 // Parses `data` into `p` (reading ids and stylesheets) for converting into
 // `doc`; nested SVG images open their own parser on the same document.
 @(private)
-svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Svg_Parse_Options, sa, tmp: mem.Allocator, warned: ^map[string]bool) -> Svg_Error {
+parser_open :: proc(p: ^Parser, doc: ^Document, data: []u8, opts: Parse_Options, sa, tmp: mem.Allocator, warned: ^map[string]bool) -> Error {
 	silent :: proc(pos: xml.Pos, msg: string, args: ..any) {}
-	src := svg_prepare_source(data, tmp)
+	src := prepare_source(data, tmp)
 	x, xerr := xml.parse_bytes(src, {flags = {.Ignore_Unsupported, .Unbox_CDATA, .Decode_SGML_Entities, .Input_May_Be_Modified}}, "", silent, tmp)
 	if xerr != .None || x == nil || x.element_count == 0 {
 		return .Xml
 	}
-	if svg_tag(x.elements[0].ident) != "svg" {
+	if local_name(x.elements[0].ident) != "svg" {
 		return .Not_Svg
 	}
 	p^ = {
@@ -560,14 +597,18 @@ svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Sv
 		warned = warned,
 	}
 	p.by_id = make(map[string]u32, 64, tmp)
-	shape_scratch_init(&p.scratch, tmp)
+	vg.shape_scratch_init(&p.scratch, tmp)
 	for &d in p.defs {
 		d = make([]i32, len(x.elements), tmp)
-		slice.fill(d, SVG_DEF_UNSEEN)
+		slice.fill(d, DEF_UNSEEN)
 	}
 	p.bitmap_of = make(map[string]i32, 4, tmp)
+	p.use_target = make([]bool, len(x.elements), tmp)
+	p.use_def_of = make([]i32, len(x.elements), tmp)
+	slice.fill(p.use_def_of, -1)
+	p.use_defs = make([dynamic]Use_Def, tmp)
 	p.use_stack = make([dynamic]u32, tmp)
-	p.viewports = make([dynamic]Vec2, tmp)
+	p.viewports = make([dynamic]vg.Vec2, tmp)
 	p.sheet.rules = make([dynamic]Css_Rule, tmp)
 	p.sheet.decls = make([dynamic]Css_Decl, tmp)
 	// Ids and stylesheets first: references may point forward.
@@ -576,13 +617,13 @@ svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Sv
 		if e.kind != .Element {
 			continue
 		}
-		if id, ok := svg_attr(e, "id"); ok && id != "" {
+		if id, ok := attr(e, "id"); ok && id != "" {
 			if _, dup := p.by_id[id]; !dup {
 				p.by_id[id] = u32(i)
 			}
 		}
-		if svg_tag(e.ident) == "style" {
-			if t, ok := svg_attr(e, "type"); ok && t != "" && t != "text/css" {
+		if local_name(e.ident) == "style" {
+			if t, ok := attr(e, "type"); ok && t != "" && t != "text/css" {
 				continue
 			}
 			for v in e.value {
@@ -593,22 +634,32 @@ svg_parser_open :: proc(p: ^Svg_Parser, doc: ^Svg_Document, data: []u8, opts: Sv
 		}
 	}
 	if p.sheet.skipped > 0 {
-		svg_warn(p, "unsupported CSS selectors or at-rules are ignored")
+		warn(p, "unsupported CSS selectors or at-rules are ignored")
 	}
 	css_sort_rules(&p.sheet)
+	for i in 0 ..< int(x.element_count) {
+		e := &x.elements[i]
+		if e.kind == .Element && local_name(e.ident) == "use" {
+			if h, ok := href(e); ok {
+				if target, found := ref(p, h); found {
+					p.use_target[target] = true
+				}
+			}
+		}
+	}
 	return nil
 }
 
 // The root svg's size (missing or percentage sizes come from the viewBox,
 // 100 x 100 without one) and viewBox.
 @(private)
-svg_root_size :: proc(p: ^Svg_Parser, st: ^Svg_Computed) -> (w, h: f32, vb: Rect, has_vb: bool) {
+root_size :: proc(p: ^Parser, st: ^Computed) -> (w, h: f32, vb: vg.Rect, has_vb: bool) {
 	root := &p.x.elements[0]
-	vb, has_vb = svg_view_box(root)
-	w = svg_attr_length(p, root, "width", 0, -1, st.font_size)
-	h = svg_attr_length(p, root, "height", 1, -1, st.font_size)
-	ws, _ := svg_attr(root, "width")
-	hs, _ := svg_attr(root, "height")
+	vb, has_vb = view_box(root)
+	w = attr_length(p, root, "width", 0, -1, st.font_size)
+	h = attr_length(p, root, "height", 1, -1, st.font_size)
+	ws, _ := attr(root, "width")
+	hs, _ := attr(root, "height")
 	if has_vb && (vb.w <= 0 || vb.h <= 0) {
 		has_vb = false
 	}
@@ -632,20 +683,20 @@ svg_root_size :: proc(p: ^Svg_Parser, st: ^Svg_Computed) -> (w, h: f32, vb: Rect
 // ---- parser state --------------------------------------------------------------
 
 @(private)
-Svg_Parser :: struct {
-	doc:         ^Svg_Document,
+Parser :: struct {
+	doc:         ^Document,
 	// The element being converted has display="none" and an id: its node
-	// is marked Off (svg_node_effects).
+	// is marked Off (node_effects).
 	pending_off: bool,
 	x:           ^xml.Document,
-	opts:        Svg_Parse_Options,
+	opts:        Parse_Options,
 	// Allocates the document's strings.
 	sa:          mem.Allocator,
 	tmp:         mem.Allocator,
 	by_id:       map[string]u32,
 	sheet:       Css_Sheet,
-	// Converted definitions by kind and XML element (svg_def_seen).
-	defs:        [Svg_Def][]i32,
+	// Converted definitions by kind and XML element (def_seen).
+	defs:        [Def][]i32,
 	bitmap_of:   map[string]i32,
 	// Shared with nested SVG images' parsers.
 	warned:      ^map[string]bool,
@@ -653,42 +704,65 @@ Svg_Parser :: struct {
 	// SVG images nested inside this one.
 	image_depth: int,
 	// Width and height that percentages refer to.
-	viewports:   [dynamic]Vec2,
-	path:        Path,
+	viewports:   [dynamic]vg.Vec2,
+	path:        vg.Path,
 	// Builds the shapes' fills and strokes.
-	scratch:     Shape_Scratch,
+	scratch:     vg.Shape_Scratch,
 	// Converting a clipPath's content: shapes fill white with clip-rule.
 	in_clip:     bool,
 	// Shared with nested SVG images' parsers.
-	budget:      ^Budget,
+	budget:      ^vg.Budget,
 	// Elements being converted, outermost first.
 	depth:       int,
+	// The deepest `depth` reached (how deep a definition goes).
+	deepest:     int,
+	// By XML element: whether a <use> names it, and its first definition
+	// (into `use_defs`, chained by `next`), or -1.
+	use_target:  []bool,
+	use_def_of:  []i32,
+	use_defs:    [dynamic]Use_Def,
+}
+
+// What a <use> can draw by reference instead of a copy: the node an element
+// converted to, with the computed style and viewport it converted under.
+// A use whose copy would start from the same style and viewport would come
+// out the same, so it refers to `node`; the copy's work (its elements and
+// depth) still counts against the limits, as copies did.
+@(private)
+Use_Def :: struct {
+	el:       u32,
+	style:    Computed,
+	viewport: vg.Vec2,
+	node:     i32,
+	elements: int,
+	depth:    int,
+	next:     i32,
 }
 
 // The computed style of an element (CSS cascade and inheritance resolved).
 @(private)
-Svg_Computed :: struct {
+Computed :: struct {
 	// Inherited.
-	fill:             Svg_Paint,
-	stroke:           Svg_Paint,
+	fill:             Paint,
+	stroke:           Paint,
 	fill_opacity:     f32,
 	stroke_opacity:   f32,
-	fill_rule:        Fill_Rule,
-	clip_rule:        Fill_Rule,
+	fill_rule:        vg.Fill_Rule,
+	clip_rule:        vg.Fill_Rule,
 	stroke_width:     f32,
 	miter_limit:      f32,
 	dash_offset:      f32,
-	dash:             Range,
-	cap:              Line_Cap,
-	join:             Line_Join,
+	dash:             vg.Range,
+	cap:              vg.Line_Cap,
+	join:             vg.Line_Join,
 	visible:          bool,
-	color:            Color,
-	families:         Range,
+	color:            vg.Color,
+	families:         vg.Range,
 	font_size:        f32,
 	font_weight:      int,
 	italic:           bool,
-	anchor:           Text_Align,
-	baseline:         Text_Baseline,
+	anchor:           vg.Text_Align,
+	baseline:         vg.Text_Baseline,
 	letter_spacing:   f32,
 	crisp:            bool,
 	srgb_filters:     bool,
@@ -707,12 +781,12 @@ Svg_Computed :: struct {
 	clip_path:        string,
 	mask:             string,
 	filter:           string,
-	blend:            Blend_Mode,
+	blend:            vg.Blend_Mode,
 	isolate:          bool,
-	stop_color:       Color,
+	stop_color:       vg.Color,
 	stop_opacity:     f32,
-	flood_color:      Color,
-	lighting_color:   Color,
+	flood_color:      vg.Color,
+	lighting_color:   vg.Color,
 	flood_opacity:    f32,
 	mask_alpha:       bool,
 	overflow_visible: bool,
@@ -721,22 +795,22 @@ Svg_Computed :: struct {
 }
 
 @(private)
-svg_initial_style :: proc() -> Svg_Computed {
+initial_style :: proc() -> Computed {
 	return {
-		fill = {kind = .Color, color = BLACK},
+		fill = {kind = .Color, color = vg.BLACK},
 		fill_opacity = 1,
 		stroke_opacity = 1,
 		stroke_width = 1,
 		miter_limit = 4,
 		visible = true,
-		color = BLACK,
+		color = vg.BLACK,
 		font_size = 16,
 		font_weight = 400,
 		opacity = 1,
-		stop_color = BLACK,
+		stop_color = vg.BLACK,
 		stop_opacity = 1,
-		flood_color = BLACK,
-		lighting_color = WHITE,
+		flood_color = vg.BLACK,
+		lighting_color = vg.WHITE,
 		flood_opacity = 1,
 		cap = .Butt,
 		join = .Miter,
@@ -744,7 +818,7 @@ svg_initial_style :: proc() -> Svg_Computed {
 }
 
 @(private)
-svg_warn :: proc(p: ^Svg_Parser, format: string, args: ..any) {
+warn :: proc(p: ^Parser, format: string, args: ..any) {
 	msg := fmt.tprintf(format, ..args)
 	if msg in p.warned {
 		return
@@ -755,7 +829,7 @@ svg_warn :: proc(p: ^Svg_Parser, format: string, args: ..any) {
 }
 
 @(private)
-svg_tag :: proc "contextless" (ident: string) -> string {
+local_name :: proc "contextless" (ident: string) -> string {
 	for i in 0 ..< len(ident) {
 		if ident[i] == ':' {
 			return ident[i + 1:]
@@ -765,7 +839,7 @@ svg_tag :: proc "contextless" (ident: string) -> string {
 }
 
 @(private)
-svg_attr :: proc(e: ^xml.Element, name: string) -> (string, bool) {
+attr :: proc(e: ^xml.Element, name: string) -> (string, bool) {
 	for a in e.attribs {
 		if a.key == name {
 			return a.val, true
@@ -775,16 +849,16 @@ svg_attr :: proc(e: ^xml.Element, name: string) -> (string, bool) {
 }
 
 @(private)
-svg_href :: proc(e: ^xml.Element) -> (string, bool) {
-	if v, ok := svg_attr(e, "href"); ok {
+href :: proc(e: ^xml.Element) -> (string, bool) {
+	if v, ok := attr(e, "href"); ok {
 		return v, true
 	}
-	return svg_attr(e, "xlink:href")
+	return attr(e, "xlink:href")
 }
 
 // The element an `#id` / `url(#id)` reference names.
 @(private)
-svg_ref :: proc(p: ^Svg_Parser, ref: string) -> (u32, bool) {
+ref :: proc(p: ^Parser, ref: string) -> (u32, bool) {
 	r := strings.trim_space(ref)
 	if strings.has_prefix(r, "url(") {
 		end := strings.index_byte(r, ')')
@@ -801,7 +875,7 @@ svg_ref :: proc(p: ^Svg_Parser, ref: string) -> (u32, bool) {
 }
 
 @(private)
-svg_viewport :: proc(p: ^Svg_Parser) -> Vec2 {
+viewport :: proc(p: ^Parser) -> vg.Vec2 {
 	if len(p.viewports) == 0 {
 		// The root's own attributes, before its size is known.
 		return {100, 100}
@@ -812,21 +886,21 @@ svg_viewport :: proc(p: ^Svg_Parser) -> Vec2 {
 // A length attribute in user units. `axis`: 0 = x (percent of the viewport
 // width), 1 = y, 2 = the normalized diagonal.
 @(private)
-svg_attr_length :: proc(p: ^Svg_Parser, e: ^xml.Element, name: string, axis: int, def: f32, font_size: f32) -> f32 {
-	s, ok := svg_attr(e, name)
+attr_length :: proc(p: ^Parser, e: ^xml.Element, name: string, axis: int, def: f32, font_size: f32) -> f32 {
+	s, ok := attr(e, name)
 	if !ok {
 		return def
 	}
-	l, lok := svg_parse_length(strings.trim_space(s))
+	l, lok := parse_length(strings.trim_space(s))
 	if !lok {
 		return def
 	}
-	return svg_length_px(l, svg_percent_base(p, axis), font_size)
+	return length_px(l, percent_base(p, axis), font_size)
 }
 
 @(private)
-svg_percent_base :: proc(p: ^Svg_Parser, axis: int) -> f32 {
-	vp := svg_viewport(p)
+percent_base :: proc(p: ^Parser, axis: int) -> f32 {
+	vp := viewport(p)
 	switch axis {
 	case 0:
 		return vp.x
@@ -837,20 +911,20 @@ svg_percent_base :: proc(p: ^Svg_Parser, axis: int) -> f32 {
 }
 
 @(private)
-svg_view_box :: proc(e: ^xml.Element) -> (r: Rect, ok: bool) {
-	s := svg_attr(e, "viewBox") or_return
-	sc := Svg_Scanner{s = s}
+view_box :: proc(e: ^xml.Element) -> (r: vg.Rect, ok: bool) {
+	s := attr(e, "viewBox") or_return
+	sc := vg.Css_Scanner{s = s}
 	v: [4]f32
 	for i in 0 ..< 4 {
-		v[i] = svg_scan_number(&sc) or_return
+		v[i] = vg.css_scan_number(&sc) or_return
 	}
 	return {v[0], v[1], v[2], v[3]}, true
 }
 
 @(private)
-svg_aspect :: proc(e: ^xml.Element) -> (a: Svg_Aspect) {
+aspect :: proc(e: ^xml.Element) -> (a: Aspect) {
 	a.align = {0.5, 0.5}
-	s, ok := svg_attr(e, "preserveAspectRatio")
+	s, ok := attr(e, "preserveAspectRatio")
 	if !ok {
 		return
 	}
@@ -882,7 +956,7 @@ svg_aspect :: proc(e: ^xml.Element) -> (a: Svg_Aspect) {
 }
 
 // Maps viewBox `vb` into a `w x h` viewport.
-svg_view_box_transform :: proc "contextless" (vb: Rect, a: Svg_Aspect, w, h: f32) -> Transform2D {
+view_box_transform :: proc "contextless" (vb: vg.Rect, a: Aspect, w, h: f32) -> vg.Transform2D {
 	sx := w / vb.w
 	sy := h / vb.h
 	if !a.none {
@@ -895,14 +969,14 @@ svg_view_box_transform :: proc "contextless" (vb: Rect, a: Svg_Aspect, w, h: f32
 }
 
 @(private)
-svg_rect_transform :: proc "contextless" (r: Rect, t: Transform2D) -> Rect {
+rect_transform :: proc "contextless" (r: vg.Rect, t: vg.Transform2D) -> vg.Rect {
 	if r.w < 0 {
 		return r
 	}
-	lo := Vec2{1e30, 1e30}
-	hi := Vec2{-1e30, -1e30}
-	for c in ([4]Vec2{{r.x, r.y}, {r.x + r.w, r.y}, {r.x, r.y + r.h}, {r.x + r.w, r.y + r.h}}) {
-		q := transform_point(t, c.x, c.y)
+	lo := vg.Vec2{1e30, 1e30}
+	hi := vg.Vec2{-1e30, -1e30}
+	for c in ([4]vg.Vec2{{r.x, r.y}, {r.x + r.w, r.y}, {r.x, r.y + r.h}, {r.x + r.w, r.y + r.h}}) {
+		q := vg.transform_point(t, c.x, c.y)
 		lo = {min(lo.x, q.x), min(lo.y, q.y)}
 		hi = {max(hi.x, q.x), max(hi.y, q.y)}
 	}
@@ -910,16 +984,16 @@ svg_rect_transform :: proc "contextless" (r: Rect, t: Transform2D) -> Rect {
 }
 
 @(private)
-svg_invertible :: proc "contextless" (t: Transform2D) -> bool {
+invertible :: proc "contextless" (t: vg.Transform2D) -> bool {
 	return abs(t[0] * t[3] - t[1] * t[2]) > 1e-12
 }
 
 // An empty bounding box (union identity).
 @(private)
-SVG_EMPTY_BOX :: Rect{0, 0, -1, -1}
+EMPTY_BOX :: vg.Rect{0, 0, -1, -1}
 
 @(private)
-svg_box_union :: proc "contextless" (a, b: Rect) -> Rect {
+box_union :: proc "contextless" (a, b: vg.Rect) -> vg.Rect {
 	if a.w < 0 {
 		return b
 	}
@@ -936,7 +1010,7 @@ svg_box_union :: proc "contextless" (a, b: Rect) -> Rect {
 // Gathers the declarations that apply to element `el`: presentation
 // attributes, then stylesheet rules by specificity, then `style`.
 @(private)
-svg_collect_decls :: proc(p: ^Svg_Parser, el: u32, d: ^Svg_Decls) {
+collect_decls :: proc(p: ^Parser, el: u32, d: ^Decls) {
 	e := &p.x.elements[el]
 	style := ""
 	for a in e.attribs {
@@ -947,7 +1021,7 @@ svg_collect_decls :: proc(p: ^Svg_Parser, el: u32, d: ^Svg_Decls) {
 		// The element's transform, not the CSS property; blending and
 		// isolation are CSS only.
 		case:
-			if prop, ok := svg_prop_from_name(a.key); ok {
+			if prop, ok := prop_from_name(a.key); ok {
 				d[prop] = strings.trim_space(a.val)
 			}
 		}
@@ -967,7 +1041,7 @@ svg_collect_decls :: proc(p: ^Svg_Parser, el: u32, d: ^Svg_Decls) {
 		}
 	}
 	if style != "" {
-		svg_apply_style_attr(d, style)
+		apply_style_attr(d, style)
 	}
 	if important {
 		// !important rules beat the style attribute.
@@ -984,30 +1058,30 @@ svg_collect_decls :: proc(p: ^Svg_Parser, el: u32, d: ^Svg_Decls) {
 }
 
 @(private)
-svg_compute_style :: proc(p: ^Svg_Parser, el: u32, parent: ^Svg_Computed) -> Svg_Computed {
+compute_style :: proc(p: ^Parser, el: u32, parent: ^Computed) -> Computed {
 	st := parent^
 	// Non-inherited properties start from their initial values.
-	initial := svg_initial_style()
-	for &info in svg_props {
+	initial := initial_style()
+	for &info in props {
 		if !info.inherited {
 			info.copy(&st, &initial)
 		}
 	}
 	st.baseline_set = false
 	e := &p.x.elements[el]
-	if sp, ok := svg_attr(e, "xml:space"); ok {
+	if sp, ok := attr(e, "xml:space"); ok {
 		st.preserve_space = sp == "preserve"
 	}
 
-	d: Svg_Decls
-	svg_collect_decls(p, el, &d)
-	declare :: proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, prop: Svg_Prop, v: string) {
+	d: Decls
+	collect_decls(p, el, &d)
+	declare :: proc(p: ^Parser, st, parent: ^Computed, prop: Prop, v: string) {
 		switch v {
 		case "":
 		case "inherit":
-			svg_props[prop].copy(st, parent)
+			props[prop].copy(st, parent)
 		case:
-			svg_props[prop].apply(p, st, parent, v)
+			props[prop].apply(p, st, parent, v)
 		}
 	}
 	// `color` and `font-size` first: currentColor and em units use them.
@@ -1032,42 +1106,42 @@ svg_compute_style :: proc(p: ^Svg_Parser, el: u32, parent: ^Svg_Computed) -> Svg
 // copies the property's fields from another style (the parent's for
 // `inherit`, the initial style's to reset a property that doesn't inherit).
 @(private)
-Svg_Prop_Info :: struct {
+Prop_Info :: struct {
 	name:      string,
 	inherited: bool,
-	apply:     proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string),
-	copy:      proc(st, from: ^Svg_Computed),
+	apply:     proc(p: ^Parser, st, parent: ^Computed, v: string),
+	copy:      proc(st, from: ^Computed),
 }
 
 @(private, rodata)
-svg_props := [Svg_Prop]Svg_Prop_Info {
-	.Fill = {"fill", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.fill = svg_parse_paint(p, v, st, parent.fill)
+props := [Prop]Prop_Info {
+	.Fill = {"fill", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.fill = parse_paint(p, v, st, parent.fill)
 			st.fill_decl = true
 			st.fill_current = v == "currentColor" || v == "currentcolor"
-		}, proc(st, from: ^Svg_Computed) {st.fill, st.fill_current = from.fill, from.fill_current}},
-	.Fill_Opacity = {"fill-opacity", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.fill_opacity = svg_opacity(v)
-		}, proc(st, from: ^Svg_Computed) {st.fill_opacity = from.fill_opacity}},
-	.Fill_Rule = {"fill-rule", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.fill, st.fill_current = from.fill, from.fill_current}},
+	.Fill_Opacity = {"fill-opacity", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.fill_opacity = opacity(v)
+		}, proc(st, from: ^Computed) {st.fill_opacity = from.fill_opacity}},
+	.Fill_Rule = {"fill-rule", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.fill_rule = .Even_Odd if v == "evenodd" else .Non_Zero
-		}, proc(st, from: ^Svg_Computed) {st.fill_rule = from.fill_rule}},
-	.Stroke = {"stroke", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.stroke = svg_parse_paint(p, v, st, parent.stroke)
+		}, proc(st, from: ^Computed) {st.fill_rule = from.fill_rule}},
+	.Stroke = {"stroke", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.stroke = parse_paint(p, v, st, parent.stroke)
 			st.stroke_decl = true
 			st.stroke_current = v == "currentColor" || v == "currentcolor"
-		}, proc(st, from: ^Svg_Computed) {st.stroke, st.stroke_current = from.stroke, from.stroke_current}},
-	.Stroke_Opacity = {"stroke-opacity", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.stroke_opacity = svg_opacity(v)
-		}, proc(st, from: ^Svg_Computed) {st.stroke_opacity = from.stroke_opacity}},
-	.Stroke_Width = {"stroke-width", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			if l, ok := svg_parse_length(v); ok {
-				if w := svg_length_px(l, svg_percent_base(p, 2), st.font_size); w >= 0 {
+		}, proc(st, from: ^Computed) {st.stroke, st.stroke_current = from.stroke, from.stroke_current}},
+	.Stroke_Opacity = {"stroke-opacity", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.stroke_opacity = opacity(v)
+		}, proc(st, from: ^Computed) {st.stroke_opacity = from.stroke_opacity}},
+	.Stroke_Width = {"stroke-width", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			if l, ok := parse_length(v); ok {
+				if w := length_px(l, percent_base(p, 2), st.font_size); w >= 0 {
 					st.stroke_width = w
 				}
 			}
-		}, proc(st, from: ^Svg_Computed) {st.stroke_width = from.stroke_width}},
-	.Stroke_Linecap = {"stroke-linecap", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.stroke_width = from.stroke_width}},
+	.Stroke_Linecap = {"stroke-linecap", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			switch v {
 			case "butt":
 				st.cap = .Butt
@@ -1076,8 +1150,8 @@ svg_props := [Svg_Prop]Svg_Prop_Info {
 			case "square":
 				st.cap = .Square
 			}
-		}, proc(st, from: ^Svg_Computed) {st.cap = from.cap}},
-	.Stroke_Linejoin = {"stroke-linejoin", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.cap = from.cap}},
+	.Stroke_Linejoin = {"stroke-linejoin", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			switch v {
 			case "miter", "miter-clip", "arcs":
 				st.join = .Miter
@@ -1086,51 +1160,51 @@ svg_props := [Svg_Prop]Svg_Prop_Info {
 			case "bevel":
 				st.join = .Bevel
 			}
-		}, proc(st, from: ^Svg_Computed) {st.join = from.join}},
-	.Stroke_Miterlimit = {"stroke-miterlimit", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			if m, ok := svg_parse_number(v); ok && m >= 1 {
+		}, proc(st, from: ^Computed) {st.join = from.join}},
+	.Stroke_Miterlimit = {"stroke-miterlimit", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			if m, ok := parse_number(v); ok && m >= 1 {
 				st.miter_limit = m
 			}
-		}, proc(st, from: ^Svg_Computed) {st.miter_limit = from.miter_limit}},
-	.Stroke_Dasharray = {"stroke-dasharray", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.dash = svg_parse_dash(p, v, st.font_size)
-		}, proc(st, from: ^Svg_Computed) {st.dash = from.dash}},
-	.Stroke_Dashoffset = {"stroke-dashoffset", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			if l, ok := svg_parse_length(v); ok {
-				st.dash_offset = svg_length_px(l, svg_percent_base(p, 2), st.font_size)
+		}, proc(st, from: ^Computed) {st.miter_limit = from.miter_limit}},
+	.Stroke_Dasharray = {"stroke-dasharray", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.dash = parse_dash(p, v, st.font_size)
+		}, proc(st, from: ^Computed) {st.dash = from.dash}},
+	.Stroke_Dashoffset = {"stroke-dashoffset", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			if l, ok := parse_length(v); ok {
+				st.dash_offset = length_px(l, percent_base(p, 2), st.font_size)
 			}
-		}, proc(st, from: ^Svg_Computed) {st.dash_offset = from.dash_offset}},
-	.Opacity = {"opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.opacity = svg_opacity(v)
-		}, proc(st, from: ^Svg_Computed) {st.opacity = from.opacity}},
-	.Visibility = {"visibility", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.dash_offset = from.dash_offset}},
+	.Opacity = {"opacity", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.opacity = opacity(v)
+		}, proc(st, from: ^Computed) {st.opacity = from.opacity}},
+	.Visibility = {"visibility", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.visible = v == "visible"
 			st.visible_decl = true
-		}, proc(st, from: ^Svg_Computed) {st.visible = from.visible}},
-	.Display = {"display", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.visible = from.visible}},
+	.Display = {"display", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.display_none = v == "none"
-		}, proc(st, from: ^Svg_Computed) {st.display_none = from.display_none}},
-	.Color = {"color", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.display_none = from.display_none}},
+	.Color = {"color", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			// currentColor: the inherited colour, already there.
 			if v != "currentColor" {
-				if c, ok := css_color_parse(v); ok {
+				if c, ok := vg.css_color_parse(v); ok {
 					st.color = c
 				}
 			}
-		}, proc(st, from: ^Svg_Computed) {st.color = from.color}},
-	.Font_Family = {"font-family", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.families = svg_parse_families(p, v)
-		}, proc(st, from: ^Svg_Computed) {st.families = from.families}},
-	.Font_Size = {"font-size", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.font_size = svg_font_size(v, parent.font_size)
-		}, proc(st, from: ^Svg_Computed) {st.font_size = from.font_size}},
-	.Font_Weight = {"font-weight", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.font_weight = svg_font_weight(v, parent.font_weight)
-		}, proc(st, from: ^Svg_Computed) {st.font_weight = from.font_weight}},
-	.Font_Style = {"font-style", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.color = from.color}},
+	.Font_Family = {"font-family", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.families = parse_families(p, v)
+		}, proc(st, from: ^Computed) {st.families = from.families}},
+	.Font_Size = {"font-size", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.font_size = font_size(v, parent.font_size)
+		}, proc(st, from: ^Computed) {st.font_size = from.font_size}},
+	.Font_Weight = {"font-weight", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.font_weight = font_weight(v, parent.font_weight)
+		}, proc(st, from: ^Computed) {st.font_weight = from.font_weight}},
+	.Font_Style = {"font-style", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.italic = v == "italic" || v == "oblique"
-		}, proc(st, from: ^Svg_Computed) {st.italic = from.italic}},
-	.Text_Anchor = {"text-anchor", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.italic = from.italic}},
+	.Text_Anchor = {"text-anchor", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			switch v {
 			case "start":
 				st.anchor = .Left
@@ -1139,90 +1213,90 @@ svg_props := [Svg_Prop]Svg_Prop_Info {
 			case "end":
 				st.anchor = .Right
 			}
-		}, proc(st, from: ^Svg_Computed) {st.anchor = from.anchor}},
-	.Dominant_Baseline = {"dominant-baseline", true, svg_apply_baseline, svg_copy_baseline},
-	.Alignment_Baseline = {"alignment-baseline", true, svg_apply_baseline, svg_copy_baseline},
-	.Letter_Spacing = {"letter-spacing", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.anchor = from.anchor}},
+	.Dominant_Baseline = {"dominant-baseline", true, apply_baseline, copy_baseline},
+	.Alignment_Baseline = {"alignment-baseline", true, apply_baseline, copy_baseline},
+	.Letter_Spacing = {"letter-spacing", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			if v == "normal" {
 				st.letter_spacing = 0
-			} else if l, ok := svg_parse_length(v); ok {
-				st.letter_spacing = svg_length_px(l, svg_percent_base(p, 0), st.font_size)
+			} else if l, ok := parse_length(v); ok {
+				st.letter_spacing = length_px(l, percent_base(p, 0), st.font_size)
 			}
-		}, proc(st, from: ^Svg_Computed) {st.letter_spacing = from.letter_spacing}},
-	.Clip_Path = {"clip-path", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.letter_spacing = from.letter_spacing}},
+	.Clip_Path = {"clip-path", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.clip_path = "" if v == "none" else v
-		}, proc(st, from: ^Svg_Computed) {st.clip_path = from.clip_path}},
-	.Clip_Rule = {"clip-rule", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.clip_path = from.clip_path}},
+	.Clip_Rule = {"clip-rule", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.clip_rule = .Even_Odd if v == "evenodd" else .Non_Zero
-		}, proc(st, from: ^Svg_Computed) {st.clip_rule = from.clip_rule}},
-	.Mask = {"mask", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.clip_rule = from.clip_rule}},
+	.Mask = {"mask", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.mask = "" if v == "none" else v
-		}, proc(st, from: ^Svg_Computed) {st.mask = from.mask}},
-	.Mask_Type = {"mask-type", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.mask = from.mask}},
+	.Mask_Type = {"mask-type", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.mask_alpha = v == "alpha"
-		}, proc(st, from: ^Svg_Computed) {st.mask_alpha = from.mask_alpha}},
-	.Filter = {"filter", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.mask_alpha = from.mask_alpha}},
+	.Filter = {"filter", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.filter = "" if v == "none" else v
-		}, proc(st, from: ^Svg_Computed) {st.filter = from.filter}},
-	.Mix_Blend_Mode = {"mix-blend-mode", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.blend = svg_blend_mode(v)
-		}, proc(st, from: ^Svg_Computed) {st.blend = from.blend}},
-	.Isolation = {"isolation", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.filter = from.filter}},
+	.Mix_Blend_Mode = {"mix-blend-mode", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.blend = blend_mode(v)
+		}, proc(st, from: ^Computed) {st.blend = from.blend}},
+	.Isolation = {"isolation", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.isolate = v == "isolate"
-		}, proc(st, from: ^Svg_Computed) {st.isolate = from.isolate}},
-	.Stop_Color = {"stop-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.stop_color = svg_parse_color(v, st.color)
-		}, proc(st, from: ^Svg_Computed) {st.stop_color = from.stop_color}},
-	.Stop_Opacity = {"stop-opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.stop_opacity = svg_opacity(v)
-		}, proc(st, from: ^Svg_Computed) {st.stop_opacity = from.stop_opacity}},
-	.Flood_Color = {"flood-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.flood_color = svg_parse_color(v, st.color)
-		}, proc(st, from: ^Svg_Computed) {st.flood_color = from.flood_color}},
-	.Flood_Opacity = {"flood-opacity", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
-			st.flood_opacity = svg_opacity(v)
-		}, proc(st, from: ^Svg_Computed) {st.flood_opacity = from.flood_opacity}},
-	.Lighting_Color = {"lighting-color", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.isolate = from.isolate}},
+	.Stop_Color = {"stop-color", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.stop_color = parse_color(v, st.color)
+		}, proc(st, from: ^Computed) {st.stop_color = from.stop_color}},
+	.Stop_Opacity = {"stop-opacity", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.stop_opacity = opacity(v)
+		}, proc(st, from: ^Computed) {st.stop_opacity = from.stop_opacity}},
+	.Flood_Color = {"flood-color", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.flood_color = parse_color(v, st.color)
+		}, proc(st, from: ^Computed) {st.flood_color = from.flood_color}},
+	.Flood_Opacity = {"flood-opacity", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.flood_opacity = opacity(v)
+		}, proc(st, from: ^Computed) {st.flood_opacity = from.flood_opacity}},
+	.Lighting_Color = {"lighting-color", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			if v == "currentColor" || v == "currentcolor" {
 				st.lighting_color = st.color
-			} else if lc, ok := css_color_parse(v); ok {
+			} else if lc, ok := vg.css_color_parse(v); ok {
 				st.lighting_color = lc
 			} else {
-				st.lighting_color = WHITE
+				st.lighting_color = vg.WHITE
 			}
 			st.lighting_color.a = 1
-		}, proc(st, from: ^Svg_Computed) {st.lighting_color = from.lighting_color}},
-	.Shape_Rendering = {"shape-rendering", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.lighting_color = from.lighting_color}},
+	.Shape_Rendering = {"shape-rendering", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.crisp = v == "crispEdges" || v == "optimizeSpeed"
-		}, proc(st, from: ^Svg_Computed) {st.crisp = from.crisp}},
-	.Overflow = {"overflow", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.crisp = from.crisp}},
+	.Overflow = {"overflow", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.overflow_visible = v == "visible" || v == "auto"
-		}, proc(st, from: ^Svg_Computed) {st.overflow_visible = from.overflow_visible}},
-	.Color_Interpolation_Filters = {"color-interpolation-filters", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.overflow_visible = from.overflow_visible}},
+	.Color_Interpolation_Filters = {"color-interpolation-filters", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.srgb_filters = v == "sRGB"
-		}, proc(st, from: ^Svg_Computed) {st.srgb_filters = from.srgb_filters}},
-	.Transform = {"transform", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.srgb_filters = from.srgb_filters}},
+	.Transform = {"transform", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.css_transform = v
-		}, proc(st, from: ^Svg_Computed) {st.css_transform = from.css_transform}},
-	.Marker = {"marker", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, proc(st, from: ^Computed) {st.css_transform = from.css_transform}},
+	.Marker = {"marker", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			if v != "none" {
-				svg_warn(p, "markers are not supported")
+				warn(p, "markers are not supported")
 			}
-		}, svg_copy_nothing},
-	.Text_Decoration = {"text-decoration", false, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, copy_nothing},
+	.Text_Decoration = {"text-decoration", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			if v != "none" {
-				svg_warn(p, "text-decoration is not supported")
+				warn(p, "text-decoration is not supported")
 			}
-		}, svg_copy_nothing},
-	.Paint_Order = {"paint-order", true, proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+		}, copy_nothing},
+	.Paint_Order = {"paint-order", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			if v != "normal" && v != "fill" && v != "fill stroke" && v != "fill stroke markers" {
-				svg_warn(p, "paint-order is not supported")
+				warn(p, "paint-order is not supported")
 			}
-		}, svg_copy_nothing},
+		}, copy_nothing},
 }
 
 @(private)
-svg_apply_baseline :: proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string) {
+apply_baseline :: proc(p: ^Parser, st, parent: ^Computed, v: string) {
 	st.baseline_set = true
 	switch v {
 	case "middle":
@@ -1238,22 +1312,22 @@ svg_apply_baseline :: proc(p: ^Svg_Parser, st, parent: ^Svg_Computed, v: string)
 	case "auto", "alphabetic", "baseline":
 		st.baseline = .Alphabetic
 	case:
-		svg_warn(p, "dominant-baseline=%q is not supported", v)
+		warn(p, "dominant-baseline=%q is not supported", v)
 	}
 }
 
 @(private)
-svg_copy_baseline :: proc(st, from: ^Svg_Computed) {
+copy_baseline :: proc(st, from: ^Computed) {
 	st.baseline = from.baseline
 }
 
 // Properties ovg only warns about hold nothing to copy.
 @(private)
-svg_copy_nothing :: proc(st, from: ^Svg_Computed) {}
+copy_nothing :: proc(st, from: ^Computed) {}
 
 @(private)
-svg_opacity :: proc(v: string) -> f32 {
-	if l, ok := svg_parse_length(v); ok && (l.unit == .None || l.unit == .Percent) {
+opacity :: proc(v: string) -> f32 {
+	if l, ok := parse_length(v); ok && (l.unit == .None || l.unit == .Percent) {
 		x := l.v / 100 if l.unit == .Percent else l.v
 		return clamp(x, 0, 1)
 	}
@@ -1261,7 +1335,7 @@ svg_opacity :: proc(v: string) -> f32 {
 }
 
 @(private)
-svg_font_size :: proc(v: string, parent: f32) -> f32 {
+font_size :: proc(v: string, parent: f32) -> f32 {
 	switch v {
 	case "xx-small":
 		return 9
@@ -1282,8 +1356,8 @@ svg_font_size :: proc(v: string, parent: f32) -> f32 {
 	case "smaller":
 		return parent / 1.2
 	}
-	if l, ok := svg_parse_length(v); ok {
-		s := svg_length_px(l, parent, parent)
+	if l, ok := parse_length(v); ok {
+		s := length_px(l, parent, parent)
 		if s >= 0 {
 			return s
 		}
@@ -1292,7 +1366,7 @@ svg_font_size :: proc(v: string, parent: f32) -> f32 {
 }
 
 @(private)
-svg_font_weight :: proc(v: string, parent: int) -> int {
+font_weight :: proc(v: string, parent: int) -> int {
 	switch v {
 	case "normal":
 		return 400
@@ -1303,14 +1377,14 @@ svg_font_weight :: proc(v: string, parent: int) -> int {
 	case "lighter":
 		return max(parent - 300, 100) if parent > 400 else 100
 	}
-	if n, ok := svg_parse_number(v); ok {
+	if n, ok := parse_number(v); ok {
 		return clamp(int(n), 1, 1000)
 	}
 	return parent
 }
 
 @(private)
-svg_parse_families :: proc(p: ^Svg_Parser, v: string) -> Range {
+parse_families :: proc(p: ^Parser, v: string) -> vg.Range {
 	start := len(p.doc.families)
 	rest := v
 	for f in strings.split_iterator(&rest, ",") {
@@ -1323,24 +1397,24 @@ svg_parse_families :: proc(p: ^Svg_Parser, v: string) -> Range {
 }
 
 @(private)
-svg_parse_dash :: proc(p: ^Svg_Parser, v: string, font_size: f32) -> Range {
+parse_dash :: proc(p: ^Parser, v: string, font_size: f32) -> vg.Range {
 	if v == "none" {
 		return {}
 	}
 	start := len(p.doc.dashes)
-	sc := Svg_Scanner{s = v}
+	sc := vg.Css_Scanner{s = v}
 	sum: f32
 	for {
-		svg_skip_ws(&sc)
+		vg.css_skip_ws(&sc)
 		if sc.pos >= len(sc.s) {
 			break
 		}
-		l, ok := svg_scan_length(&sc)
+		l, ok := scan_length(&sc)
 		if !ok {
 			resize(&p.doc.dashes, start)
 			return {}
 		}
-		d := svg_length_px(l, svg_percent_base(p, 2), font_size)
+		d := length_px(l, percent_base(p, 2), font_size)
 		if d < 0 {
 			resize(&p.doc.dashes, start)
 			return {}
@@ -1362,7 +1436,7 @@ svg_parse_dash :: proc(p: ^Svg_Parser, v: string, font_size: f32) -> Range {
 }
 
 @(private)
-svg_blend_mode :: proc(v: string) -> Blend_Mode {
+blend_mode :: proc(v: string) -> vg.Blend_Mode {
 	switch v {
 	case "multiply":
 		return .Multiply
@@ -1400,40 +1474,40 @@ svg_blend_mode :: proc(v: string) -> Blend_Mode {
 
 // A color value; `currentColor` is `current`, anything unparsable black.
 @(private)
-svg_parse_color :: proc(v: string, current: Color) -> Color {
+parse_color :: proc(v: string, current: vg.Color) -> vg.Color {
 	if v == "currentColor" || v == "currentcolor" {
 		return current
 	}
-	c, _ := css_color_parse(v)
+	c, _ := vg.css_color_parse(v)
 	return c
 }
 
 @(private)
-svg_parse_paint :: proc(p: ^Svg_Parser, v: string, st: ^Svg_Computed, parent: Svg_Paint) -> Svg_Paint {
+parse_paint :: proc(p: ^Parser, v: string, st: ^Computed, parent: Paint) -> Paint {
 	switch v {
 	case "none":
 		return {}
 	case "currentColor", "currentcolor":
 		return {kind = .Color, color = st.color}
 	case "context-fill", "context-stroke":
-		svg_warn(p, "%s is not supported", v)
+		warn(p, "%s is not supported", v)
 		return {}
 	}
 	if strings.has_prefix(v, "url(") {
 		end := strings.index_byte(v, ')')
 		fallback := strings.trim_space(v[end + 1:]) if end >= 0 else ""
-		if el, ok := svg_ref(p, v); ok {
-			paint := svg_server_paint(p, el)
+		if el, ok := ref(p, v); ok {
+			paint := server_paint(p, el)
 			if paint.kind != .None || fallback == "" {
 				return paint
 			}
 		}
 		if fallback != "" {
-			return svg_parse_paint(p, fallback, st, parent)
+			return parse_paint(p, fallback, st, parent)
 		}
 		return {}
 	}
-	if c, ok := css_color_parse(v); ok {
+	if c, ok := vg.css_color_parse(v); ok {
 		return {kind = .Color, color = c}
 	}
 	// An invalid paint is ignored (the inherited value stays).
@@ -1443,12 +1517,12 @@ svg_parse_paint :: proc(p: ^Svg_Parser, v: string, st: ^Svg_Computed, parent: Sv
 // ---- tree construction -------------------------------------------------------------
 
 @(private)
-svg_new_node :: proc(p: ^Svg_Parser, kind: Svg_Node_Kind, parent: i32) -> i32 {
+new_node :: proc(p: ^Parser, kind: Node_Kind, parent: i32) -> i32 {
 	doc := p.doc
 	idx := i32(len(doc.nodes))
 	append(
 		&doc.nodes,
-		Svg_Node {
+		Node {
 			kind = kind,
 			parent = parent,
 			first_child = -1,
@@ -1460,8 +1534,8 @@ svg_new_node :: proc(p: ^Svg_Parser, kind: Svg_Node_Kind, parent: i32) -> i32 {
 			mask = -1,
 			filter = -1,
 			opacity = 1,
-			transform = TRANSFORM_IDENTITY,
-			bbox = SVG_EMPTY_BOX,
+			transform = vg.TRANSFORM_IDENTITY,
+			bbox = EMPTY_BOX,
 		},
 	)
 	if parent >= 0 {
@@ -1478,17 +1552,17 @@ svg_new_node :: proc(p: ^Svg_Parser, kind: Svg_Node_Kind, parent: i32) -> i32 {
 
 // The element's own transform: the attribute, or a CSS transform.
 @(private)
-svg_element_transform :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed, name := "transform") -> Transform2D {
+element_transform :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed, name := "transform") -> vg.Transform2D {
 	src := st.css_transform
 	if src == "" {
-		src, _ = svg_attr(e, name)
+		src, _ = attr(e, name)
 	}
 	if src == "" {
-		return TRANSFORM_IDENTITY
+		return vg.TRANSFORM_IDENTITY
 	}
-	t, ok := transform_svg(src)
+	t, ok := vg.transform_svg(src)
 	if !ok {
-		svg_warn(p, "invalid transform %q", src)
+		warn(p, "invalid transform %q", src)
 	}
 	return t
 }
@@ -1496,11 +1570,11 @@ svg_element_transform :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed
 // Sets the node's id, visibility and effects from the element and its
 // style. False when the element must not be drawn (a broken filter).
 @(private)
-svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, clip_ok := true) -> bool {
+node_effects :: proc(p: ^Parser, n: i32, el: u32, st: ^Computed, clip_ok := true) -> bool {
 	doc := p.doc
 	e := &p.x.elements[el]
 	node := &doc.nodes[n]
-	if id, ok := svg_attr(e, "id"); ok && id != "" {
+	if id, ok := attr(e, "id"); ok && id != "" {
 		idx, found := doc.id_map[id]
 		if !found {
 			idx = i32(len(doc.ids))
@@ -1509,6 +1583,11 @@ svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, cli
 			doc.id_map[owned] = idx
 		}
 		node.id = idx
+	}
+	for name, k in p.opts.keep_attributes {
+		if v, ok := attr(e, name); ok {
+			append(&doc.attributes, Attribute{n, i32(k), strings.clone(v, p.sa)})
+		}
 	}
 	if !st.visible {
 		node.flags += {.Hidden}
@@ -1532,8 +1611,8 @@ svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, cli
 	if p.in_clip {
 		// Clip content: only geometry and nested clip paths count.
 		if st.clip_path != "" && clip_ok {
-			if ref, ok := svg_ref(p, st.clip_path); ok {
-				c := svg_clip(p, ref)
+			if ref, ok := ref(p, st.clip_path); ok {
+				c := clip(p, ref)
 				doc.nodes[n].clip = c
 			}
 		}
@@ -1548,24 +1627,24 @@ svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, cli
 		node.flags += {.Isolate}
 	}
 	if st.clip_path != "" {
-		if ref, ok := svg_ref(p, st.clip_path); ok && svg_tag(p.x.elements[ref].ident) == "clipPath" {
-			c := svg_clip(p, ref)
+		if ref, ok := ref(p, st.clip_path); ok && local_name(p.x.elements[ref].ident) == "clipPath" {
+			c := clip(p, ref)
 			doc.nodes[n].clip = c
 		} else {
-			svg_warn(p, "clip-path %q does not name a clipPath", st.clip_path)
+			warn(p, "clip-path %q does not name a clipPath", st.clip_path)
 		}
 	}
 	if st.mask != "" {
-		if ref, ok := svg_ref(p, st.mask); ok && svg_tag(p.x.elements[ref].ident) == "mask" {
-			m := svg_mask(p, ref)
+		if ref, ok := ref(p, st.mask); ok && local_name(p.x.elements[ref].ident) == "mask" {
+			m := mask(p, ref)
 			doc.nodes[n].mask = m
 		} else {
-			svg_warn(p, "mask %q does not name a mask", st.mask)
+			warn(p, "mask %q does not name a mask", st.mask)
 		}
 	}
 	if st.filter != "" {
-		if ref, ok := svg_ref(p, st.filter); ok && svg_tag(p.x.elements[ref].ident) == "filter" {
-			f := svg_filter_def(p, ref)
+		if ref, ok := ref(p, st.filter); ok && local_name(p.x.elements[ref].ident) == "filter" {
+			f := filter_def(p, ref)
 			if f < 0 {
 				return false
 			}
@@ -1575,7 +1654,7 @@ svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, cli
 				// A reference to nothing: the element is not rendered.
 				return false
 			}
-			svg_warn(p, "CSS filter functions are not supported (filter=%q)", st.filter)
+			warn(p, "CSS filter functions are not supported (filter=%q)", st.filter)
 		}
 	}
 	return true
@@ -1583,32 +1662,37 @@ svg_node_effects :: proc(p: ^Svg_Parser, n: i32, el: u32, st: ^Svg_Computed, cli
 
 // Whether a group with this style needs a node of its own.
 @(private)
-svg_group_needed :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed, t: Transform2D) -> bool {
+group_needed :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed, t: vg.Transform2D) -> bool {
 	if p.in_clip {
-		return t != TRANSFORM_IDENTITY || st.clip_path != ""
+		return t != vg.TRANSFORM_IDENTITY || st.clip_path != ""
 	}
-	if _, has_id := svg_attr(e, "id"); has_id {
+	if _, has_id := attr(e, "id"); has_id || p.opts.keep_groups {
 		return true
 	}
-	return t != TRANSFORM_IDENTITY || st.opacity < 1 || st.clip_path != "" || st.mask != "" || st.filter != "" || st.blend != .Normal || st.isolate || !st.visible
+	for name in p.opts.keep_attributes {
+		if _, ok := attr(e, name); ok {
+			return true
+		}
+	}
+	return t != vg.TRANSFORM_IDENTITY || st.opacity < 1 || st.clip_path != "" || st.mask != "" || st.filter != "" || st.blend != .Normal || st.isolate || !st.visible
 }
 
 @(private)
-svg_convert_children :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32) {
+convert_children :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	for v in p.x.elements[el].value {
 		if child, ok := v.(xml.Element_ID); ok {
-			svg_convert_element(p, child, st, parent)
+			convert_element(p, child, st, parent)
 		}
 	}
 }
 
 // Whether the conditional processing attributes let the element render.
 @(private)
-svg_conditions_pass :: proc(e: ^xml.Element) -> bool {
-	if v, ok := svg_attr(e, "requiredExtensions"); ok && strings.trim_space(v) != "" {
+conditions_pass :: proc(e: ^xml.Element) -> bool {
+	if v, ok := attr(e, "requiredExtensions"); ok && strings.trim_space(v) != "" {
 		return false
 	}
-	if v, ok := svg_attr(e, "systemLanguage"); ok {
+	if v, ok := attr(e, "systemLanguage"); ok {
 		rest := v
 		for lang in strings.split_iterator(&rest, ",") {
 			l := strings.trim_space(lang)
@@ -1622,7 +1706,30 @@ svg_conditions_pass :: proc(e: ^xml.Element) -> bool {
 }
 
 @(private)
-svg_convert_element :: proc(p: ^Svg_Parser, el: u32, parent_st: ^Svg_Computed, parent: i32) {
+convert_element :: proc(p: ^Parser, el: u32, parent_st: ^Computed, parent: i32) {
+	if !p.use_target[el] || p.in_clip || parent < 0 {
+		convert_styled(p, el, parent_st, parent)
+		return
+	}
+	// A <use> names the element: its node is a definition for uses whose
+	// copy would start from the same style.
+	doc := p.doc
+	last := doc.nodes[parent].last_child
+	used, deepest := p.budget.used[.Svg_Elements], p.deepest
+	p.deepest = p.depth
+	st, styled := convert_styled(p, el, parent_st, parent)
+	node := doc.nodes[parent].last_child
+	first := doc.nodes[last].next if last >= 0 else doc.nodes[parent].first_child
+	if styled && node != last && first == node {
+		add_use_def(p, el, &st, node, p.budget.used[.Svg_Elements] - used, p.deepest - p.depth)
+	}
+	p.deepest = max(deepest, p.deepest)
+}
+
+// Converts an element under `parent`; its computed style, when it got
+// that far.
+@(private)
+convert_styled :: proc(p: ^Parser, el: u32, parent_st: ^Computed, parent: i32) -> (style: Computed, styled: bool) {
 	e := &p.x.elements[el]
 	if e.kind != .Element {
 		return
@@ -1631,16 +1738,17 @@ svg_convert_element :: proc(p: ^Svg_Parser, el: u32, parent_st: ^Svg_Computed, p
 		// Editor metadata (sodipodi:, inkscape:, ...).
 		return
 	}
-	if budget_over(p.budget, .Depth, p.depth + 1) || !budget_take(p.budget, .Svg_Elements) {
+	if vg.budget_over(p.budget, .Depth, p.depth + 1) || !vg.budget_take(p.budget, .Svg_Elements) {
 		return
 	}
 	p.depth += 1
 	defer p.depth -= 1
-	tag := svg_tag(e.ident)
+	p.deepest = max(p.deepest, p.depth)
+	tag := local_name(e.ident)
 	switch tag {
 	case "defs", "linearGradient", "radialGradient", "pattern", "clipPath", "mask", "filter", "symbol", "style", "title", "desc", "metadata", "marker", "script", "font", "font-face", "glyph", "missing-glyph", "cursor", "view", "animate", "animateMotion", "animateTransform", "animateColor", "set", "mpath", "foreignObject", "stop":
 		if tag == "foreignObject" {
-			svg_warn(p, "foreignObject is not supported")
+			warn(p, "foreignObject is not supported")
 		}
 		return
 	}
@@ -1651,14 +1759,15 @@ svg_convert_element :: proc(p: ^Svg_Parser, el: u32, parent_st: ^Svg_Computed, p
 			return
 		}
 	}
-	if !svg_conditions_pass(e) {
+	if !conditions_pass(e) {
 		return
 	}
-	st := svg_compute_style(p, el, parent_st)
+	st := compute_style(p, el, parent_st)
+	style, styled = st, true
 	if st.display_none {
 		// With an id it is kept, off, so an override can show it (a
 		// character's alternate eyes); without one nothing could.
-		id, has := svg_attr(e, "id")
+		id, has := attr(e, "id")
 		if !has || id == "" || p.in_clip {
 			return
 		}
@@ -1668,24 +1777,24 @@ svg_convert_element :: proc(p: ^Svg_Parser, el: u32, parent_st: ^Svg_Computed, p
 	defer p.pending_off = false
 	switch tag {
 	case "g", "a":
-		t := svg_element_transform(p, e, &st)
+		t := element_transform(p, e, &st)
 		n := parent
-		if svg_group_needed(p, e, &st, t) {
-			n = svg_new_node(p, .Group, parent)
+		if group_needed(p, e, &st, t) {
+			n = new_node(p, .Group, parent)
 			p.doc.nodes[n].transform = t
-			if !svg_node_effects(p, n, el, &st) {
-				svg_drop_node(p, n)
+			if !node_effects(p, n, el, &st) {
+				drop_node(p, n)
 				return
 			}
 			st.fill_decl, st.stroke_decl, st.visible_decl = false, false, false
 		}
-		svg_convert_children(p, el, &st, n)
+		convert_children(p, el, &st, n)
 	case "switch":
-		t := svg_element_transform(p, e, &st)
-		n := svg_new_node(p, .Group, parent)
+		t := element_transform(p, e, &st)
+		n := new_node(p, .Group, parent)
 		p.doc.nodes[n].transform = t
-		if !svg_node_effects(p, n, el, &st) {
-			svg_drop_node(p, n)
+		if !node_effects(p, n, el, &st) {
+			drop_node(p, n)
 			return
 		}
 		st.fill_decl, st.stroke_decl, st.visible_decl = false, false, false
@@ -1694,31 +1803,32 @@ svg_convert_element :: proc(p: ^Svg_Parser, el: u32, parent_st: ^Svg_Computed, p
 			if !ok || p.x.elements[child].kind != .Element {
 				continue
 			}
-			if svg_conditions_pass(&p.x.elements[child]) {
-				svg_convert_element(p, child, &st, n)
+			if conditions_pass(&p.x.elements[child]) {
+				convert_element(p, child, &st, n)
 				break
 			}
 		}
 	case "svg":
-		svg_convert_viewport(p, el, &st, parent, -1, -1)
+		convert_viewport(p, el, &st, parent, -1, -1)
 	case "use":
-		svg_convert_use(p, el, &st, parent)
+		convert_use(p, el, &st, parent)
 	case "path", "rect", "circle", "ellipse", "line", "polyline", "polygon":
-		svg_convert_shape(p, el, tag, &st, parent)
+		convert_shape(p, el, tag, &st, parent)
 	case "text":
-		svg_convert_text(p, el, &st, parent)
+		convert_text(p, el, &st, parent)
 	case "image":
-		svg_convert_image(p, el, &st, parent)
+		convert_image(p, el, &st, parent)
 	case "tspan", "textPath", "tref":
 	// Only inside text.
 	case:
-		svg_warn(p, "<%s> is not supported", tag)
+		warn(p, "<%s> is not supported", tag)
 	}
+	return
 }
 
 // Unlinks node `n` from its parent (definitions converted after it stay).
 @(private)
-svg_drop_node :: proc(p: ^Svg_Parser, n: i32) {
+drop_node :: proc(p: ^Parser, n: i32) {
 	doc := p.doc
 	parent := doc.nodes[n].parent
 	doc.nodes[n].parent = -1
@@ -1741,59 +1851,59 @@ svg_drop_node :: proc(p: ^Svg_Parser, n: i32) {
 
 // A nested <svg> (or one a <use> instantiates, with its width and height).
 @(private)
-svg_convert_viewport :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32, use_w, use_h: f32) {
+convert_viewport :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32, use_w, use_h: f32) {
 	e := &p.x.elements[el]
-	x := svg_attr_length(p, e, "x", 0, 0, st.font_size)
-	y := svg_attr_length(p, e, "y", 1, 0, st.font_size)
-	w := use_w if use_w > 0 else svg_attr_length(p, e, "width", 0, svg_percent_base(p, 0), st.font_size)
-	h := use_h if use_h > 0 else svg_attr_length(p, e, "height", 1, svg_percent_base(p, 1), st.font_size)
+	x := attr_length(p, e, "x", 0, 0, st.font_size)
+	y := attr_length(p, e, "y", 1, 0, st.font_size)
+	w := use_w if use_w > 0 else attr_length(p, e, "width", 0, percent_base(p, 0), st.font_size)
+	h := use_h if use_h > 0 else attr_length(p, e, "height", 1, percent_base(p, 1), st.font_size)
 	if w <= 0 || h <= 0 {
 		return
 	}
-	vb, has_vb := svg_view_box(e)
+	vb, has_vb := view_box(e)
 	if has_vb && (vb.w <= 0 || vb.h <= 0) {
 		return
 	}
-	t := transform_translation(x, y)
-	clip := Rect{0, 0, w, h}
+	t := vg.transform_translation(x, y)
+	clip := vg.Rect{0, 0, w, h}
 	if has_vb {
-		vt := svg_view_box_transform(vb, svg_aspect(e), w, h)
-		t = transform_multiply(vt, t)
-		clip = svg_rect_transform(clip, transform_inverse(vt))
+		vt := view_box_transform(vb, aspect(e), w, h)
+		t = vg.transform_multiply(vt, t)
+		clip = rect_transform(clip, vg.transform_inverse(vt))
 	}
 	// SVG 2: a transform on the nested svg applies outside its viewport.
-	t = transform_multiply(t, svg_element_transform(p, e, st))
-	n := svg_new_node(p, .Group, parent)
+	t = vg.transform_multiply(t, element_transform(p, e, st))
+	n := new_node(p, .Group, parent)
 	p.doc.nodes[n].transform = t
 	if !st.overflow_visible {
 		p.doc.nodes[n].flags += {.Clip_Rect}
 		p.doc.nodes[n].clip_rect = clip
 	}
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 		return
 	}
 	cst := st^
 	cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
-	append(&p.viewports, Vec2{vb.w, vb.h} if has_vb else Vec2{w, h})
-	svg_convert_children(p, el, &cst, n)
+	append(&p.viewports, vg.Vec2{vb.w, vb.h} if has_vb else vg.Vec2{w, h})
+	convert_children(p, el, &cst, n)
 	pop(&p.viewports)
 }
 
 @(private)
-svg_convert_use :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32) {
+convert_use :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	e := &p.x.elements[el]
-	href, has := svg_href(e)
+	href, has := href(e)
 	if !has {
 		return
 	}
-	ref, found := svg_ref(p, href)
+	ref, found := ref(p, href)
 	if !found {
 		return
 	}
 	for u in p.use_stack {
 		if u == ref {
-			svg_warn(p, "recursive <use> of %q is skipped", href)
+			warn(p, "recursive <use> of %q is skipped", href)
 			return
 		}
 	}
@@ -1809,13 +1919,13 @@ svg_convert_use :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32)
 	if ref == 0 {
 		return
 	}
-	x := svg_attr_length(p, e, "x", 0, 0, st.font_size)
-	y := svg_attr_length(p, e, "y", 1, 0, st.font_size)
-	t := transform_multiply(transform_translation(x, y), svg_element_transform(p, e, st))
-	n := svg_new_node(p, .Group, parent)
+	x := attr_length(p, e, "x", 0, 0, st.font_size)
+	y := attr_length(p, e, "y", 1, 0, st.font_size)
+	t := vg.transform_multiply(vg.transform_translation(x, y), element_transform(p, e, st))
+	n := new_node(p, .Group, parent)
 	p.doc.nodes[n].transform = t
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 		return
 	}
 	cst := st^
@@ -1823,85 +1933,149 @@ svg_convert_use :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32)
 	append(&p.use_stack, ref)
 	defer pop(&p.use_stack)
 	re := &p.x.elements[ref]
-	switch svg_tag(re.ident) {
+	switch local_name(re.ident) {
 	case "symbol":
 		if p.in_clip {
 			return
 		}
-		sst := svg_compute_style(p, ref, &cst)
+		sst := compute_style(p, ref, &cst)
 		if sst.display_none {
 			return
 		}
-		w := svg_attr_length(p, e, "width", 0, -1, st.font_size)
-		h := svg_attr_length(p, e, "height", 1, -1, st.font_size)
+		w := attr_length(p, e, "width", 0, -1, st.font_size)
+		h := attr_length(p, e, "height", 1, -1, st.font_size)
 		if w < 0 {
-			w = svg_attr_length(p, re, "width", 0, svg_percent_base(p, 0), st.font_size)
+			w = attr_length(p, re, "width", 0, percent_base(p, 0), st.font_size)
 		}
 		if h < 0 {
-			h = svg_attr_length(p, re, "height", 1, svg_percent_base(p, 1), st.font_size)
+			h = attr_length(p, re, "height", 1, percent_base(p, 1), st.font_size)
 		}
-		vb, has_vb := svg_view_box(re)
-		sn := svg_new_node(p, .Group, n)
-		if !svg_node_effects(p, sn, ref, &sst) {
-			svg_drop_node(p, sn)
+		vb, has_vb := view_box(re)
+		sn := new_node(p, .Group, n)
+		if !node_effects(p, sn, ref, &sst) {
+			drop_node(p, sn)
 			return
 		}
 		if has_vb && vb.w > 0 && vb.h > 0 && w > 0 && h > 0 {
-			vt := svg_view_box_transform(vb, svg_aspect(re), w, h)
+			vt := view_box_transform(vb, aspect(re), w, h)
 			p.doc.nodes[sn].transform = vt
 			if !sst.overflow_visible {
 				p.doc.nodes[sn].flags += {.Clip_Rect}
-				p.doc.nodes[sn].clip_rect = svg_rect_transform({0, 0, w, h}, transform_inverse(vt))
+				p.doc.nodes[sn].clip_rect = rect_transform({0, 0, w, h}, vg.transform_inverse(vt))
 			}
-			append(&p.viewports, Vec2{vb.w, vb.h})
+			append(&p.viewports, vg.Vec2{vb.w, vb.h})
 		} else {
 			if !sst.overflow_visible && w > 0 && h > 0 {
 				p.doc.nodes[sn].flags += {.Clip_Rect}
 				p.doc.nodes[sn].clip_rect = {0, 0, w, h}
 			}
-			append(&p.viewports, Vec2{w, h} if w > 0 && h > 0 else svg_viewport(p))
+			append(&p.viewports, vg.Vec2{w, h} if w > 0 && h > 0 else viewport(p))
 		}
 		// A transform on the symbol itself is SVG 2 only: ignored, as resvg.
 		sst.fill_decl, sst.stroke_decl, sst.visible_decl = false, false, false
-		svg_convert_children(p, ref, &sst, sn)
+		if k := find_use_def(p, ref, &sst); k >= 0 {
+			use_def(p, sn, k)
+		} else {
+			// The content once, outside the drawing: this use and the
+			// uses like it draw it.
+			def := new_node(p, .Group, -1)
+			used, deepest := p.budget.used[.Svg_Elements], p.deepest
+			p.deepest = p.depth
+			convert_children(p, ref, &sst, def)
+			add_use_def(p, ref, &sst, def, p.budget.used[.Svg_Elements] - used, p.deepest - p.depth)
+			p.deepest = max(deepest, p.deepest)
+			p.doc.nodes[sn].kind, p.doc.nodes[sn].data = .Use, def
+		}
 		pop(&p.viewports)
 	case "svg":
 		if p.in_clip {
 			return
 		}
-		sst := svg_compute_style(p, ref, &cst)
+		sst := compute_style(p, ref, &cst)
 		if sst.display_none {
 			return
 		}
-		svg_convert_viewport(p, ref, &sst, n, svg_attr_length(p, e, "width", 0, -1, st.font_size), svg_attr_length(p, e, "height", 1, -1, st.font_size))
+		convert_viewport(p, ref, &sst, n, attr_length(p, e, "width", 0, -1, st.font_size), attr_length(p, e, "height", 1, -1, st.font_size))
 	case:
-		svg_convert_element(p, ref, &cst, n)
+		if p.in_clip {
+			convert_element(p, ref, &cst, n)
+			return
+		}
+		key := compute_style(p, ref, &cst)
+		if k := find_use_def(p, ref, &key); k >= 0 {
+			use_def(p, n, k)
+			return
+		}
+		// Not converted with this style yet: once, outside the drawing,
+		// for this use and the uses like it (convert_element makes it a
+		// definition).
+		holder := new_node(p, .Group, -1)
+		count := len(p.use_defs)
+		convert_element(p, ref, &cst, holder)
+		if len(p.use_defs) > count && p.use_defs[len(p.use_defs) - 1].el == ref {
+			def := p.use_defs[len(p.use_defs) - 1].node
+			drop_node(p, def)
+			p.doc.nodes[n].kind, p.doc.nodes[n].data = .Use, def
+		} else if p.doc.nodes[holder].first_child >= 0 {
+			p.doc.nodes[n].kind, p.doc.nodes[n].data = .Use, holder
+		}
 	}
 }
 
+// The definition of element `el` converted with style `st` in the current
+// viewport, or -1.
 @(private)
-svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Computed, parent: i32) {
+find_use_def :: proc(p: ^Parser, el: u32, st: ^Computed) -> i32 {
+	vp := viewport(p)
+	for k := p.use_def_of[el]; k >= 0; k = p.use_defs[k].next {
+		d := &p.use_defs[k]
+		if d.viewport == vp && d.style == st^ {
+			return k
+		}
+	}
+	return -1
+}
+
+@(private)
+add_use_def :: proc(p: ^Parser, el: u32, st: ^Computed, node: i32, elements, depth: int) {
+	append(&p.use_defs, Use_Def{el, st^, viewport(p), node, elements, depth, p.use_def_of[el]})
+	p.use_def_of[el] = i32(len(p.use_defs) - 1)
+}
+
+// Makes use node `n` draw definition `k`. Its copy's elements and depth
+// count against the limits: past them it draws nothing.
+@(private)
+use_def :: proc(p: ^Parser, n: i32, k: i32) {
+	d := &p.use_defs[k]
+	if vg.budget_over(p.budget, .Depth, p.depth + d.depth) || !vg.budget_take(p.budget, .Svg_Elements, d.elements) {
+		return
+	}
+	p.doc.nodes[n].kind, p.doc.nodes[n].data = .Use, d.node
+}
+
+@(private)
+convert_shape :: proc(p: ^Parser, el: u32, tag: string, st: ^Computed, parent: i32) {
 	e := &p.x.elements[el]
 	path := &p.path
-	path_reset(path)
+	vg.path_reset(path)
 	fs := st.font_size
 	switch tag {
 	case "path":
-		d, _ := svg_attr(e, "d")
-		if !path_svg(path, d) {
+		d, _ := attr(e, "d")
+		if !vg.path_svg(path, d) {
 			// Rendered up to the error, as in SVG.
-			svg_warn(p, "malformed path data is drawn up to the error")
+			warn(p, "malformed path data is drawn up to the error")
 		}
 	case "rect":
-		x := svg_attr_length(p, e, "x", 0, 0, fs)
-		y := svg_attr_length(p, e, "y", 1, 0, fs)
-		w := svg_attr_length(p, e, "width", 0, 0, fs)
-		h := svg_attr_length(p, e, "height", 1, 0, fs)
+		x := attr_length(p, e, "x", 0, 0, fs)
+		y := attr_length(p, e, "y", 1, 0, fs)
+		w := attr_length(p, e, "width", 0, 0, fs)
+		h := attr_length(p, e, "height", 1, 0, fs)
 		if w <= 0 || h <= 0 {
 			return
 		}
-		rx := svg_attr_length(p, e, "rx", 0, -1, fs)
-		ry := svg_attr_length(p, e, "ry", 1, -1, fs)
+		rx := attr_length(p, e, "rx", 0, -1, fs)
+		ry := attr_length(p, e, "ry", 1, -1, fs)
 		if rx < 0 && ry < 0 {
 			rx, ry = 0, 0
 		} else if rx < 0 {
@@ -1909,16 +2083,16 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 		} else if ry < 0 {
 			ry = rx
 		}
-		svg_rect_path(path, x, y, w, h, min(rx, w / 2), min(ry, h / 2))
+		rect_path(path, x, y, w, h, min(rx, w / 2), min(ry, h / 2))
 	case "circle":
-		r := svg_attr_length(p, e, "r", 2, 0, fs)
+		r := attr_length(p, e, "r", 2, 0, fs)
 		if r <= 0 {
 			return
 		}
-		svg_ellipse_path(path, svg_attr_length(p, e, "cx", 0, 0, fs), svg_attr_length(p, e, "cy", 1, 0, fs), r, r)
+		ellipse_path(path, attr_length(p, e, "cx", 0, 0, fs), attr_length(p, e, "cy", 1, 0, fs), r, r)
 	case "ellipse":
-		rx := svg_attr_length(p, e, "rx", 0, -1, fs)
-		ry := svg_attr_length(p, e, "ry", 1, -1, fs)
+		rx := attr_length(p, e, "rx", 0, -1, fs)
+		ry := attr_length(p, e, "ry", 1, -1, fs)
 		if rx < 0 {
 			rx = ry
 		}
@@ -1928,27 +2102,27 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 		if rx <= 0 || ry <= 0 {
 			return
 		}
-		svg_ellipse_path(path, svg_attr_length(p, e, "cx", 0, 0, fs), svg_attr_length(p, e, "cy", 1, 0, fs), rx, ry)
+		ellipse_path(path, attr_length(p, e, "cx", 0, 0, fs), attr_length(p, e, "cy", 1, 0, fs), rx, ry)
 	case "line":
-		path_move_to(path, svg_attr_length(p, e, "x1", 0, 0, fs), svg_attr_length(p, e, "y1", 1, 0, fs))
-		path_line_to(path, svg_attr_length(p, e, "x2", 0, 0, fs), svg_attr_length(p, e, "y2", 1, 0, fs))
+		vg.path_move_to(path, attr_length(p, e, "x1", 0, 0, fs), attr_length(p, e, "y1", 1, 0, fs))
+		vg.path_line_to(path, attr_length(p, e, "x2", 0, 0, fs), attr_length(p, e, "y2", 1, 0, fs))
 	case "polyline", "polygon":
-		pts, _ := svg_attr(e, "points")
-		sc := Svg_Scanner{s = pts}
+		pts, _ := attr(e, "points")
+		sc := vg.Css_Scanner{s = pts}
 		n := 0
 		for {
-			x, ok1 := svg_scan_number(&sc)
+			x, ok1 := vg.css_scan_number(&sc)
 			if !ok1 {
 				break
 			}
-			y, ok2 := svg_scan_number(&sc)
+			y, ok2 := vg.css_scan_number(&sc)
 			if !ok2 {
 				break
 			}
 			if n == 0 {
-				path_move_to(path, x, y)
+				vg.path_move_to(path, x, y)
 			} else {
-				path_line_to(path, x, y)
+				vg.path_line_to(path, x, y)
 			}
 			n += 1
 		}
@@ -1956,7 +2130,7 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 			return
 		}
 		if tag == "polygon" {
-			path_close(path)
+			vg.path_close(path)
 		}
 	}
 	if len(path.verbs) == 0 || len(path.coords) == 0 {
@@ -1968,13 +2142,13 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 	}
 	// Into the document before the effects: converting a referenced clip
 	// path reuses the scratch path.
-	shape := Svg_Shape {
+	shape := Shape {
 		verbs  = {u32(len(doc.verbs)), u32(len(path.verbs))},
 		coords = {u32(len(doc.coords)), u32(len(path.coords))},
-		style  = svg_shape_style(p, st),
+		style  = shape_style(p, st),
 	}
-	if pl, ok := svg_attr(e, "pathLength"); ok {
-		if v, vok := svg_parse_number(pl); vok && v > 0 {
+	if pl, ok := attr(e, "pathLength"); ok {
+		if v, vok := parse_number(pl); vok && v > 0 {
 			shape.path_length = v
 		}
 	}
@@ -1982,72 +2156,72 @@ svg_convert_shape :: proc(p: ^Svg_Parser, el: u32, tag: string, st: ^Svg_Compute
 		// No area to fill.
 		shape.style.fill = {}
 	}
-	bbox := svg_path_bbox(path.verbs[:], path.coords[:])
+	bbox := path_bbox(path.verbs[:], path.coords[:])
 	// Built once, drawn at any scale.
-	shape.fill, _ = shape_from_path(path, doc.allocator, false, &p.scratch)
+	shape.fill, _ = vg.shape_from_path(path, doc.allocator, false, &p.scratch)
 	if s := &shape.style; s.stroke_width > 0 && s.stroke.kind != .None {
-		sp: Paint
-		svg_stroke_settings(&sp, s, doc, shape.path_length)
+		sp: vg.Paint
+		stroke_settings(&sp, s, doc, shape.path_length)
 		complete: bool
-		shape.stroke, _, complete = shape_from_stroke(path, sp.stroke, doc.allocator, false, p.budget.limits[.Dash_Segments], &p.scratch)
+		shape.stroke, _, complete = vg.shape_from_stroke(path, sp.stroke, doc.allocator, false, p.budget.limits[.Dash_Segments], &p.scratch)
 		if !complete {
 			p.budget.hit += {.Dash_Segments}
 		}
 	}
 	append(&doc.verbs, ..path.verbs[:])
 	append(&doc.coords, ..path.coords[:])
-	n := svg_new_node(p, .Shape, parent)
-	doc.nodes[n].transform = svg_element_transform(p, e, st)
+	n := new_node(p, .Shape, parent)
+	doc.nodes[n].transform = element_transform(p, e, st)
 	doc.nodes[n].data = i32(len(doc.shapes))
 	doc.nodes[n].bbox = bbox
 	append(&doc.shapes, shape)
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 	}
 }
 
 // SVG's rect path: from (x + rx, y) clockwise (dashes start there).
 @(private)
-svg_rect_path :: proc(p: ^Path, x, y, w, h, rx, ry: f32) {
+rect_path :: proc(p: ^vg.Path, x, y, w, h, rx, ry: f32) {
 	if rx <= 0 || ry <= 0 {
-		path_move_to(p, x, y)
-		path_line_to(p, x + w, y)
-		path_line_to(p, x + w, y + h)
-		path_line_to(p, x, y + h)
-		path_close(p)
+		vg.path_move_to(p, x, y)
+		vg.path_line_to(p, x + w, y)
+		vg.path_line_to(p, x + w, y + h)
+		vg.path_line_to(p, x, y + h)
+		vg.path_close(p)
 		return
 	}
-	k: f32 = 1 - KAPPA90
-	path_move_to(p, x + rx, y)
-	path_line_to(p, x + w - rx, y)
-	path_bezier_to(p, x + w - rx * k, y, x + w, y + ry * k, x + w, y + ry)
-	path_line_to(p, x + w, y + h - ry)
-	path_bezier_to(p, x + w, y + h - ry * k, x + w - rx * k, y + h, x + w - rx, y + h)
-	path_line_to(p, x + rx, y + h)
-	path_bezier_to(p, x + rx * k, y + h, x, y + h - ry * k, x, y + h - ry)
-	path_line_to(p, x, y + ry)
-	path_bezier_to(p, x, y + ry * k, x + rx * k, y, x + rx, y)
-	path_close(p)
+	k: f32 = 1 - vg.KAPPA90
+	vg.path_move_to(p, x + rx, y)
+	vg.path_line_to(p, x + w - rx, y)
+	vg.path_bezier_to(p, x + w - rx * k, y, x + w, y + ry * k, x + w, y + ry)
+	vg.path_line_to(p, x + w, y + h - ry)
+	vg.path_bezier_to(p, x + w, y + h - ry * k, x + w - rx * k, y + h, x + w - rx, y + h)
+	vg.path_line_to(p, x + rx, y + h)
+	vg.path_bezier_to(p, x + rx * k, y + h, x, y + h - ry * k, x, y + h - ry)
+	vg.path_line_to(p, x, y + ry)
+	vg.path_bezier_to(p, x, y + ry * k, x + rx * k, y, x + rx, y)
+	vg.path_close(p)
 }
 
 // SVG's ellipse path: from (cx + rx, cy) clockwise.
 @(private)
-svg_ellipse_path :: proc(p: ^Path, cx, cy, rx, ry: f32) {
-	kx, ky := rx * f32(KAPPA90), ry * f32(KAPPA90)
-	path_move_to(p, cx + rx, cy)
-	path_bezier_to(p, cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry)
-	path_bezier_to(p, cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy)
-	path_bezier_to(p, cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry)
-	path_bezier_to(p, cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy)
-	path_close(p)
+ellipse_path :: proc(p: ^vg.Path, cx, cy, rx, ry: f32) {
+	kx, ky := rx * f32(vg.KAPPA90), ry * f32(vg.KAPPA90)
+	vg.path_move_to(p, cx + rx, cy)
+	vg.path_bezier_to(p, cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry)
+	vg.path_bezier_to(p, cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy)
+	vg.path_bezier_to(p, cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry)
+	vg.path_bezier_to(p, cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy)
+	vg.path_close(p)
 }
 
 @(private)
-svg_shape_style :: proc(p: ^Svg_Parser, st: ^Svg_Computed) -> Svg_Style {
+shape_style :: proc(p: ^Parser, st: ^Computed) -> Style {
 	if p.in_clip {
-		return {fill = {kind = .Color, color = WHITE}, fill_opacity = 1, fill_rule = st.clip_rule}
+		return {fill = {kind = .Color, color = vg.WHITE}, fill_opacity = 1, fill_rule = st.clip_rule}
 	}
-	s := Svg_Style {
+	s := Style {
 		fill           = st.fill,
 		stroke         = st.stroke,
 		fill_opacity   = st.fill_opacity,
@@ -2068,16 +2242,16 @@ svg_shape_style :: proc(p: ^Svg_Parser, st: ^Svg_Computed) -> Svg_Style {
 
 // The exact bounds of path data (curve extrema, not control points).
 @(private)
-svg_path_bbox :: proc(verbs: []Verb, coords: []Vec2) -> Rect {
-	lo := Vec2{1e30, 1e30}
-	hi := Vec2{-1e30, -1e30}
-	add :: #force_inline proc "contextless" (lo, hi: ^Vec2, q: Vec2) {
+path_bbox :: proc(verbs: []vg.Verb, coords: []vg.Vec2) -> vg.Rect {
+	lo := vg.Vec2{1e30, 1e30}
+	hi := vg.Vec2{-1e30, -1e30}
+	add :: #force_inline proc "contextless" (lo, hi: ^vg.Vec2, q: vg.Vec2) {
 		lo^ = {min(lo.x, q.x), min(lo.y, q.y)}
 		hi^ = {max(hi.x, q.x), max(hi.y, q.y)}
 	}
 	// Drawing before the first Move_To draws nothing (as fill skips it).
 	ci := 0
-	cur: Vec2
+	cur: vg.Vec2
 	moved := false
 	for v in verbs {
 		switch v {
@@ -2091,7 +2265,7 @@ svg_path_bbox :: proc(verbs: []Verb, coords: []Vec2) -> Rect {
 		case .Bezier_To:
 			to := coords[ci + 2]
 			if moved {
-				blo, bhi := cv.cubic_bounds([4]Vec2{cur, coords[ci], coords[ci + 1], to})
+				blo, bhi := cv.cubic_bounds([4]vg.Vec2{cur, coords[ci], coords[ci + 1], to})
 				add(&lo, &hi, blo)
 				add(&lo, &hi, bhi)
 			}
@@ -2101,37 +2275,37 @@ svg_path_bbox :: proc(verbs: []Verb, coords: []Vec2) -> Rect {
 		}
 	}
 	if lo.x > hi.x {
-		return SVG_EMPTY_BOX
+		return EMPTY_BOX
 	}
 	return {lo.x, lo.y, hi.x - lo.x, hi.y - lo.y}
 }
 
 @(private)
-svg_convert_image :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32) {
+convert_image :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	if p.in_clip {
 		return
 	}
 	e := &p.x.elements[el]
-	href, has := svg_href(e)
+	href, has := href(e)
 	if !has {
 		return
 	}
 	fs := st.font_size
-	img := Svg_Image {
-		x = svg_attr_length(p, e, "x", 0, 0, fs),
-		y = svg_attr_length(p, e, "y", 1, 0, fs),
-		w = svg_attr_length(p, e, "width", 0, 0, fs),
-		h = svg_attr_length(p, e, "height", 1, 0, fs),
+	img := Image {
+		x = attr_length(p, e, "x", 0, 0, fs),
+		y = attr_length(p, e, "y", 1, 0, fs),
+		w = attr_length(p, e, "width", 0, 0, fs),
+		h = attr_length(p, e, "height", 1, 0, fs),
 	}
-	a := svg_aspect(e)
+	a := aspect(e)
 	img.align = a.align
 	img.fit = .None if a.none else (.Slice if a.slice else .Meet)
-	if r, ok := svg_attr(e, "image-rendering"); ok {
+	if r, ok := attr(e, "image-rendering"); ok {
 		img.pixelated = r == "pixelated" || r == "optimizeSpeed" || r == "crisp-edges"
 	}
-	bm, svg_data := svg_bitmap(p, href)
+	bm, svg_data := bitmap(p, href)
 	if svg_data != nil {
-		svg_convert_svg_image(p, el, st, parent, svg_data, img, a)
+		convert_svg_image(p, el, st, parent, svg_data, img, a)
 		return
 	}
 	if bm < 0 {
@@ -2149,22 +2323,22 @@ svg_convert_image :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i3
 		img.h = img.w * ih / iw
 	}
 	doc := p.doc
-	n := svg_new_node(p, .Image, parent)
-	doc.nodes[n].transform = svg_element_transform(p, e, st)
+	n := new_node(p, .Image, parent)
+	doc.nodes[n].transform = element_transform(p, e, st)
 	doc.nodes[n].data = i32(len(doc.images))
 	doc.nodes[n].bbox = {img.x, img.y, img.w, img.h}
 	append(&doc.images, img)
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 	}
 }
 
 // The bytes an image href names: a data: URI or the host's file.
 @(private)
-svg_image_bytes :: proc(p: ^Svg_Parser, href: string) -> (data: []u8, ok: bool) {
+image_bytes :: proc(p: ^Parser, href: string) -> (data: []u8, ok: bool) {
 	if !strings.has_prefix(href, "data:") {
 		if p.opts.load_file == nil {
-			svg_warn(p, "<image> href %q needs a file loader", href)
+			warn(p, "<image> href %q needs a file loader", href)
 			return
 		}
 		return p.opts.load_file(p.opts.user, href, p.tmp)
@@ -2190,7 +2364,7 @@ svg_image_bytes :: proc(p: ^Svg_Parser, href: string) -> (data: []u8, ok: bool) 
 	}
 	decoded, derr := base64.decode(string(clean[:]), allocator = p.tmp)
 	if derr != nil {
-		svg_warn(p, "an <image> data URI does not decode")
+		warn(p, "an <image> data URI does not decode")
 		return
 	}
 	return decoded, true
@@ -2199,32 +2373,32 @@ svg_image_bytes :: proc(p: ^Svg_Parser, href: string) -> (data: []u8, ok: bool) 
 // The bitmap an image href names (decoded once per document), or -1;
 // SVG data is returned instead for the caller to convert.
 @(private)
-svg_bitmap :: proc(p: ^Svg_Parser, href: string) -> (bm: i32, svg_data: []u8) {
+bitmap :: proc(p: ^Parser, href: string) -> (bm: i32, svg_data: []u8) {
 	if cached, ok := p.bitmap_of[href]; ok {
 		return cached, nil
 	}
 	bm = -1
-	data, read := svg_image_bytes(p, href)
+	data, read := image_bytes(p, href)
 	if !read {
 		p.bitmap_of[strings.clone(href, p.tmp)] = -1
 		return
 	}
-	if svg_is_svg(data) {
+	if is_svg(data) {
 		return -1, data
 	}
-	pixels, w, h, dok := svg_decode_image(data, p.doc.allocator, p.budget)
+	pixels, w, h, dok := vg.decode_image(data, p.doc.allocator, p.budget)
 	if dok {
 		bm = i32(len(p.doc.bitmaps))
-		append(&p.doc.bitmaps, Svg_Bitmap{pixels, w, h})
+		append(&p.doc.bitmaps, vg.Bitmap{pixels, w, h})
 	} else {
-		svg_warn(p, "<image> %q could not be decoded", href if len(href) < 64 else "data:...")
+		warn(p, "<image> %q could not be decoded", href if len(href) < 64 else "data:...")
 	}
 	p.bitmap_of[strings.clone(href, p.tmp)] = bm
 	return bm, nil
 }
 
 @(private)
-svg_is_svg :: proc(data: []u8) -> bool {
+is_svg :: proc(data: []u8) -> bool {
 	head := string(data[:min(len(data), 1024)])
 	return strings.contains(head, "<svg") || strings.contains(head, ":svg")
 }
@@ -2233,24 +2407,24 @@ svg_is_svg :: proc(data: []u8) -> bool {
 // mapping its viewBox into the image's box (the image's own
 // preserveAspectRatio wins) and clipping to that box.
 @(private)
-svg_convert_svg_image :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32, data: []u8, img: Svg_Image, aspect: Svg_Aspect) {
+convert_svg_image :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32, data: []u8, img: Image, aspect: Aspect) {
 	if p.image_depth >= 4 {
-		svg_warn(p, "SVG images nested too deep are skipped")
+		warn(p, "SVG images nested too deep are skipped")
 		return
 	}
 	doc := p.doc
 	e := &p.x.elements[el]
-	sub: Svg_Parser
-	if svg_parser_open(&sub, doc, data, p.opts, p.sa, p.tmp, p.warned) != nil {
-		svg_warn(p, "an SVG <image> does not parse")
+	sub: Parser
+	if parser_open(&sub, doc, data, p.opts, p.sa, p.tmp, p.warned) != nil {
+		warn(p, "an SVG <image> does not parse")
 		return
 	}
-	defer path_destroy(&sub.path)
+	defer vg.path_destroy(&sub.path)
 	sub.image_depth = p.image_depth + 1
 	sub.budget, sub.depth = p.budget, p.depth
-	root_style := svg_initial_style()
-	sst := svg_compute_style(&sub, 0, &root_style)
-	sw, sh, vb, has_vb := svg_root_size(&sub, &sst)
+	root_style := initial_style()
+	sst := compute_style(&sub, 0, &root_style)
+	sw, sh, vb, has_vb := root_size(&sub, &sst)
 	w, h := img.w, img.h
 	switch {
 	case w <= 0 && h <= 0:
@@ -2266,41 +2440,22 @@ svg_convert_svg_image :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent
 	if !has_vb {
 		vb = {0, 0, sw, sh}
 	}
-	n := svg_new_node(p, .Group, parent)
-	doc.nodes[n].transform = svg_element_transform(p, e, st)
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	n := new_node(p, .Group, parent)
+	doc.nodes[n].transform = element_transform(p, e, st)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 		return
 	}
-	vt := svg_view_box_transform(vb, aspect, w, h)
-	inner := svg_new_node(p, .Group, n)
-	doc.nodes[inner].transform = transform_multiply(vt, transform_translation(img.x, img.y))
+	vt := view_box_transform(vb, aspect, w, h)
+	inner := new_node(p, .Group, n)
+	doc.nodes[inner].transform = vg.transform_multiply(vt, vg.transform_translation(img.x, img.y))
 	doc.nodes[inner].flags += {.Clip_Rect}
-	doc.nodes[inner].clip_rect = svg_rect_transform({0, 0, w, h}, transform_inverse(vt))
-	append(&sub.viewports, Vec2{vb.w, vb.h})
+	doc.nodes[inner].clip_rect = rect_transform({0, 0, w, h}, vg.transform_inverse(vt))
+	append(&sub.viewports, vg.Vec2{vb.w, vb.h})
 	sst.fill_decl, sst.stroke_decl, sst.visible_decl = false, false, false
-	svg_convert_children(&sub, 0, &sst, inner)
-}
-
-// Decodes PNG / JPEG / ... bytes to straight RGBA8 with `allocator`. Images
-// over the budget's (or DEFAULT_LIMITS') Image_Pixels are not decoded.
-svg_decode_image :: proc(data: []u8, allocator: mem.Allocator, budget: ^Budget = nil) -> (pixels: []u8, width, height: u32, ok: bool) {
-	info, ierr := image.info(data)
-	if ierr != nil {
-		return
-	}
-	if budget != nil && budget_over(budget, .Image_Pixels, info.width * info.height) {
-		return
-	} else if budget == nil && info.width * info.height > DEFAULT_LIMITS[.Image_Pixels] {
-		return
-	}
-	// Only the pixels go in `allocator`; the decoder's scratch is its own.
-	pixels = make([]u8, info.width * info.height * 4, allocator)
-	if image.decode_into(data, pixels) != nil {
-		delete(pixels, allocator)
-		return nil, 0, 0, false
-	}
-	return pixels, u32(info.width), u32(info.height), true
+	sub.deepest = p.depth
+	convert_children(&sub, 0, &sst, inner)
+	p.deepest = max(p.deepest, sub.deepest)
 }
 
 // ---- text ---------------------------------------------------------------------------
@@ -2308,23 +2463,23 @@ svg_decode_image :: proc(data: []u8, allocator: mem.Allocator, budget: ^Budget =
 // Positioning attributes of one text / tspan element (lists, user units),
 // applying from character `start` of the text.
 @(private)
-Svg_Text_Lists :: struct {
+Text_Lists :: struct {
 	start:              int,
 	x, y, dx, dy, rot:  []f32,
 	has_rot:            bool,
 }
 
 @(private)
-Svg_Text_State :: struct {
+Text_State :: struct {
 	text:       i32,
 	chunk:      i32,
 	// The last character emitted was a space (collapsing whitespace).
 	last_space: bool,
-	baseline:   Text_Baseline,
+	baseline:   vg.Text_Baseline,
 	// Characters emitted so far (after whitespace handling).
 	chars:      int,
 	rot:        f32,
-	lists:      [dynamic]Svg_Text_Lists,
+	lists:      [dynamic]Text_Lists,
 	// The textPath the text is in (-1 none), and whether the next
 	// character starts a chunk (entering or leaving one).
 	path:       i32,
@@ -2332,31 +2487,31 @@ Svg_Text_State :: struct {
 }
 
 @(private)
-svg_convert_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32) {
+convert_text :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	doc := p.doc
 	e := &p.x.elements[el]
-	n := svg_new_node(p, .Text, parent)
-	doc.nodes[n].transform = svg_element_transform(p, e, st)
-	if !svg_node_effects(p, n, el, st) {
-		svg_drop_node(p, n)
+	n := new_node(p, .Text, parent)
+	doc.nodes[n].transform = element_transform(p, e, st)
+	if !node_effects(p, n, el, st) {
+		drop_node(p, n)
 		return
 	}
 	text := i32(len(doc.texts))
 	piece_start := len(doc.pieces)
-	append(&doc.texts, Svg_Text{chunks = {u32(len(doc.chunks)), 0}})
+	append(&doc.texts, Text{chunks = {u32(len(doc.chunks)), 0}})
 	doc.nodes[n].data = text
-	ts := Svg_Text_State {
+	ts := Text_State {
 		text       = text,
 		chunk      = -1,
 		path       = -1,
 		last_space = true,
 		baseline   = st.baseline,
-		lists      = make([dynamic]Svg_Text_Lists, p.tmp),
+		lists      = make([dynamic]Text_Lists, p.tmp),
 	}
 	cst := st^
 	cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
-	svg_text_push_lists(p, e, &cst, &ts)
-	svg_collect_text(p, el, &cst, &ts)
+	text_push_lists(p, e, &cst, &ts)
+	collect_text(p, el, &cst, &ts)
 	// Trailing whitespace of the whole text goes.
 	t := &doc.texts[text]
 	t.chunks.count = u32(len(doc.chunks)) - t.chunks.start
@@ -2368,39 +2523,39 @@ svg_convert_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, parent: i32
 		}
 	}
 	if t.chunks.count == 0 {
-		svg_drop_node(p, n)
+		drop_node(p, n)
 		resize(&doc.texts, int(text))
 		return
 	}
-	doc.nodes[n].bbox = svg_text_bbox(p, t^, st.font_size)
+	doc.nodes[n].bbox = text_bbox(p, t^, st.font_size)
 }
 
 // Reads the x / y / dx / dy / rotate lists of a text or tspan.
 @(private)
-svg_text_push_lists :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed, ts: ^Svg_Text_State) {
-	list :: proc(p: ^Svg_Parser, e: ^xml.Element, name: string, axis: int, fs: f32, number: bool) -> (out: []f32, has: bool) {
-		s := svg_attr(e, name) or_return
+text_push_lists :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed, ts: ^Text_State) {
+	list :: proc(p: ^Parser, e: ^xml.Element, name: string, axis: int, fs: f32, number: bool) -> (out: []f32, has: bool) {
+		s := attr(e, name) or_return
 		vals := make([dynamic]f32, p.tmp)
-		sc := Svg_Scanner{s = s}
+		sc := vg.Css_Scanner{s = s}
 		for {
 			if number {
-				v, ok := svg_scan_number(&sc)
+				v, ok := vg.css_scan_number(&sc)
 				if !ok {
 					break
 				}
 				append(&vals, v)
 			} else {
-				l, ok := svg_scan_length(&sc)
+				l, ok := scan_length(&sc)
 				if !ok {
 					break
 				}
-				append(&vals, svg_length_px(l, svg_percent_base(p, axis), fs))
+				append(&vals, length_px(l, percent_base(p, axis), fs))
 			}
 		}
 		return vals[:], true
 	}
 	fs := st.font_size
-	l := Svg_Text_Lists {
+	l := Text_Lists {
 		start = ts.chars,
 	}
 	l.x, _ = list(p, e, "x", 0, fs, false)
@@ -2409,14 +2564,14 @@ svg_text_push_lists :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed, 
 	l.dy, _ = list(p, e, "dy", 1, fs, false)
 	l.rot, l.has_rot = list(p, e, "rotate", 0, fs, true)
 	append(&ts.lists, l)
-	if _, ok := svg_attr(e, "textLength"); ok {
-		svg_warn(p, "textLength is not supported")
+	if _, ok := attr(e, "textLength"); ok {
+		warn(p, "textLength is not supported")
 	}
 }
 
 // The positioning of character `g`: the innermost element with a value.
 @(private)
-svg_text_char_pos :: proc(ts: ^Svg_Text_State, g: int) -> (x, y, dx, dy: Maybe(f32), rot: f32) {
+text_char_pos :: proc(ts: ^Text_State, g: int) -> (x, y, dx, dy: Maybe(f32), rot: f32) {
 	at :: proc(l: []f32, i: int) -> Maybe(f32) {
 		if i >= 0 && i < len(l) {
 			return l[i]
@@ -2440,26 +2595,26 @@ svg_text_char_pos :: proc(ts: ^Svg_Text_State, g: int) -> (x, y, dx, dy: Maybe(f
 }
 
 @(private)
-svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Text_State) {
+collect_text :: proc(p: ^Parser, el: u32, st: ^Computed, ts: ^Text_State) {
 	for v in p.x.elements[el].value {
 		switch c in v {
 		case string:
-			s := svg_text_whitespace(p, c, st.preserve_space, &ts.last_space)
+			s := text_whitespace(p, c, st.preserve_space, &ts.last_space)
 			if s != "" {
-				svg_text_emit(p, s, st, ts)
+				text_emit(p, s, st, ts)
 			}
 		case xml.Element_ID:
 			ce := &p.x.elements[c]
 			if ce.kind != .Element {
 				continue
 			}
-			tag := svg_tag(ce.ident)
+			tag := local_name(ce.ident)
 			switch tag {
 			case "tspan", "a", "textPath":
-				if !svg_conditions_pass(ce) {
+				if !conditions_pass(ce) {
 					continue
 				}
-				cst := svg_compute_style(p, c, st)
+				cst := compute_style(p, c, st)
 				if cst.display_none {
 					// Its characters still take their positions.
 					continue
@@ -2470,23 +2625,23 @@ svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Te
 					if outer >= 0 {
 						continue
 					}
-					ts.path = svg_text_path(p, ce, &cst)
+					ts.path = text_path(p, ce, &cst)
 					if ts.path < 0 {
 						continue
 					}
 					ts.path_break = true
 					// It takes no positions of its own.
-					append(&ts.lists, Svg_Text_Lists{start = ts.chars})
+					append(&ts.lists, Text_Lists{start = ts.chars})
 				} else {
-					svg_text_push_lists(p, ce, &cst, ts)
+					text_push_lists(p, ce, &cst, ts)
 				}
-				svg_collect_text(p, c, &cst, ts)
+				collect_text(p, c, &cst, ts)
 				pop(&ts.lists)
 				if tag == "textPath" {
 					ts.path, ts.path_break = outer, true
 				}
 			case "tref":
-				svg_warn(p, "tref is not supported")
+				warn(p, "tref is not supported")
 			}
 		}
 	}
@@ -2495,49 +2650,49 @@ svg_collect_text :: proc(p: ^Svg_Parser, el: u32, st: ^Svg_Computed, ts: ^Svg_Te
 // The path a textPath runs along (its href, or SVG 2's `path`) in the
 // text's user space, added to `text_paths`; -1 when it names none.
 @(private)
-svg_text_path :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed) -> i32 {
+text_path :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed) -> i32 {
 	doc := p.doc
 	path := &p.path
-	path_reset(path)
+	vg.path_reset(path)
 	// The referenced path's transform maps it into the text's space.
-	t := TRANSFORM_IDENTITY
-	if data, ok := svg_attr(e, "path"); ok {
-		path_svg(path, data)
+	t := vg.TRANSFORM_IDENTITY
+	if data, ok := attr(e, "path"); ok {
+		vg.path_svg(path, data)
 	} else {
-		href, _ := svg_href(e)
-		el, found := svg_ref(p, href)
-		if !found || svg_tag(p.x.elements[el].ident) != "path" {
+		href, _ := href(e)
+		el, found := ref(p, href)
+		if !found || local_name(p.x.elements[el].ident) != "path" {
 			return -1
 		}
 		pe := &p.x.elements[el]
-		d, _ := svg_attr(pe, "d")
-		path_svg(path, d)
-		t = svg_element_transform(p, pe, st)
+		d, _ := attr(pe, "d")
+		vg.path_svg(path, d)
+		t = element_transform(p, pe, st)
 	}
 	if len(path.verbs) == 0 {
 		return -1
 	}
-	tp := Svg_Text_Path {
+	tp := Text_Path {
 		verbs  = {u32(len(doc.verbs)), u32(len(path.verbs))},
 		coords = {u32(len(doc.coords)), u32(len(path.coords))},
 	}
 	append(&doc.verbs, ..path.verbs[:])
 	for q in path.coords {
-		append(&doc.coords, transform_point(t, q.x, q.y))
+		append(&doc.coords, vg.transform_point(t, q.x, q.y))
 	}
-	if side, ok := svg_attr(e, "side"); ok && strings.trim_space(side) == "right" {
+	if side, ok := attr(e, "side"); ok && strings.trim_space(side) == "right" {
 		tp.side = .Right
 	}
-	if v, ok := svg_attr(e, "startOffset"); ok {
-		if l, lok := svg_parse_length(strings.trim_space(v)); lok {
+	if v, ok := attr(e, "startOffset"); ok {
+		if l, lok := parse_length(strings.trim_space(v)); lok {
 			length: f32
 			if l.unit == .Percent {
-				flat: Flat_Path
-				flat_path_init(&flat, p.tmp)
-				path_flatten_verbs(doc.verbs[tp.verbs.start:][:tp.verbs.count], doc.coords[tp.coords.start:][:tp.coords.count], &flat)
-				length = flat_path_length(&flat)
+				flat: vg.Flat_Path
+				vg.flat_path_init(&flat, p.tmp)
+				vg.path_flatten_verbs(doc.verbs[tp.verbs.start:][:tp.verbs.count], doc.coords[tp.coords.start:][:tp.coords.count], &flat)
+				length = vg.flat_path_length(&flat)
 			}
-			tp.start = svg_length_px(l, length, st.font_size)
+			tp.start = length_px(l, length, st.font_size)
 		}
 	}
 	append(&doc.text_paths, tp)
@@ -2547,11 +2702,11 @@ svg_text_path :: proc(p: ^Svg_Parser, e: ^xml.Element, st: ^Svg_Computed) -> i32
 // Appends the processed text `s` in style `st`, split into pieces where
 // characters are positioned (a new chunk at an absolute x / y).
 @(private)
-svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Text_State) {
+text_emit :: proc(p: ^Parser, s: string, st: ^Computed, ts: ^Text_State) {
 	doc := p.doc
 	// In a clip path the text is geometry, filled white whatever its fill,
-	// as shapes are (svg_shape_style).
-	style := svg_shape_style(p, st)
+	// as shapes are (shape_style).
+	style := shape_style(p, st)
 	if !p.in_clip {
 		style.fill = st.fill
 		if st.stroke_width > 0 {
@@ -2561,14 +2716,14 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 	piece_from := 0
 	cur_dx, cur_dy: f32
 	cur_rot := ts.rot
-	flush :: proc(p: ^Svg_Parser, s: string, from, to: int, st: ^Svg_Computed, ts: ^Svg_Text_State, style: Svg_Style, dx, dy, rot: f32) {
+	flush :: proc(p: ^Parser, s: string, from, to: int, st: ^Computed, ts: ^Text_State, style: Style, dx, dy, rot: f32) {
 		if to <= from {
 			return
 		}
 		doc := p.doc
 		append(
 			&doc.pieces,
-			Svg_Text_Piece {
+			Text_Piece {
 				text = s[from:to],
 				families = st.families,
 				size = st.font_size,
@@ -2588,7 +2743,7 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 		ch.pieces.count = u32(len(doc.pieces)) - ch.pieces.start
 	}
 	for _, off in s {
-		x, y, dx, dy, rot := svg_text_char_pos(ts, ts.chars)
+		x, y, dx, dy, rot := text_char_pos(ts, ts.chars)
 		_, has_x := x.?
 		_, has_y := y.?
 		new_chunk := has_x || has_y || ts.chunk < 0 || ts.path_break
@@ -2602,7 +2757,7 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 			// The text's first chunk starts at its x, y (0 by default) unless
 			// it runs along a path.
 			first := ts.chunk < 0 && ts.path < 0
-			append(&doc.chunks, Svg_Text_Chunk{x = x.? or_else 0, y = y.? or_else 0, has_x = has_x || first, has_y = has_y || first, anchor = st.anchor, baseline = ts.baseline, pieces = {u32(len(doc.pieces)), 0}, path = ts.path, path_start = ts.path_break})
+			append(&doc.chunks, Text_Chunk{x = x.? or_else 0, y = y.? or_else 0, has_x = has_x || first, has_y = has_y || first, anchor = st.anchor, baseline = ts.baseline, pieces = {u32(len(doc.pieces)), 0}, path = ts.path, path_start = ts.path_break})
 			ts.chunk = i32(len(doc.chunks) - 1)
 			ts.path_break = false
 		}
@@ -2616,14 +2771,14 @@ svg_text_emit :: proc(p: ^Svg_Parser, s: string, st: ^Svg_Computed, ts: ^Svg_Tex
 // whitespace is a space, runs collapse (across tspans), the text's leading
 // and trailing spaces go. xml:space="preserve" keeps every space.
 @(private)
-svg_text_whitespace :: proc(p: ^Svg_Parser, s: string, preserve: bool, last_space: ^bool) -> string {
+text_whitespace :: proc(p: ^Parser, s: string, preserve: bool, last_space: ^bool) -> string {
 	out := make([]u8, len(s), p.sa)
 	n := 0
 	src := transmute([]u8)s
 	for i := 0; i < len(src); i += 1 {
 		c := src[i]
 		if c == 0xEE && i + 2 < len(src) && src[i + 1] == 0x80 && src[i + 2] == 0x80 {
-			// SVG_SPACE: whitespace protected from the XML reader.
+			// SPACE: whitespace protected from the XML reader.
 			c = ' '
 			i += 2
 		}
@@ -2654,26 +2809,26 @@ svg_text_whitespace :: proc(p: ^Svg_Parser, s: string, preserve: bool, last_spac
 
 // The text's bounding box: laid out with the parse fonts, else estimated.
 @(private)
-svg_text_bbox :: proc(p: ^Svg_Parser, t: Svg_Text, font_size: f32) -> Rect {
+text_bbox :: proc(p: ^Parser, t: Text, font_size: f32) -> vg.Rect {
 	doc := p.doc
-	box := SVG_EMPTY_BOX
+	box := EMPTY_BOX
 	if p.opts.fonts != nil {
-		l: Text_Layout
-		pieces := make([dynamic]Text_Piece, p.tmp)
-		tp: Text_Path
-		text_path_init(&tp, p.tmp)
-		defer text_layout_destroy(&l)
-		pen: Vec2
+		l: vg.Text_Layout
+		pieces := make([dynamic]vg.Text_Piece, p.tmp)
+		tp: vg.Text_Path
+		vg.text_path_init(&tp, p.tmp)
+		defer vg.text_layout_destroy(&l)
+		pen: vg.Vec2
 		along: f32
 		for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
-			pen, along = svg_layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, along, &l, &pieces, &tp)
+			pen, along = layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, along, &l, &pieces, &tp)
 			if len(l.glyphs) > 0 {
-				box = svg_box_union(box, {l.min.x, l.min.y, l.max.x - l.min.x, l.max.y - l.min.y})
+				box = box_union(box, {l.min.x, l.min.y, l.max.x - l.min.x, l.max.y - l.min.y})
 			}
 		}
 		return box
 	}
-	pen: Vec2
+	pen: vg.Vec2
 	for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
 		ch := &doc.chunks[ci]
 		x := ch.x if ch.has_x else pen.x
@@ -2686,7 +2841,7 @@ svg_text_bbox :: proc(p: ^Svg_Parser, t: Svg_Text, font_size: f32) -> Rect {
 			size = pc.size
 		}
 		x0 := x - (w if ch.anchor == .Right else (w / 2 if ch.anchor == .Center else 0))
-		box = svg_box_union(box, {x0, y - size * 0.8, w, size})
+		box = box_union(box, {x0, y - size * 0.8, w, size})
 		pen = {x0 + w, y}
 	}
 	return box
@@ -2695,7 +2850,7 @@ svg_text_bbox :: proc(p: ^Svg_Parser, t: Svg_Text, font_size: f32) -> Rect {
 // Lays out one chunk into `l` from the pen position left by the previous
 // chunk (and its distance along a path); returns where this one ends.
 // `pieces` and `tp` are scratch.
-svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_Text_Chunk, pen: Vec2, along: f32, l: ^Text_Layout, pieces: ^[dynamic]Text_Piece, tp: ^Text_Path) -> (end: Vec2, end_along: f32) {
+layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk, pen: vg.Vec2, along: f32, l: ^vg.Text_Layout, pieces: ^[dynamic]vg.Text_Piece, tp: ^vg.Text_Path) -> (end: vg.Vec2, end_along: f32) {
 	clear(pieces)
 	y := ch.y if ch.has_y else pen.y
 	x := ch.x if ch.has_x else pen.x
@@ -2706,11 +2861,11 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	}
 	total_dy: f32
 	for &pc, i in doc.pieces[ch.pieces.start:][:ch.pieces.count] {
-		family := svg_pick_family(fonts, doc, pc.families)
-		append(pieces, Text_Piece{pc.text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
+		family := pick_family(fonts, doc, pc.families)
+		append(pieces, vg.Text_Piece{pc.text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
 		total_dy += pc.dy
 	}
-	text_layout(fonts, pieces[:], {x = x, y = y, baseline = ch.baseline}, l)
+	vg.text_layout(fonts, pieces[:], {x = x, y = y, baseline = ch.baseline}, l)
 	if len(l.glyphs) == 0 {
 		return ({x, y + total_dy} if ch.path < 0 else pen), x
 	}
@@ -2718,9 +2873,9 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	// letter-spacing not), as resvg does.
 	lo, hi := f32(1e30), f32(-1e30)
 	for run in l.runs {
-		font := text_layout_font(l, run)
+		font := vg.text_layout_font(l, run)
 		for g in l.glyphs[run.first:][:run.count] {
-			adv, _ := font_glyph_advance(font, g.glyph)
+			adv, _ := vg.font_glyph_advance(font, g.glyph)
 			lo = min(lo, g.x)
 			hi = max(hi, g.x + f32(adv) * run.em)
 		}
@@ -2748,19 +2903,19 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 	tpd := &doc.text_paths[ch.path]
 	// Segments in proportion to the text, so it sits alike at any scale.
 	segment := doc.pieces[ch.pieces.start].size / 48
-	text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
+	vg.text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
 	// x = 0 at the anchor, `x` along the path.
 	for &g in l.glyphs {
 		g.x -= x
 	}
-	text_layout_on_path(l, tp, {start = x, side = tpd.side, anchor = ch.anchor})
+	vg.text_layout_on_path(l, tp, {start = x, side = tpd.side, anchor = ch.anchor})
 	// Text after the path continues from its last glyph's end.
 	end = pen
 	#reverse for run in l.runs {
 		for k := run.count - 1; k >= 0; k -= 1 {
 			if turn := l.turns[run.first + k]; turn != {} {
 				g := l.glyphs[run.first + k]
-				adv, _ := font_glyph_advance(text_layout_font(l, run), g.glyph)
+				adv, _ := vg.font_glyph_advance(vg.text_layout_font(l, run), g.glyph)
 				return {g.x, g.y} + turn * (f32(adv) * run.em), end_x
 			}
 		}
@@ -2770,10 +2925,10 @@ svg_layout_chunk :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, ch: ^Svg_T
 
 // The first family of `families` the collection has (generic names map to
 // the collection's fallback), else the first one.
-svg_pick_family :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, families: Range) -> string {
+pick_family :: proc(fonts: ^vg.Font_Collection, doc: ^Document, families: vg.Range) -> string {
 	list := doc.families[families.start:][:families.count]
 	for f in list {
-		if _, found := font_collection_find(fonts, f, 400); found {
+		if _, found := vg.font_collection_find(fonts, f, 400); found {
 			return f
 		}
 	}
@@ -2795,8 +2950,8 @@ svg_pick_family :: proc(fonts: ^Font_Collection, doc: ^Svg_Document, families: R
 // The paint a url() to element `el` gives: a server, a solid color (a
 // one-stop gradient) or none.
 @(private)
-svg_server_paint :: proc(p: ^Svg_Parser, el: u32) -> Svg_Paint {
-	idx := svg_server(p, el)
+server_paint :: proc(p: ^Parser, el: u32) -> Paint {
+	idx := server(p, el)
 	if idx < 0 {
 		return {}
 	}
@@ -2809,7 +2964,7 @@ svg_server_paint :: proc(p: ^Svg_Parser, el: u32) -> Svg_Paint {
 
 // The `href` chain of a paint server / filter, `el` first.
 @(private)
-svg_href_chain :: proc(p: ^Svg_Parser, el: u32, chain: ^[16]u32) -> int {
+href_chain :: proc(p: ^Parser, el: u32, chain: ^[16]u32) -> int {
 	n := 0
 	cur := el
 	for n < len(chain) {
@@ -2821,11 +2976,11 @@ svg_href_chain :: proc(p: ^Svg_Parser, el: u32, chain: ^[16]u32) -> int {
 		}
 		chain[n] = cur
 		n += 1
-		href, has := svg_href(&p.x.elements[cur])
+		href, has := href(&p.x.elements[cur])
 		if !has {
 			break
 		}
-		next, ok := svg_ref(p, href)
+		next, ok := ref(p, href)
 		if !ok {
 			break
 		}
@@ -2837,17 +2992,17 @@ svg_href_chain :: proc(p: ^Svg_Parser, el: u32, chain: ^[16]u32) -> int {
 // The first attribute `name` along the chain (only from elements whose tag
 // is in `tags`, "" = any gradient).
 @(private)
-svg_chain_attr :: proc(p: ^Svg_Parser, chain: []u32, name: string, tag: string = "") -> (v: string, owner: u32, ok: bool) {
+chain_attr :: proc(p: ^Parser, chain: []u32, name: string, tag: string = "") -> (v: string, owner: u32, ok: bool) {
 	for el in chain {
 		e := &p.x.elements[el]
-		t := svg_tag(e.ident)
+		t := local_name(e.ident)
 		if tag != "" && t != tag {
 			continue
 		}
 		if tag == "" && t != "linearGradient" && t != "radialGradient" && t != "pattern" {
 			continue
 		}
-		if val, has := svg_attr(e, name); has {
+		if val, has := attr(e, name); has {
 			return val, el, true
 		}
 	}
@@ -2857,7 +3012,7 @@ svg_chain_attr :: proc(p: ^Svg_Parser, chain: []u32, name: string, tag: string =
 // The computed style of element `el` from the root down (for definitions,
 // which inherit from where they are written, not where they are used).
 @(private)
-svg_style_chain :: proc(p: ^Svg_Parser, el: u32) -> Svg_Computed {
+style_chain :: proc(p: ^Parser, el: u32) -> Computed {
 	path: [64]u32
 	n := 0
 	for cur := el; n < len(path); {
@@ -2868,9 +3023,9 @@ svg_style_chain :: proc(p: ^Svg_Parser, el: u32) -> Svg_Computed {
 		}
 		cur = p.x.elements[cur].parent
 	}
-	st := svg_initial_style()
+	st := initial_style()
 	for i := n - 1; i >= 0; i -= 1 {
-		st = svg_compute_style(p, path[i], &st)
+		st = compute_style(p, path[i], &st)
 	}
 	return st
 }
@@ -2878,7 +3033,7 @@ svg_style_chain :: proc(p: ^Svg_Parser, el: u32) -> Svg_Computed {
 // Definitions converted on first reference, by the document table they
 // go into.
 @(private)
-Svg_Def :: enum u8 {
+Def :: enum u8 {
 	Server, // doc.servers
 	Clip,   // doc.clips
 	Mask,   // doc.masks
@@ -2888,15 +3043,15 @@ Svg_Def :: enum u8 {
 // A definition slot not looked at yet; -2 marks one being converted (a
 // reference back to it is recursive), -1 one that did not convert.
 @(private)
-SVG_DEF_UNSEEN :: -3
+DEF_UNSEEN :: -3
 
 // The conversion of definition `el` when it was seen before (-2 while it
 // is being converted); otherwise marks it as being converted. The caller
 // stores the result in `p.defs[kind][el]`.
 @(private)
-svg_def_seen :: proc(p: ^Svg_Parser, kind: Svg_Def, el: u32) -> (idx: i32, seen: bool) {
+def_seen :: proc(p: ^Parser, kind: Def, el: u32) -> (idx: i32, seen: bool) {
 	slot := &p.defs[kind][el]
-	if slot^ != SVG_DEF_UNSEEN {
+	if slot^ != DEF_UNSEEN {
 		return slot^, true
 	}
 	slot^ = -2
@@ -2904,45 +3059,45 @@ svg_def_seen :: proc(p: ^Svg_Parser, kind: Svg_Def, el: u32) -> (idx: i32, seen:
 }
 
 @(private)
-svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, seen := svg_def_seen(p, .Server, el); seen {
+server :: proc(p: ^Parser, el: u32) -> i32 {
+	if idx, seen := def_seen(p, .Server, el); seen {
 		return max(idx, -1)
 	}
 	idx := i32(-1)
 	defer p.defs[.Server][el] = idx
-	tag := svg_tag(p.x.elements[el].ident)
+	tag := local_name(p.x.elements[el].ident)
 	chain_buf: [16]u32
-	chain := chain_buf[:svg_href_chain(p, el, &chain_buf)]
+	chain := chain_buf[:href_chain(p, el, &chain_buf)]
 	doc := p.doc
-	s: Svg_Server
-	s.transform = TRANSFORM_IDENTITY
+	s: Server
+	s.transform = vg.TRANSFORM_IDENTITY
 	switch tag {
 	case "linearGradient", "radialGradient":
 		s.kind = .Linear if tag == "linearGradient" else .Radial
-		units, _, _ := svg_chain_attr(p, chain, "gradientUnits")
+		units, _, _ := chain_attr(p, chain, "gradientUnits")
 		s.bbox_units = units != "userSpaceOnUse"
-		if sp, _, ok := svg_chain_attr(p, chain, "spreadMethod"); ok {
+		if sp, _, ok := chain_attr(p, chain, "spreadMethod"); ok {
 			s.spread = .Reflect if sp == "reflect" else (.Repeat if sp == "repeat" else .Pad)
 		}
-		if tr, _, ok := svg_chain_attr(p, chain, "gradientTransform"); ok {
-			t, tok := transform_svg(tr)
-			if tok && svg_invertible(t) {
+		if tr, _, ok := chain_attr(p, chain, "gradientTransform"); ok {
+			t, tok := vg.transform_svg(tr)
+			if tok && invertible(t) {
 				s.transform = t
 			}
 		}
-		coord :: proc(p: ^Svg_Parser, chain: []u32, tag, name: string, axis: int, def: string, bbox: bool) -> f32 {
-			v, _, ok := svg_chain_attr(p, chain, name, tag)
+		coord :: proc(p: ^Parser, chain: []u32, tag, name: string, axis: int, def: string, bbox: bool) -> f32 {
+			v, _, ok := chain_attr(p, chain, name, tag)
 			if !ok {
 				v = def
 			}
-			l, lok := svg_parse_length(strings.trim_space(v))
+			l, lok := parse_length(strings.trim_space(v))
 			if !lok {
-				l, _ = svg_parse_length(def)
+				l, _ = parse_length(def)
 			}
 			if bbox {
 				return l.v / 100 if l.unit == .Percent else l.v
 			}
-			return svg_length_px(l, svg_percent_base(p, axis), 16)
+			return length_px(l, percent_base(p, axis), 16)
 		}
 		b := s.bbox_units
 		if s.kind == .Linear {
@@ -2951,8 +3106,8 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			cx := coord(p, chain, tag, "cx", 0, "50%", b)
 			cy := coord(p, chain, tag, "cy", 1, "50%", b)
 			r := coord(p, chain, tag, "r", 2, "50%", b)
-			_, _, has_fx := svg_chain_attr(p, chain, "fx", tag)
-			_, _, has_fy := svg_chain_attr(p, chain, "fy", tag)
+			_, _, has_fx := chain_attr(p, chain, "fx", tag)
+			_, _, has_fy := chain_attr(p, chain, "fy", tag)
 			fx := coord(p, chain, tag, "fx", 0, "50%", b) if has_fx else cx
 			fy := coord(p, chain, tag, "fy", 1, "50%", b) if has_fy else cy
 			fr := coord(p, chain, tag, "fr", 2, "0%", b)
@@ -2964,23 +3119,23 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		// Stops come from the first element of the chain that has any.
 		for g in chain {
 			ge := &p.x.elements[g]
-			gt := svg_tag(ge.ident)
+			gt := local_name(ge.ident)
 			if gt != "linearGradient" && gt != "radialGradient" {
 				continue
 			}
-			gst := svg_style_chain(p, g)
+			gst := style_chain(p, g)
 			start := len(doc.stops)
 			last: f32 = 0
 			for v in ge.value {
 				c, ok := v.(xml.Element_ID)
-				if !ok || svg_tag(p.x.elements[c].ident) != "stop" {
+				if !ok || local_name(p.x.elements[c].ident) != "stop" {
 					continue
 				}
 				ce := &p.x.elements[c]
-				sst := svg_compute_style(p, c, &gst)
+				sst := compute_style(p, c, &gst)
 				off: f32
-				if os, has := svg_attr(ce, "offset"); has {
-					if l, lok := svg_parse_length(strings.trim_space(os)); lok && (l.unit == .None || l.unit == .Percent) {
+				if os, has := attr(ce, "offset"); has {
+					if l, lok := parse_length(strings.trim_space(os)); lok && (l.unit == .None || l.unit == .Percent) {
 						off = l.v / 100 if l.unit == .Percent else l.v
 					}
 				}
@@ -2989,7 +3144,7 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				last = off
 				col := sst.stop_color
 				col.a *= sst.stop_opacity
-				append(&doc.stops, Gradient_Stop{off, col})
+				append(&doc.stops, vg.Gradient_Stop{off, col})
 			}
 			if len(doc.stops) > start {
 				s.stops = {u32(start), u32(len(doc.stops) - start)}
@@ -3008,28 +3163,28 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		}
 	case "pattern":
 		s.kind = .Pattern
-		units, _, _ := svg_chain_attr(p, chain, "patternUnits", "pattern")
+		units, _, _ := chain_attr(p, chain, "patternUnits", "pattern")
 		s.bbox_units = units != "userSpaceOnUse"
-		cunits, _, _ := svg_chain_attr(p, chain, "patternContentUnits", "pattern")
+		cunits, _, _ := chain_attr(p, chain, "patternContentUnits", "pattern")
 		s.content_bbox = cunits == "objectBoundingBox"
-		if tr, _, ok := svg_chain_attr(p, chain, "patternTransform", "pattern"); ok {
-			if t, tok := transform_svg(tr); tok && svg_invertible(t) {
+		if tr, _, ok := chain_attr(p, chain, "patternTransform", "pattern"); ok {
+			if t, tok := vg.transform_svg(tr); tok && invertible(t) {
 				s.transform = t
 			}
 		}
-		num :: proc(p: ^Svg_Parser, chain: []u32, name: string, axis: int, bbox: bool) -> f32 {
-			v, _, ok := svg_chain_attr(p, chain, name, "pattern")
+		num :: proc(p: ^Parser, chain: []u32, name: string, axis: int, bbox: bool) -> f32 {
+			v, _, ok := chain_attr(p, chain, name, "pattern")
 			if !ok {
 				return 0
 			}
-			l, lok := svg_parse_length(strings.trim_space(v))
+			l, lok := parse_length(strings.trim_space(v))
 			if !lok {
 				return 0
 			}
 			if bbox {
 				return l.v / 100 if l.unit == .Percent else l.v
 			}
-			return svg_length_px(l, svg_percent_base(p, axis), 16)
+			return length_px(l, percent_base(p, axis), 16)
 		}
 		b := s.bbox_units
 		s.rect = {num(p, chain, "x", 0, b), num(p, chain, "y", 1, b), num(p, chain, "width", 0, b), num(p, chain, "height", 1, b)}
@@ -3038,13 +3193,13 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		}
 		for g in chain {
 			ge := &p.x.elements[g]
-			if svg_tag(ge.ident) != "pattern" {
+			if local_name(ge.ident) != "pattern" {
 				continue
 			}
-			if vb, ok := svg_view_box(ge); ok && vb.w > 0 && vb.h > 0 {
+			if vb, ok := view_box(ge); ok && vb.w > 0 && vb.h > 0 {
 				s.view_box = vb
 				s.has_view_box = true
-				s.aspect = svg_aspect(ge)
+				s.aspect = aspect(ge)
 				break
 			}
 		}
@@ -3052,7 +3207,7 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		content_el := el
 		for g in chain {
 			ge := &p.x.elements[g]
-			if svg_tag(ge.ident) != "pattern" {
+			if local_name(ge.ident) != "pattern" {
 				continue
 			}
 			has_children := false
@@ -3069,10 +3224,10 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		}
 		saved_clip := p.in_clip
 		p.in_clip = false
-		cst := svg_style_chain(p, content_el)
+		cst := style_chain(p, content_el)
 		cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
-		s.content = svg_new_node(p, .Group, -1)
-		svg_convert_children(p, content_el, &cst, s.content)
+		s.content = new_node(p, .Group, -1)
+		convert_children(p, content_el, &cst, s.content)
 		p.in_clip = saved_clip
 	case:
 		return -1
@@ -3085,10 +3240,10 @@ svg_server :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 // ---- clip paths and masks ---------------------------------------------------------------
 
 @(private)
-svg_clip :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, seen := svg_def_seen(p, .Clip, el); seen {
+clip :: proc(p: ^Parser, el: u32) -> i32 {
+	if idx, seen := def_seen(p, .Clip, el); seen {
 		if idx == -2 {
-			svg_warn(p, "recursive clip-path is skipped")
+			warn(p, "recursive clip-path is skipped")
 		}
 		return max(idx, -1)
 	}
@@ -3096,25 +3251,25 @@ svg_clip :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 	defer p.defs[.Clip][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
-	st := svg_style_chain(p, el)
-	c := Svg_Clip {
-		transform = svg_element_transform(p, e, &st),
+	st := style_chain(p, el)
+	c := Clip {
+		transform = element_transform(p, e, &st),
 		clip      = -1,
 		simple    = -1,
 	}
-	units, _ := svg_attr(e, "clipPathUnits")
+	units, _ := attr(e, "clipPathUnits")
 	c.bbox_units = units == "objectBoundingBox"
 	if st.clip_path != "" {
-		if ref, ok := svg_ref(p, st.clip_path); ok {
-			c.clip = svg_clip(p, ref)
+		if ref, ok := ref(p, st.clip_path); ok {
+			c.clip = clip(p, ref)
 		}
 	}
 	saved := p.in_clip
 	p.in_clip = true
-	c.content = svg_new_node(p, .Group, -1)
+	c.content = new_node(p, .Group, -1)
 	cst := st
 	cst.clip_path = ""
-	svg_convert_children(p, el, &cst, c.content)
+	convert_children(p, el, &cst, c.content)
 	p.in_clip = saved
 	root := &doc.nodes[c.content]
 	if c.clip < 0 && root.first_child >= 0 && root.first_child == root.last_child {
@@ -3129,10 +3284,10 @@ svg_clip :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 }
 
 @(private)
-svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, seen := svg_def_seen(p, .Mask, el); seen {
+mask :: proc(p: ^Parser, el: u32) -> i32 {
+	if idx, seen := def_seen(p, .Mask, el); seen {
 		if idx == -2 {
-			svg_warn(p, "recursive mask is skipped")
+			warn(p, "recursive mask is skipped")
 		}
 		return max(idx, -1)
 	}
@@ -3140,22 +3295,22 @@ svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 	defer p.defs[.Mask][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
-	st := svg_style_chain(p, el)
-	m := Svg_Mask {
+	st := style_chain(p, el)
+	m := Mask {
 		mask = -1,
 	}
-	units, _ := svg_attr(e, "maskUnits")
+	units, _ := attr(e, "maskUnits")
 	m.bbox_units = units != "userSpaceOnUse"
-	cunits, _ := svg_attr(e, "maskContentUnits")
+	cunits, _ := attr(e, "maskContentUnits")
 	m.content_bbox = cunits == "objectBoundingBox"
 	m.alpha = st.mask_alpha
 	if m.bbox_units {
 		frac :: proc(e: ^xml.Element, name: string, def: f32) -> f32 {
-			v, ok := svg_attr(e, name)
+			v, ok := attr(e, name)
 			if !ok {
 				return def
 			}
-			l, lok := svg_parse_length(strings.trim_space(v))
+			l, lok := parse_length(strings.trim_space(v))
 			if !lok {
 				return def
 			}
@@ -3163,26 +3318,26 @@ svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		}
 		m.rect = {frac(e, "x", -0.1), frac(e, "y", -0.1), frac(e, "width", 1.2), frac(e, "height", 1.2)}
 	} else {
-		vp := svg_viewport(p)
+		vp := viewport(p)
 		m.rect = {
-			svg_attr_length(p, e, "x", 0, -0.1 * vp.x, st.font_size),
-			svg_attr_length(p, e, "y", 1, -0.1 * vp.y, st.font_size),
-			svg_attr_length(p, e, "width", 0, 1.2 * vp.x, st.font_size),
-			svg_attr_length(p, e, "height", 1, 1.2 * vp.y, st.font_size),
+			attr_length(p, e, "x", 0, -0.1 * vp.x, st.font_size),
+			attr_length(p, e, "y", 1, -0.1 * vp.y, st.font_size),
+			attr_length(p, e, "width", 0, 1.2 * vp.x, st.font_size),
+			attr_length(p, e, "height", 1, 1.2 * vp.y, st.font_size),
 		}
 	}
 	if st.mask != "" {
-		if ref, ok := svg_ref(p, st.mask); ok && ref != el {
-			m.mask = svg_mask(p, ref)
+		if ref, ok := ref(p, st.mask); ok && ref != el {
+			m.mask = mask(p, ref)
 		}
 	}
 	saved := p.in_clip
 	p.in_clip = false
-	m.content = svg_new_node(p, .Group, -1)
+	m.content = new_node(p, .Group, -1)
 	cst := st
 	cst.mask, cst.clip_path, cst.filter, cst.opacity = "", "", "", 1
 	cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
-	svg_convert_children(p, el, &cst, m.content)
+	convert_children(p, el, &cst, m.content)
 	p.in_clip = saved
 	idx = i32(len(doc.masks))
 	append(&doc.masks, m)
@@ -3192,33 +3347,33 @@ svg_mask :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 // ---- filters --------------------------------------------------------------------------
 
 @(private)
-svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
-	if idx, seen := svg_def_seen(p, .Filter, el); seen {
+filter_def :: proc(p: ^Parser, el: u32) -> i32 {
+	if idx, seen := def_seen(p, .Filter, el); seen {
 		return max(idx, -1)
 	}
 	idx := i32(-1)
 	defer p.defs[.Filter][el] = idx
 	doc := p.doc
 	e := &p.x.elements[el]
-	st := svg_style_chain(p, el)
-	f: Svg_Filter
-	units, _ := svg_attr(e, "filterUnits")
+	st := style_chain(p, el)
+	f: Filter
+	units, _ := attr(e, "filterUnits")
 	if units == "userSpaceOnUse" {
-		vp := svg_viewport(p)
+		vp := viewport(p)
 		f.region = {
 			units = .User_Space_On_Use,
-			x     = svg_attr_length(p, e, "x", 0, -0.1 * vp.x, st.font_size),
-			y     = svg_attr_length(p, e, "y", 1, -0.1 * vp.y, st.font_size),
-			w     = svg_attr_length(p, e, "width", 0, 1.2 * vp.x, st.font_size),
-			h     = svg_attr_length(p, e, "height", 1, 1.2 * vp.y, st.font_size),
+			x     = attr_length(p, e, "x", 0, -0.1 * vp.x, st.font_size),
+			y     = attr_length(p, e, "y", 1, -0.1 * vp.y, st.font_size),
+			w     = attr_length(p, e, "width", 0, 1.2 * vp.x, st.font_size),
+			h     = attr_length(p, e, "height", 1, 1.2 * vp.y, st.font_size),
 		}
 	} else {
 		frac :: proc(e: ^xml.Element, name: string, def: f32) -> f32 {
-			v, ok := svg_attr(e, name)
+			v, ok := attr(e, name)
 			if !ok {
 				return def
 			}
-			l, lok := svg_parse_length(strings.trim_space(v))
+			l, lok := parse_length(strings.trim_space(v))
 			if !lok {
 				return def
 			}
@@ -3236,7 +3391,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		// An empty region filters the element away.
 		return -1
 	}
-	pu, _ := svg_attr(e, "primitiveUnits")
+	pu, _ := attr(e, "primitiveUnits")
 	f.prim_bbox = pu == "objectBoundingBox"
 
 	names := make(map[string]u16, 8, p.tmp)
@@ -3245,17 +3400,17 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 	value_start := len(doc.filter_values)
 	bitmap_start := len(doc.filter_bitmaps)
 	// Appends a number list to the filter's values: (first, count).
-	number_list :: proc(doc: ^Svg_Document, value_start: int, v: string) -> (first, count: u16) {
+	number_list :: proc(doc: ^Document, value_start: int, v: string) -> (first, count: u16) {
 		first = u16(len(doc.filter_values) - value_start)
-		sc := Svg_Scanner{s = v}
+		sc := vg.Css_Scanner{s = v}
 		for {
-			x, ok := svg_scan_number(&sc)
+			x, ok := vg.css_scan_number(&sc)
 			if !ok {
 				break
 			}
 			append(&doc.filter_values, x)
 		}
-		svg_skip_ws(&sc)
+		vg.css_skip_ws(&sc)
 		if sc.pos < len(sc.s) {
 			// Not a plain number list: none (as usvg).
 			resize(&doc.filter_values, value_start + int(first))
@@ -3263,8 +3418,8 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		return first, u16(len(doc.filter_values) - value_start) - first
 	}
 	first := true
-	ref_of :: proc(p: ^Svg_Parser, e: ^xml.Element, name: string, names: map[string]u16) -> Filter_Ref {
-		v, ok := svg_attr(e, name)
+	ref_of :: proc(p: ^Parser, e: ^xml.Element, name: string, names: map[string]u16) -> vg.Filter_Ref {
+		v, ok := attr(e, name)
 		if !ok {
 			return {kind = .Previous}
 		}
@@ -3275,7 +3430,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		case "SourceAlpha":
 			return {kind = .Source_Alpha}
 		case "BackgroundImage", "BackgroundAlpha", "FillPaint", "StrokePaint":
-			svg_warn(p, "filter input %s is not supported (SourceGraphic is used)", v)
+			warn(p, "filter input %s is not supported (SourceGraphic is used)", v)
 			return {kind = .Source_Graphic}
 		}
 		if i, found := names[v]; found {
@@ -3284,11 +3439,11 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		return {kind = .Previous}
 	}
 	num :: proc(e: ^xml.Element, name: string, def: f32) -> f32 {
-		v, ok := svg_attr(e, name)
+		v, ok := attr(e, name)
 		if !ok {
 			return def
 		}
-		n, nok := svg_parse_number(strings.trim_space(v))
+		n, nok := parse_number(strings.trim_space(v))
 		return n if nok else def
 	}
 	for v in e.value {
@@ -3297,31 +3452,31 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			continue
 		}
 		ce := &p.x.elements[c]
-		tag := svg_tag(ce.ident)
-		pst := svg_compute_style(p, c, &st)
+		tag := local_name(ce.ident)
+		pst := compute_style(p, c, &st)
 		if first {
 			f.srgb = pst.srgb_filters
 		} else if pst.srgb_filters != f.srgb {
-			svg_warn(p, "mixed color-interpolation-filters in one filter are not supported")
+			warn(p, "mixed color-interpolation-filters in one filter are not supported")
 		}
-		sub: Svg_Subregion
+		sub: Subregion
 		for name, k in ([4]string{"x", "y", "width", "height"}) {
-			v, has := svg_attr(ce, name)
+			v, has := attr(ce, name)
 			if !has {
 				continue
 			}
-			l, lok := svg_parse_length(strings.trim_space(v))
+			l, lok := parse_length(strings.trim_space(v))
 			if !lok {
 				continue
 			}
 			if f.prim_bbox {
 				sub.v[k] = l.v / 100 if l.unit == .Percent else l.v
 			} else {
-				sub.v[k] = svg_length_px(l, svg_percent_base(p, k % 2), st.font_size)
+				sub.v[k] = length_px(l, percent_base(p, k % 2), st.font_size)
 			}
 			sub.set |= 1 << u8(k)
 		}
-		prim := Filter_Primitive {
+		prim := vg.Filter_Primitive {
 			in1 = ref_of(p, ce, "in", names),
 			in2 = ref_of(p, ce, "in2", names),
 		}
@@ -3330,14 +3485,14 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.op = .Gaussian_Blur if tag == "feGaussianBlur" else .Drop_Shadow
 			def: f32 = 0 if tag == "feGaussianBlur" else 2
 			sx, sy := def, def
-			if s, has := svg_attr(ce, "stdDeviation"); has {
-				sc := Svg_Scanner{s = s}
-				if a, aok := svg_scan_number(&sc); aok {
+			if s, has := attr(ce, "stdDeviation"); has {
+				sc := vg.Css_Scanner{s = s}
+				if a, aok := vg.css_scan_number(&sc); aok {
 					sx, sy = a, a
-					if b, bok := svg_scan_number(&sc); bok {
+					if b, bok := vg.css_scan_number(&sc); bok {
 						sy = b
 					}
-					if _, more := svg_scan_number(&sc); more {
+					if _, more := vg.css_scan_number(&sc); more {
 						// More than two values: invalid, no blur.
 						sx, sy = 0, 0
 					}
@@ -3363,7 +3518,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.color.a *= pst.flood_opacity
 		case "feComposite":
 			prim.op = .Composite
-			op, _ := svg_attr(ce, "operator")
+			op, _ := attr(ce, "operator")
 			switch op {
 			case "in":
 				prim.composite = .In
@@ -3383,35 +3538,35 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			}
 		case "feBlend":
 			prim.op = .Blend
-			mode, _ := svg_attr(ce, "mode")
-			prim.blend = svg_blend_mode(mode)
+			mode, _ := attr(ce, "mode")
+			prim.blend = blend_mode(mode)
 		case "feColorMatrix":
 			prim.op = .Color_Matrix
-			kind, _ := svg_attr(ce, "type")
-			vals, _ := svg_attr(ce, "values")
+			kind, _ := attr(ce, "type")
+			vals, _ := attr(ce, "values")
 			switch kind {
 			case "saturate":
-				s, sok := svg_parse_number(strings.trim_space(vals))
-				prim.color_matrix = color_matrix_saturate(clamp(s, 0, 1e9) if sok else 1).m
+				s, sok := parse_number(strings.trim_space(vals))
+				prim.color_matrix = vg.color_matrix_saturate(clamp(s, 0, 1e9) if sok else 1).m
 			case "hueRotate":
-				h, hok := svg_parse_number(strings.trim_space(vals))
-				prim.color_matrix = color_matrix_hue_rotate(h if hok else 0).m
+				h, hok := parse_number(strings.trim_space(vals))
+				prim.color_matrix = vg.color_matrix_hue_rotate(h if hok else 0).m
 			case "luminanceToAlpha":
-				prim.color_matrix = color_matrix_luminance_to_alpha().m
+				prim.color_matrix = vg.color_matrix_luminance_to_alpha().m
 			case:
-				prim.color_matrix = COLOR_MATRIX_IDENTITY.m
-				sc := Svg_Scanner{s = vals}
+				prim.color_matrix = vg.COLOR_MATRIX_IDENTITY.m
+				sc := vg.Css_Scanner{s = vals}
 				m: [20]f32
 				n := 0
 				for n < 20 {
-					x, xok := svg_scan_number(&sc)
+					x, xok := vg.css_scan_number(&sc)
 					if !xok {
 						break
 					}
 					m[n] = x
 					n += 1
 				}
-				_, extra := svg_scan_number(&sc)
+				_, extra := vg.css_scan_number(&sc)
 				if n == 20 && !extra {
 					prim.color_matrix = m
 				}
@@ -3421,7 +3576,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.merge_first = u16(len(doc.filter_refs) - ref_start)
 			for mv in ce.value {
 				mc, mok := mv.(xml.Element_ID)
-				if !mok || svg_tag(p.x.elements[mc].ident) != "feMergeNode" {
+				if !mok || local_name(p.x.elements[mc].ident) != "feMergeNode" {
 					continue
 				}
 				append(&doc.filter_refs, ref_of(p, &p.x.elements[mc], "in", names))
@@ -3429,7 +3584,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.merge_count = u16(len(doc.filter_refs) - ref_start) - prim.merge_first
 		case "feComponentTransfer":
 			prim.op = .Component_Transfer
-			prim.transfer = TRANSFER_IDENTITY
+			prim.transfer = vg.TRANSFER_IDENTITY
 			for fv in ce.value {
 				fc, fok := fv.(xml.Element_ID)
 				if !fok {
@@ -3437,7 +3592,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				}
 				fe := &p.x.elements[fc]
 				k := -1
-				switch svg_tag(fe.ident) {
+				switch local_name(fe.ident) {
 				case "feFuncR":
 					k = 0
 				case "feFuncG":
@@ -3447,16 +3602,16 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				case "feFuncA":
 					k = 3
 				}
-				kind, has_kind := svg_attr(fe, "type")
+				kind, has_kind := attr(fe, "type")
 				if k < 0 || !has_kind {
 					continue
 				}
-				fn := TRANSFER_IDENTITY
+				fn := vg.TRANSFER_IDENTITY
 				switch strings.trim_space(kind) {
 				case "identity":
 				case "table", "discrete":
 					fn.kind = .Table if strings.trim_space(kind) == "table" else .Discrete
-					if tv, has := svg_attr(fe, "tableValues"); has {
+					if tv, has := attr(fe, "tableValues"); has {
 						fn.first, fn.count = number_list(doc, value_start, tv)
 					}
 				case "linear":
@@ -3475,17 +3630,17 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			}
 		case "feMorphology":
 			prim.op = .Morphology
-			op, _ := svg_attr(ce, "operator")
+			op, _ := attr(ce, "operator")
 			prim.dilate = strings.trim_space(op) == "dilate"
 			// As usvg: a zero radius counts as 1, a negative one leaves
 			// the default (1).
 			prim.radius = {1, 1}
-			if r, has := svg_attr(ce, "radius"); has {
-				sc := Svg_Scanner{s = r}
+			if r, has := attr(ce, "radius"); has {
+				sc := vg.Css_Scanner{s = r}
 				vals: [3]f32
 				n := 0
 				for n < 3 {
-					x, xok := svg_scan_number(&sc)
+					x, xok := vg.css_scan_number(&sc)
 					if !xok {
 						break
 					}
@@ -3506,12 +3661,12 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			}
 		case "feTurbulence":
 			prim.op = .Turbulence
-			if bf, has := svg_attr(ce, "baseFrequency"); has {
-				sc := Svg_Scanner{s = bf}
+			if bf, has := attr(ce, "baseFrequency"); has {
+				sc := vg.Css_Scanner{s = bf}
 				vals: [3]f32
 				n := 0
 				for n < 3 {
-					x, xok := svg_scan_number(&sc)
+					x, xok := vg.css_scan_number(&sc)
 					if !xok {
 						break
 					}
@@ -3529,11 +3684,11 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				}
 			}
 			octaves := math.round(clamp(num(ce, "numOctaves", 1), 0, f32(max(i32))))
-			prim.octaves = u32(budget_cap(p.budget, .Turbulence_Octaves, int(octaves)))
+			prim.octaves = u32(vg.budget_cap(p.budget, .Turbulence_Octaves, int(octaves)))
 			prim.seed = i32(math.trunc(num(ce, "seed", 0)))
-			st_, _ := svg_attr(ce, "stitchTiles")
+			st_, _ := attr(ce, "stitchTiles")
 			prim.stitch = strings.trim_space(st_) == "stitch"
-			kind, _ := svg_attr(ce, "type")
+			kind, _ := attr(ce, "type")
 			prim.fractal_noise = strings.trim_space(kind) == "fractalNoise"
 		case "feDiffuseLighting", "feSpecularLighting":
 			prim.op = .Diffuse_Lighting if tag == "feDiffuseLighting" else .Specular_Lighting
@@ -3557,21 +3712,21 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				}
 				le := &p.x.elements[lc]
 				lt := &prim.light
-				switch svg_tag(le.ident) {
+				switch local_name(le.ident) {
 				case "feDistantLight":
 					lt.kind = .Distant
 					lt.azimuth = num(le, "azimuth", 0)
 					lt.elevation = num(le, "elevation", 0)
 				case "fePointLight", "feSpotLight":
-					lt.kind = .Point if svg_tag(le.ident) == "fePointLight" else .Spot
+					lt.kind = .Point if local_name(le.ident) == "fePointLight" else .Spot
 					lt.position = {num(le, "x", 0), num(le, "y", 0), num(le, "z", 0)}
 					lt.points_at = {num(le, "pointsAtX", 0), num(le, "pointsAtY", 0), num(le, "pointsAtZ", 0)}
 					lt.spot_exponent = num(le, "specularExponent", 1)
 					if lt.spot_exponent < 0 {
 						lt.spot_exponent = 1
 					}
-					if ca, has := svg_attr(le, "limitingConeAngle"); has {
-						lt.cone_angle, lt.has_cone = svg_parse_number(strings.trim_space(ca))
+					if ca, has := attr(le, "limitingConeAngle"); has {
+						lt.cone_angle, lt.has_cone = parse_number(strings.trim_space(ca))
 					}
 				case:
 					continue
@@ -3587,20 +3742,20 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			// Images only: an element reference makes transparent black.
 			prim.op = .Flood
 			prim.color = {}
-			href, _ := svg_href(ce)
+			href, _ := href(ce)
 			if strings.has_prefix(href, "#") {
-				svg_warn(p, "<feImage> referencing an element is not supported")
+				warn(p, "<feImage> referencing an element is not supported")
 			} else if strings.has_prefix(href, "http:") || strings.has_prefix(href, "https:") {
-				svg_warn(p, "<feImage> external URLs are not loaded")
+				warn(p, "<feImage> external URLs are not loaded")
 			} else if href != "" {
-				bm, svg_data := svg_bitmap(p, href)
+				bm, svg_data := bitmap(p, href)
 				if svg_data != nil {
-					svg_warn(p, "<feImage> with an SVG image is not supported")
+					warn(p, "<feImage> with an SVG image is not supported")
 				} else if bm >= 0 {
 					prim.op = .Image
 					prim.image = u16(len(doc.filter_bitmaps) - bitmap_start)
 					append(&doc.filter_bitmaps, bm)
-					a := svg_aspect(ce)
+					a := aspect(ce)
 					prim.image_align = a.align
 					prim.image_fit = .None if a.none else (.Slice if a.slice else .Meet)
 				}
@@ -3611,7 +3766,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.op = .Displacement_Map
 			prim.scale = num(ce, "scale", 0)
 			for name, k in ([2]string{"xChannelSelector", "yChannelSelector"}) {
-				v, _ := svg_attr(ce, name)
+				v, _ := attr(ce, name)
 				switch strings.trim_space(v) {
 				case "R":
 					prim.channels[k] = 0
@@ -3626,10 +3781,10 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 		case "feConvolveMatrix":
 			prim.op = .Convolve_Matrix
 			ox, oy := 3, 3
-			if o, has := svg_attr(ce, "order"); has {
-				sc := Svg_Scanner{s = o}
-				x, xok := svg_scan_number(&sc)
-				y, yok := svg_scan_number(&sc)
+			if o, has := attr(ce, "order"); has {
+				sc := vg.Css_Scanner{s = o}
+				x, xok := vg.css_scan_number(&sc)
+				y, yok := vg.css_scan_number(&sc)
 				xi := int(x) if xok else 3
 				yi := int(y) if yok else xi
 				if xi > 0 && yi > 0 {
@@ -3638,7 +3793,7 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			}
 			order_ok := ox <= 255 && oy <= 255
 			sum: f32
-			if km, has := svg_attr(ce, "kernelMatrix"); has && order_ok {
+			if km, has := attr(ce, "kernelMatrix"); has && order_ok {
 				mark := len(doc.filter_values)
 				prim.kernel_first, prim.kernel_count = number_list(doc, value_start, km)
 				if int(prim.kernel_count) != ox * oy {
@@ -3656,10 +3811,10 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			prim.divisor = num(ce, "divisor", sum)
 			prim.bias = num(ce, "bias", 0)
 			target :: proc(e: ^xml.Element, name: string, order: int) -> (int, bool) {
-				v, has := svg_attr(e, name)
+				v, has := attr(e, name)
 				t := order / 2
 				if has {
-					n, nok := svg_parse_number(strings.trim_space(v))
+					n, nok := parse_number(strings.trim_space(v))
 					if nok {
 						t = int(n)
 					}
@@ -3668,20 +3823,20 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 			}
 			tx, txok := target(ce, "targetX", ox)
 			ty, tyok := target(ce, "targetY", oy)
-			edge, _ := svg_attr(ce, "edgeMode")
+			edge, _ := attr(ce, "edgeMode")
 			switch strings.trim_space(edge) {
 			case "none":
 				prim.edge = .None
 			case "wrap":
 				prim.edge = .Wrap
 			}
-			pa, _ := svg_attr(ce, "preserveAlpha")
+			pa, _ := attr(ce, "preserveAlpha")
 			prim.preserve_alpha = strings.trim_space(pa) == "true"
 			if order_ok && txok && tyok {
 				prim.order = {u8(ox), u8(oy)}
 				prim.target = {u8(tx), u8(ty)}
-				if ox * oy > CONVOLVE_MAX_KERNEL {
-					svg_warn(p, "feConvolveMatrix with more than %d kernel values is not supported", CONVOLVE_MAX_KERNEL)
+				if ox * oy > vg.CONVOLVE_MAX_KERNEL {
+					warn(p, "feConvolveMatrix with more than %d kernel values is not supported", vg.CONVOLVE_MAX_KERNEL)
 				}
 			}
 			if !order_ok || !txok || !tyok || prim.kernel_count == 0 || prim.divisor == 0 {
@@ -3689,14 +3844,14 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 				prim.color = {}
 			}
 		case:
-			svg_warn(p, "<%s> is not supported (skipped)", tag)
+			warn(p, "<%s> is not supported (skipped)", tag)
 			continue
 		}
-		if budget_over(p.budget, .Filter_Primitives, len(doc.filter_prims) - prim_start + 1) {
+		if vg.budget_over(p.budget, .Filter_Primitives, len(doc.filter_prims) - prim_start + 1) {
 			break
 		}
 		first = false
-		if r, has := svg_attr(ce, "result"); has && r != "" {
+		if r, has := attr(ce, "result"); has && r != "" {
 			names[r] = u16(len(doc.filter_prims) - prim_start)
 		}
 		append(&doc.filter_prims, prim)
@@ -3718,15 +3873,15 @@ svg_filter_def :: proc(p: ^Svg_Parser, el: u32) -> i32 {
 
 // Bounding boxes bottom-up, then filters that scale with them.
 @(private)
-svg_finish :: proc(p: ^Svg_Parser) {
+finish :: proc(p: ^Parser) {
 	doc := p.doc
-	#reverse for &n in doc.nodes {
-		// display="none" kept for overrides (Off) is not in its parent's
-		// box (SVG: no box), visibility="hidden" is.
-		if n.parent >= 0 && n.bbox.w >= 0 && .Off not_in n.flags {
-			par := &doc.nodes[n.parent]
-			par.bbox = svg_box_union(par.bbox, svg_rect_transform(n.bbox, n.transform))
-		}
+	// Children come after their parent, so a sweep from the last node
+	// finishes each before its parent; a use's definition can come before
+	// it and is finished first.
+	done := make([]bool, len(doc.nodes), p.tmp)
+	stack := make([dynamic]i32, p.tmp)
+	for i := len(doc.nodes) - 1; i >= 0; i -= 1 {
+		finish_box(doc, done, &stack, i32(i))
 	}
 	for &n in doc.nodes {
 		if n.filter < 0 || !(doc.filters[n.filter].prim_bbox || doc.filters[n.filter].subregions) {
@@ -3740,7 +3895,7 @@ svg_finish :: proc(p: ^Svg_Parser) {
 		bw, bh := max(n.bbox.w, 0), max(n.bbox.h, 0)
 		region := f.region
 		region.bbox = n.bbox
-		rr, _ := filter_region_rect(region)
+		rr, _ := vg.filter_region_rect(region)
 		for i in f.primitives.start ..< f.primitives.start + f.primitives.count {
 			prim := doc.filter_prims[i]
 			sub := doc.filter_subs[i]
@@ -3767,7 +3922,7 @@ svg_finish :: proc(p: ^Svg_Parser) {
 				prim.has_subregion = true
 			}
 			append(&doc.filter_prims, prim)
-			append(&doc.filter_subs, Svg_Subregion{})
+			append(&doc.filter_subs, Subregion{})
 		}
 		f.primitives = {u32(start), f.primitives.count}
 		f.prim_bbox = false
@@ -3776,4 +3931,38 @@ svg_finish :: proc(p: ^Svg_Parser) {
 		append(&doc.filters, f)
 	}
 	shrink(&doc.nodes)
+}
+
+// Node `i`'s box: its own, its definition's for a use, and its children's,
+// the last child first.
+@(private)
+finish_box :: proc(doc: ^Document, done: []bool, stack: ^[dynamic]i32, i: i32) {
+	if done[i] {
+		return
+	}
+	done[i] = true
+	if doc.nodes[i].kind == .Use {
+		finish_box(doc, done, stack, doc.nodes[i].data)
+		merge_box(doc, i, doc.nodes[i].data)
+	}
+	start := len(stack)
+	for c := doc.nodes[i].first_child; c >= 0; c = doc.nodes[c].next {
+		append(stack, c)
+	}
+	for k := len(stack) - 1; k >= start; k -= 1 {
+		finish_box(doc, done, stack, stack[k])
+		merge_box(doc, i, stack[k])
+	}
+	resize(stack, start)
+}
+
+// display="none" kept for overrides (Off) is not in its parent's box (SVG:
+// no box), visibility="hidden" is.
+@(private)
+merge_box :: proc(doc: ^Document, into, child: i32) {
+	c := &doc.nodes[child]
+	if c.bbox.w >= 0 && .Off not_in c.flags {
+		n := &doc.nodes[into]
+		n.bbox = box_union(n.bbox, rect_transform(c.bbox, c.transform))
+	}
 }

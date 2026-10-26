@@ -19,9 +19,10 @@ env:
 # writing) through `-collection:deps=..`, so the job checks them out side by
 # side:
 #   $GITHUB_WORKSPACE/{ovg,oglyph,odecs}
-# Both are pinned to the tags onimite builds with. The core package and the
-# software backend are tested; the SDL_GPU backend (sdlgpu/) is type-checked
-# only, since hosted runners have no GPU and `odin check` needs no SDL3 library.
+# Both are pinned to the tags onimite builds with. The core package with the
+# software backend, curves, svg and lottie are tested; the SDL_GPU backend
+# (sdlgpu/) is type-checked only, since hosted runners have no GPU and
+# `odin check` needs no SDL3 library.
 
 jobs:
   test:
@@ -86,6 +87,8 @@ jobs:
           mkdir -p build
           odin test . -collection:deps=.. -vet -strict-style -out:build/ovg_test
           odin test curves -vet -strict-style -out:build/curves_test
+          odin test svg -collection:deps=.. -vet -strict-style -out:build/svg_test
+          odin test lottie -collection:deps=.. -vet -strict-style -out:build/lottie_test
 
       - name: SVG and Lottie suites (Linux)
         # Renders vs resvg and lottie-web references; run.sh uses GNU timeout.

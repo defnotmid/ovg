@@ -23,6 +23,7 @@ import "core:strings"
 import "core:time"
 import image "deps:odecs/image"
 
+import "../../svg"
 import vg "../.."
 
 Options :: struct {
@@ -122,8 +123,8 @@ main :: proc() {
 	defer vg.canvas_destroy(&c)
 	ls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&ls, &c)
-	r: vg.Svg_Renderer
-	defer vg.svg_renderer_destroy(&r, &c)
+	r: svg.Renderer
+	defer svg.renderer_destroy(&r, &c)
 
 	results := make([dynamic]Result)
 	root := ""
@@ -215,7 +216,7 @@ collect :: proc(path: string, files: ^[dynamic]string) {
 	}
 }
 
-run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^vg.Layer_Stack, r: ^vg.Svg_Renderer, fonts: ^vg.Font_Collection, opts: Options) -> (res: Result) {
+run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^vg.Layer_Stack, r: ^svg.Renderer, fonts: ^vg.Font_Collection, opts: Options) -> (res: Result) {
 	png_path := strings.concatenate({svg_path[:len(svg_path) - 4], ".png"}, context.temp_allocator)
 	png, perr := os.read_entire_file(png_path, context.temp_allocator)
 	if perr != nil {
@@ -235,23 +236,23 @@ run_one :: proc(svg_path: string, c: ^vg.Canvas, sw: ^vg.Software_Backend, ls: ^
 	}
 	defer delete(data)
 	loader := Loader{filepath.dir(svg_path)}
-	doc, perr2 := vg.svg_parse(data, {load_file = load_file, user = &loader, fonts = fonts})
-	defer vg.svg_destroy(&doc)
-	text: vg.Svg_Layout
-	vg.svg_layout(&doc, fonts, &text)
-	defer vg.svg_layout_destroy(&text)
-	vg.svg_renderer_bind(r, c, &doc)
+	doc, perr2 := svg.parse(data, {load_file = load_file, user = &loader, fonts = fonts})
+	defer svg.destroy(&doc)
+	text: svg.Layout
+	svg.layout(&doc, fonts, &text)
+	defer svg.layout_destroy(&text)
+	svg.renderer_bind(r, c, &doc)
 
 	vg.set_size(c, w, h)
 	vg.reset(c)
 	vg.clear_rect(c, 0, 0, w, h, vg.TRANSPARENT)
 	if perr2 == .None && doc.width > 0 && doc.height > 0 {
 		vg.layer_stack_begin(ls, c, w, h, nil, doc.uses_blend)
-		vg.svg_draw(c, ls, r, &doc, &text, vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height))
+		svg.draw(c, ls, r, &doc, &text, vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height))
 		vg.layer_stack_end(ls, c)
 	}
 	vg.flush(c)
-	vg.svg_renderer_unbind(r, c)
+	svg.renderer_unbind(r, c)
 	px := sw.pixels
 	refpx := ref[:w * h * 4]
 	off := 0
@@ -292,12 +293,12 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		os.exit(1)
 	}
 	loader := Loader{filepath.dir(path)}
-	popts := vg.Svg_Parse_Options{load_file = load_file, user = &loader, fonts = fonts}
+	popts := svg.Parse_Options{load_file = load_file, user = &loader, fonts = fonts}
 	parse_best := max(f64)
-	doc: vg.Svg_Document
+	doc: svg.Document
 	for i in 0 ..< n {
 		t0 := time.tick_now()
-		d, perr := vg.svg_parse(data, popts)
+		d, perr := svg.parse(data, popts)
 		dt := time.duration_milliseconds(time.tick_since(t0))
 		if perr != .None {
 			fmt.eprintln("parse failed:", perr)
@@ -307,10 +308,10 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		if i == n - 1 {
 			doc = d
 		} else {
-			vg.svg_destroy(&d)
+			svg.destroy(&d)
 		}
 	}
-	defer vg.svg_destroy(&doc)
+	defer svg.destroy(&doc)
 	w := u32(1000)
 	h := u32(f32(w) * doc.height / doc.width)
 	xf := vg.transform_scaling(f32(w) / doc.width, f32(h) / doc.height)
@@ -321,12 +322,12 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	defer vg.canvas_destroy(&rc)
 	rls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&rls, &rc)
-	rr: vg.Svg_Renderer
-	defer vg.svg_renderer_destroy(&rr, &rc)
-	vg.svg_renderer_bind(&rr, &rc, &doc)
-	text: vg.Svg_Layout
-	vg.svg_layout(&doc, fonts, &text)
-	defer vg.svg_layout_destroy(&text)
+	rr: svg.Renderer
+	defer svg.renderer_destroy(&rr, &rc)
+	svg.renderer_bind(&rr, &rc, &doc)
+	text: svg.Layout
+	svg.layout(&doc, fonts, &text)
+	defer svg.layout_destroy(&text)
 	frame: vg.Recorded_Frame
 	defer vg.recorded_frame_destroy(&frame)
 	record_best := max(f64)
@@ -334,7 +335,7 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 		t0 := time.tick_now()
 		vg.set_size(&rc, w, h)
 		vg.layer_stack_begin(&rls, &rc, w, h, nil, doc.uses_blend)
-		vg.svg_draw(&rc, &rls, &rr, &doc, &text, xf)
+		svg.draw(&rc, &rls, &rr, &doc, &text, xf)
 		vg.layer_stack_end(&rls, &rc)
 		vg.canvas_take(&rc, &frame)
 		record_best = min(record_best, time.duration_milliseconds(time.tick_since(t0)))
@@ -348,16 +349,16 @@ run_bench :: proc(path: string, n: int, fonts: ^vg.Font_Collection) {
 	defer vg.canvas_destroy(&c)
 	ls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&ls, &c)
-	r: vg.Svg_Renderer
-	defer vg.svg_renderer_destroy(&r, &c)
-	vg.svg_renderer_bind(&r, &c, &doc)
+	r: svg.Renderer
+	defer svg.renderer_destroy(&r, &c)
+	svg.renderer_bind(&r, &c, &doc)
 	sw_best := max(f64)
 	for _ in 0 ..< max(n / 4, 1) {
 		t0 := time.tick_now()
 		vg.set_size(&c, w, h)
 		vg.clear_rect(&c, 0, 0, w, h, vg.WHITE)
 		vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
-		vg.svg_draw(&c, &ls, &r, &doc, &text, xf)
+		svg.draw(&c, &ls, &r, &doc, &text, xf)
 		vg.layer_stack_end(&ls, &c)
 		vg.flush(&c)
 		sw_best = min(sw_best, time.duration_milliseconds(time.tick_since(t0)))

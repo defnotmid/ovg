@@ -25,6 +25,7 @@ import "core:strings"
 import "core:time"
 import image "deps:odecs/image"
 
+import "../../lottie"
 import vg "../.."
 
 TEXT_FRAC :: 0.06
@@ -44,7 +45,7 @@ Renderer :: struct {
 	sw: vg.Software_Backend,
 	c:  vg.Canvas,
 	ls: vg.Layer_Stack,
-	r:  vg.Lottie_Renderer,
+	r:  lottie.Renderer,
 }
 
 renderer_init :: proc(rd: ^Renderer) {
@@ -53,30 +54,30 @@ renderer_init :: proc(rd: ^Renderer) {
 }
 
 renderer_destroy :: proc(rd: ^Renderer) {
-	vg.lottie_renderer_destroy(&rd.r, &rd.c)
+	lottie.renderer_destroy(&rd.r, &rd.c)
 	vg.layer_stack_destroy(&rd.ls, &rd.c)
 	vg.canvas_destroy(&rd.c)
 	vg.software_backend_destroy(&rd.sw)
 }
 
 // Draws `frame` over white at the composition's size.
-draw :: proc(rd: ^Renderer, doc: ^vg.Lottie_Document, frame: f32) {
+draw :: proc(rd: ^Renderer, doc: ^lottie.Document, frame: f32) {
 	w, h := u32(doc.width), u32(doc.height)
 	c := &rd.c
 	vg.set_size(c, w, h)
 	vg.clear_rect(c, 0, 0, w, h, vg.WHITE)
 	vg.layer_stack_begin(&rd.ls, c, w, h, nil, doc.uses_blend)
-	vg.lottie_draw(c, &rd.ls, &rd.r, doc, frame)
+	lottie.draw(c, &rd.ls, &rd.r, doc, frame)
 	vg.layer_stack_end(&rd.ls, c)
 }
 
-render :: proc(rd: ^Renderer, doc: ^vg.Lottie_Document, frame: f32) -> []u8 {
+render :: proc(rd: ^Renderer, doc: ^lottie.Document, frame: f32) -> []u8 {
 	draw(rd, doc, frame)
 	vg.flush(&rd.c)
 	return rd.sw.pixels
 }
 
-parse_file :: proc(path: string) -> (doc: vg.Lottie_Document, ok: bool) {
+parse_file :: proc(path: string) -> (doc: lottie.Document, ok: bool) {
 	data, err := os.read_entire_file(path, context.allocator)
 	if err != nil {
 		fmt.eprintfln("%s: can not read", path)
@@ -84,11 +85,11 @@ parse_file :: proc(path: string) -> (doc: vg.Lottie_Document, ok: bool) {
 	}
 	defer delete(data)
 	loader := Loader{filepath.dir(path)}
-	perr: vg.Lottie_Error
-	doc, perr = vg.lottie_parse(data, {load_file = load_file, user = &loader})
+	perr: lottie.Error
+	doc, perr = lottie.parse(data, {load_file = load_file, user = &loader})
 	if perr != nil {
 		fmt.eprintfln("%s: %v", path, perr)
-		vg.lottie_destroy(&doc)
+		lottie.destroy(&doc)
 		return
 	}
 	return doc, true
@@ -138,9 +139,9 @@ main :: proc() {
 		if !ok {
 			os.exit(1)
 		}
-		defer vg.lottie_destroy(&doc)
-		vg.lottie_renderer_bind(&rd.r, &rd.c, &doc)
-		defer vg.lottie_renderer_unbind(&rd.r, &rd.c)
+		defer lottie.destroy(&doc)
+		lottie.renderer_bind(&rd.r, &rd.c, &doc)
+		defer lottie.renderer_unbind(&rd.r, &rd.c)
 		for w in doc.warnings {
 			fmt.println("warning:", w)
 		}
@@ -176,7 +177,7 @@ main :: proc() {
 			fmt.printfln("FAIL %s (does not parse)", filepath.base(f))
 			continue
 		}
-		vg.lottie_renderer_bind(&rd.r, &rd.c, &doc)
+		lottie.renderer_bind(&rd.r, &rd.c, &doc)
 		stem := filepath.stem(f)
 		dir := filepath.dir(f)
 		infos, _ := os.read_all_directory_by_path(dir, context.temp_allocator)
@@ -242,8 +243,8 @@ main :: proc() {
 				fmt.printfln("     %s: %s", stem, w)
 			}
 		}
-		vg.lottie_renderer_unbind(&rd.r, &rd.c)
-		vg.lottie_destroy(&doc)
+		lottie.renderer_unbind(&rd.r, &rd.c)
+		lottie.destroy(&doc)
 		free_all(context.temp_allocator)
 	}
 	fmt.printfln("total %d/%d frames (tol %d/255, at most %.1f%% pixels off)", pass, total, tol, frac * 100)
@@ -262,16 +263,16 @@ run_bench :: proc(rd: ^Renderer, path: string, n: int) {
 	runs := 20
 	t0 := time.tick_now()
 	for _ in 0 ..< runs {
-		doc, perr := vg.lottie_parse(data)
+		doc, perr := lottie.parse(data)
 		if perr != nil {
 			fmt.eprintln("parse failed:", perr)
 			return
 		}
-		vg.lottie_destroy(&doc)
+		lottie.destroy(&doc)
 	}
 	parse := time.tick_since(t0) / time.Duration(runs)
 	doc, _ := parse_file(path)
-	defer vg.lottie_destroy(&doc)
+	defer lottie.destroy(&doc)
 	span := doc.out_frame - doc.in_frame
 	// Recording only: evaluation and draw calls, no rasterization.
 	rec: vg.Canvas
@@ -279,18 +280,18 @@ run_bench :: proc(rd: ^Renderer, path: string, n: int) {
 	defer vg.canvas_destroy(&rec)
 	rls: vg.Layer_Stack
 	defer vg.layer_stack_destroy(&rls, &rec)
-	rr: vg.Lottie_Renderer
-	defer vg.lottie_renderer_destroy(&rr, &rec)
-	vg.lottie_renderer_bind(&rr, &rec, &doc)
+	rr: lottie.Renderer
+	defer lottie.renderer_destroy(&rr, &rec)
+	lottie.renderer_bind(&rr, &rec, &doc)
 	w, h := u32(doc.width), u32(doc.height)
-	frame_at :: proc(doc: ^vg.Lottie_Document, i, n: int, span: f32) -> f32 {
+	frame_at :: proc(doc: ^lottie.Document, i, n: int, span: f32) -> f32 {
 		return doc.in_frame + span * f32(i) / f32(max(n, 1))
 	}
 	t1 := time.tick_now()
 	for i in 0 ..< n {
 		vg.set_size(&rec, w, h)
 		vg.layer_stack_begin(&rls, &rec, w, h, nil, doc.uses_blend)
-		vg.lottie_draw(&rec, &rls, &rr, &doc, frame_at(&doc, i, n, span))
+		lottie.draw(&rec, &rls, &rr, &doc, frame_at(&doc, i, n, span))
 		vg.layer_stack_end(&rls, &rec)
 		recorded: vg.Recorded_Frame
 		vg.canvas_take(&rec, &recorded)

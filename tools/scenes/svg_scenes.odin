@@ -1,5 +1,6 @@
 package scenes
 
+import "../../svg"
 import vg "../.."
 
 // The SVG importer (svg.odin) on both backends: shapes, gradients (focal
@@ -41,16 +42,16 @@ SVG_SCENE :: `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="192" v
 </svg>`
 
 @(private = "file")
-svg_overrides := [?]vg.Svg_Override{{id = "ball", transform = vg.Transform2D{1, 0, 0, 1, -6, 4}, opacity = 0.9}}
+svg_overrides := [?]svg.Override{{id = "ball", transform = vg.Transform2D{1, 0, 0, 1, -6, 4}, opacity = 0.9}}
 
 scene_svg :: proc(c: ^vg.Canvas, r: ^Resources) {
 	if !r.svg_ready {
-		r.svg_doc, _ = vg.svg_parse(transmute([]u8)string(SVG_SCENE), {fonts = &r.svg_fonts})
-		vg.svg_layout(&r.svg_doc, &r.svg_fonts, &r.svg_text)
-		vg.svg_renderer_bind(&r.svg, c, &r.svg_doc)
+		r.svg_doc, _ = svg.parse(transmute([]u8)string(SVG_SCENE), {fonts = &r.svg_fonts})
+		svg.layout(&r.svg_doc, &r.svg_fonts, &r.svg_text)
+		svg.renderer_bind(&r.svg_r, c, &r.svg_doc)
 		r.svg_ready = true
 	}
 	vg.layer_stack_begin(&r.layers, c, W, H)
-	vg.svg_draw(c, &r.layers, &r.svg, &r.svg_doc, &r.svg_text, vg.TRANSFORM_IDENTITY, svg_overrides[:])
+	svg.draw(c, &r.layers, &r.svg_r, &r.svg_doc, &r.svg_text, vg.TRANSFORM_IDENTITY, svg_overrides[:])
 	vg.layer_stack_end(&r.layers, c)
 }

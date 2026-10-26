@@ -604,7 +604,7 @@ test_sw_layer_global_alpha :: proc(t: ^testing.T) {
 	defer path_destroy(&p)
 	path_rect(&p, 0, 0, 16, 32)
 
-	// Masked: alpha set after the mask is drawn, as lottie_draw does.
+	// Masked: alpha set after the mask is drawn, as lottie.draw does.
 	clear_rect(c, 0, 0, 32, 32, TRANSPARENT)
 	layer_stack_begin(&ls, c, 32, 32)
 	layer_push(&ls, c, {})
@@ -1031,4 +1031,16 @@ test_sw_zero_length_round_half_smooth :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, u32(outside.x), u32(outside.y)), [4]u8{255, 255, 255, 255})
 	// The square side reaches the corner.
 	testing.expect_value(t, px(&s, 35, 35), [4]u8{0, 0, 0, 255})
+}
+
+@(test)
+test_focal_gradient :: proc(t: ^testing.T) {
+	// At the focal point the gradient is at its first stop, at the outer
+	// circle at its last, whatever the offset.
+	pt := Vec2{-3, 0}
+	testing.expect(t, abs(focal_gradient_t(pt, 10, 0, {-3, 0})) < 1e-4)
+	testing.expect(t, abs(focal_gradient_t({10, 0}, 10, 0, {-3, 0}) - 1) < 1e-4)
+	testing.expect(t, abs(focal_gradient_t({0, -10}, 10, 0, {-3, 0}) - 1) < 1e-4)
+	// Concentric with a focal radius: (|p| - fr) / (r - fr).
+	testing.expect(t, abs(focal_gradient_t({6, 0}, 10, 2, {1e-4, 0}) - 0.5) < 1e-3)
 }

@@ -21,6 +21,8 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "../../svg"
+import "../../lottie"
 import vg "../.."
 
 Result :: struct {
@@ -172,39 +174,39 @@ rand :: proc(r: ^Rng) -> f32 {
 
 Svg_Work :: struct {
 	markup:   string,
-	doc:      vg.Svg_Document,
-	text:     vg.Svg_Layout,
-	renderer: vg.Svg_Renderer,
+	doc:      svg.Document,
+	text:     svg.Layout,
+	renderer: svg.Renderer,
 }
 
 svg_scene_open :: proc(b: ^Bench, markup: string) -> Svg_Work {
 	w := Svg_Work{markup = markup}
-	doc, err := vg.svg_parse(transmute([]u8)markup, {fonts = &b.fonts})
+	doc, err := svg.parse(transmute([]u8)markup, {fonts = &b.fonts})
 	if err != nil {
 		fmt.eprintln("svg parse failed:", err)
 		os.exit(1)
 	}
 	w.doc = doc
-	vg.svg_layout(&w.doc, &b.fonts, &w.text)
-	vg.svg_renderer_bind(&w.renderer, &b.canvas, &w.doc)
+	svg.layout(&w.doc, &b.fonts, &w.text)
+	svg.renderer_bind(&w.renderer, &b.canvas, &w.doc)
 	return w
 }
 
 svg_parse :: proc(b: ^Bench, user: rawptr) -> f64 {
 	w := (^Svg_Work)(user)
 	t0 := time.tick_now()
-	doc, _ := vg.svg_parse(transmute([]u8)w.markup, {fonts = &b.fonts})
+	doc, _ := svg.parse(transmute([]u8)w.markup, {fonts = &b.fonts})
 	ms := time.duration_milliseconds(time.tick_since(t0))
-	vg.svg_destroy(&doc)
+	svg.destroy(&doc)
 	return ms
 }
 
 svg_draw :: proc(b: ^Bench, user: rawptr, i: int) {
 	w := (^Svg_Work)(user)
 	// One part moves every frame, as a host animating by id would.
-	ovs := [?]vg.Svg_Override{{id = "g3", transform = vg.transform_rotation(f32(i) * 0.01)}}
+	ovs := [?]svg.Override{{id = "g3", transform = vg.transform_rotation(f32(i) * 0.01)}}
 	xf := vg.transform_scaling(1000 / w.doc.width, 1000 / w.doc.height)
-	vg.svg_draw(&b.canvas, &b.layers, &w.renderer, &w.doc, &w.text, xf, ovs[:])
+	svg.draw(&b.canvas, &b.layers, &w.renderer, &w.doc, &w.text, xf, ovs[:])
 }
 
 // `n` shapes in groups of 20 under a style sheet, gradients, a pattern of
@@ -277,35 +279,35 @@ svg_text_markup :: proc(n: int) -> string {
 
 Lottie_Work :: struct {
 	json:     string,
-	doc:      vg.Lottie_Document,
-	renderer: vg.Lottie_Renderer,
+	doc:      lottie.Document,
+	renderer: lottie.Renderer,
 }
 
 lottie_open :: proc(b: ^Bench, json: string) -> Lottie_Work {
 	w := Lottie_Work{json = json}
-	doc, err := vg.lottie_parse(transmute([]u8)json)
+	doc, err := lottie.parse(transmute([]u8)json)
 	if err != nil {
 		fmt.eprintln("lottie parse failed:", err)
 		os.exit(1)
 	}
 	w.doc = doc
-	vg.lottie_renderer_bind(&w.renderer, &b.canvas, &w.doc)
+	lottie.renderer_bind(&w.renderer, &b.canvas, &w.doc)
 	return w
 }
 
 lottie_parse :: proc(b: ^Bench, user: rawptr) -> f64 {
 	w := (^Lottie_Work)(user)
 	t0 := time.tick_now()
-	doc, _ := vg.lottie_parse(transmute([]u8)w.json)
+	doc, _ := lottie.parse(transmute([]u8)w.json)
 	ms := time.duration_milliseconds(time.tick_since(t0))
-	vg.lottie_destroy(&doc)
+	lottie.destroy(&doc)
 	return ms
 }
 
 lottie_draw_frame :: proc(b: ^Bench, user: rawptr, i: int) {
 	w := (^Lottie_Work)(user)
 	w.renderer.fonts = &b.fonts
-	vg.lottie_draw(&b.canvas, &b.layers, &w.renderer, &w.doc, f32(i % 120), vg.transform_scaling(2, 2))
+	lottie.draw(&b.canvas, &b.layers, &w.renderer, &w.doc, f32(i % 120), vg.transform_scaling(2, 2))
 }
 
 // `n` shape layers (keyframed groups with fills, dashed strokes and trims),

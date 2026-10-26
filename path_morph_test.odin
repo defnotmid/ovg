@@ -5,7 +5,7 @@ import "core:testing"
 
 import cv "curves"
 
-// Path morphs, text as a path and SVG geometry as a path.
+// Path morphs and text as a path.
 
 // The fill of `p` at (x, y) under `rule`.
 @(private = "file")
@@ -320,96 +320,6 @@ slice_clone :: proc(b: []u8) -> []u8 {
 	out := make([]u8, len(b))
 	copy(out, b)
 	return out
-}
-
-// An SVG's filled geometry as one path, under its transforms, skipping what
-// draws nothing; an element's subtree by id.
-@(test)
-test_svg_element_path :: proc(t: ^testing.T) {
-	markup := `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="100" viewBox="0 0 100 50">
-	<defs><rect id="tile" width="4" height="4"/></defs>
-	<g id="mark" transform="translate(10 5)">
-		<rect width="20" height="10"/>
-		<circle cx="40" cy="5" r="5" fill-rule="evenodd"/>
-		<use xlink:href="#tile" x="60"/>
-	</g>
-	<rect x="0" y="40" width="5" height="5" display="none"/>
-	<rect x="10" y="40" width="5" height="5" visibility="hidden"/>
-	<rect x="20" y="40" width="5" height="5" fill="none" stroke="black"/>
-	<rect x="30" y="40" width="5" height="5" opacity="0"/>
-	<g id="shown"><rect x="90" y="40" width="5" height="5"/></g>
-	<g id="spare" display="none"><rect x="40" y="40" width="5" height="5"/><rect x="50" y="40" width="5" height="5" display="none"/></g>
-</svg>`
-	doc, err := svg_parse(transmute([]u8)string(markup))
-	defer svg_destroy(&doc)
-	testing.expect_value(t, err, Svg_Error.None)
-	p: Path
-	defer path_destroy(&p)
-
-	rule, mixed, found := svg_element_path(&doc, &p)
-	testing.expect(t, found && mixed)
-	_, n := flat_area(&p)
-	testing.expect_value(t, n, 4) // the mark's three shapes and the shown rect
-	// Document coordinates: the viewBox scales by 2.
-	testing.expect(t, filled(&p, 2 * (10 + 10), 2 * (5 + 5), .Non_Zero)) // rect
-	testing.expect(t, filled(&p, 2 * (10 + 40), 2 * (5 + 5), .Non_Zero)) // circle
-	testing.expect(t, filled(&p, 2 * (10 + 62), 2 * (5 + 2), .Non_Zero)) // use
-	testing.expect(t, filled(&p, 2 * 92, 2 * 42, .Non_Zero))
-	for x in ([?]f32{2, 12, 22, 32}) {
-		testing.expect(t, !filled(&p, 2 * x, 2 * 42, .Non_Zero))
-	}
-
-	path_reset(&p)
-	rule, mixed, found = svg_element_path(&doc, &p, "shown")
-	testing.expect(t, found && !mixed && rule == .Non_Zero)
-	_, n = flat_area(&p)
-	testing.expect_value(t, n, 1)
-
-	path_reset(&p)
-	_, _, found = svg_element_path(&doc, &p, "mark")
-	_, n = flat_area(&p)
-	testing.expect(t, found)
-	testing.expect_value(t, n, 3)
-	testing.expect(t, filled(&p, 2 * (10 + 10), 2 * (5 + 5), .Non_Zero))
-
-	// Asked for by id, a display="none" element gives its geometry (not
-	// that of its own hidden children).
-	path_reset(&p)
-	_, _, found = svg_element_path(&doc, &p, "spare")
-	_, n = flat_area(&p)
-	testing.expect(t, found)
-	testing.expect_value(t, n, 1)
-
-	_, _, found = svg_element_path(&doc, &p, "nope")
-	testing.expect(t, !found)
-}
-
-// SVG text joins the path when the document's layout is given.
-@(test)
-test_svg_element_path_text :: proc(t: ^testing.T) {
-	fonts: Font_Collection
-	font_collection_init(&fonts)
-	defer font_collection_destroy(&fonts)
-	markup := `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><g transform="translate(100 0)"><text id="t" x="10" y="60" font-size="40">Hi</text></g></svg>`
-	doc, _ := svg_parse(transmute([]u8)string(markup), {fonts = &fonts})
-	defer svg_destroy(&doc)
-	text: Svg_Layout
-	defer svg_layout_destroy(&text)
-	svg_layout(&doc, &fonts, &text)
-	p: Path
-	defer path_destroy(&p)
-	svg_element_path(&doc, &p)
-	testing.expect(t, path_is_empty(&p)) // no layout, no text
-	rule, mixed, found := svg_element_path(&doc, &p, "t", &text)
-	testing.expect(t, found && !mixed && rule == .Non_Zero)
-	_, n := flat_area(&p)
-	testing.expect(t, n >= 2)
-	f: Flat_Path
-	defer flat_path_destroy(&f)
-	path_flatten(&p, &f)
-	for q in f.points {
-		testing.expect(t, q.x >= 110 && q.x < 200 && q.y > 20 && q.y <= 60.5)
-	}
 }
 
 // `segment` sets how finely curves split: a 30-unit cubic is 20 segments at

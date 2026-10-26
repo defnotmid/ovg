@@ -17,7 +17,7 @@ Added in ovg:
 - **Path morphs**: `path_morph_prepare` / `path_morph_eval` blend any two
   paths (contours paired, resampled by arc length, holes kept; unpaired
   contours grow from or shrink to a point), with text (`text_layout_path`)
-  and SVG geometry (`svg_element_path`) as paths to morph.
+  and SVG geometry (`svg.element_path`) as paths to morph.
 - **Path booleans**: union, difference, intersection, xor and simplify of
   filled paths, keeping their curves (see Path booleans below).
 - **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
@@ -26,10 +26,10 @@ Added in ovg:
   composite, merge, blend, colour matrix, component transfer, morphology,
   turbulence, diffuse / specular lighting, tile, displacement map, convolve
   matrix, image), with filter regions, subregions and linearRGB.
-- **SVG import**: `svg_parse` / `svg_draw` with CSS styling, `<use>`, gradients,
+- **SVG import** (`ovg/svg`): `svg.parse` / `svg.draw` with CSS styling, `<use>`, gradients,
   patterns, masks, filters and text, plus per-element overrides for animation
   (88.5% of the resvg test suite).
-- **Lottie import**: `lottie_parse` / `lottie_draw` for After Effects
+- **Lottie import** (`ovg/lottie`): `lottie.parse` / `lottie.draw` for After Effects
   (Bodymovin) animations: precomps, mattes, masks, trim paths, eased
   keyframes, layer effects (blur, drop shadow, fill, tint, tritone) and
   text layers with text animators.
@@ -54,6 +54,7 @@ dependencies are Odin's own `vendor` packages:
 | package | needs |
 | --- | --- |
 | `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.6), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
@@ -224,7 +225,7 @@ GPU and software agree within 2/255 except where a filter amplifies a
 one-step input difference: lighting at dark antialiased edges after the
 linearRGB -> sRGB conversion, and sharpening kernels.
 
-SVG filter effects on layers (`svg_filter.odin`, `Layer_Params.filter`): a
+SVG filter effects on layers (`filter.odin`, `Layer_Params.filter`): a
 `Filter` is a list of primitives (every SVG 1.1 one; feImage shows an
 image from `Filter.images`) reading the source graphic, its alpha or
 earlier results, computed in linear RGB unless `srgb`; component transfer
@@ -345,37 +346,39 @@ for run in layout.runs {
 
 ## SVG import
 
-`svg.odin` parses SVG markup (with `core:encoding/xml`) into an
-`Svg_Document`, a render-ready, data-oriented copy in the spirit of usvg:
+`ovg/svg` parses SVG markup (`svg/svg.odin`, with `core:encoding/xml`) into
+an `svg.Document`, a render-ready, data-oriented copy in the spirit of usvg:
 flat tables of nodes (parent / first child / next indices, local transform,
 object bounding box, effects by index), shapes (path data stored once in
 shared verb / coordinate arrays, computed style), text chunks and pieces,
 images and decoded bitmaps, paint servers and stops, clip paths, masks,
-filters, dashes, element ids (`id_map`) and a string arena. `svg_layout`
-lays the document's text out with a `Font_Collection` into an `Svg_Layout`
+filters, dashes, element ids (`id_map`) and a string arena. `svg.layout`
+lays the document's text out with a `Font_Collection` into an `svg.Layout`
 (positioned glyphs, runs per text), again only when the document or the
-fonts change. `svg_draw` (`svg_draw.odin`) walks the tables with that
+fonts change. `svg.draw` (`svg/draw.odin`) walks the tables with that
 layout and issues canvas and layer calls; document and layout are
 read-only while drawing, so many canvases (threads) can draw one document,
-each with its own `Svg_Renderer` (scratch paths, override table, and the
-document's canvas images, made by `svg_renderer_bind`).
+each with its own `svg.Renderer` (scratch paths, override table, and the
+document's canvas images, made by `svg.renderer_bind`).
 
 ```odin
-doc, err := vg.svg_parse(data, {load_file = my_loader, fonts = &fonts})
-defer vg.svg_destroy(&doc)
-text: vg.Svg_Layout                       // the text laid out: once per document and fonts
-vg.svg_layout(&doc, &fonts, &text)
-defer vg.svg_layout_destroy(&text)
-r: vg.Svg_Renderer                        // one per document and canvas
-vg.svg_renderer_bind(&r, &c, &doc)        // the document's images on this canvas
+import "deps:ovg/svg"
+
+doc, err := svg.parse(data, {load_file = my_loader, fonts = &fonts})
+defer svg.destroy(&doc)
+text: svg.Layout                       // the text laid out: once per document and fonts
+svg.layout(&doc, &fonts, &text)
+defer svg.layout_destroy(&text)
+r: svg.Renderer                        // one per document and canvas
+svg.renderer_bind(&r, &c, &doc)        // the document's images on this canvas
 vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
-ovs := [?]vg.Svg_Override{{id = "wing", transform = vg.transform_rotation(a)}, {id = "sun", fill = vg.RED}}
-vg.svg_draw(&c, &ls, &r, &doc, &text, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
+ovs := [?]svg.Override{{id = "wing", transform = vg.transform_rotation(a)}, {id = "sun", fill = vg.RED}}
+svg.draw(&c, &ls, &r, &doc, &text, vg.transform_scaling(w / doc.width, h / doc.height), ovs[:])
 vg.layer_stack_end(&ls, &c)
 ```
 
-- Parsing resolves `<defs>`, `<use>` (elements, symbols, nested svg;
-  instances keep their ids), presentation attributes, `style`, `<style>`
+- Parsing resolves `<defs>`, `<use>` (elements, symbols, nested svg),
+  presentation attributes, `style`, `<style>`
   sheets (type, class, id, attribute, `:first-child`, descendant and child
   selectors, specificity, `!important`), inheritance, `currentColor`,
   units (px, %, em, ex, pt, pc, mm, cm, in), viewBox / preserveAspectRatio,
@@ -399,20 +402,36 @@ vg.layer_stack_end(&ls, &c)
   and spacing ignored; text after it continues from its last glyph), CSS
   whitespace collapsing (the XML reader trims
   bodies, so text whitespace is protected before parsing). Images: data:
-  URIs and other hrefs through `Svg_Parse_Options.load_file`; raster
+  URIs and other hrefs through `svg.Parse_Options.load_file`; raster
   (odecs' image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
-- `svg_draw(c, ls, r, doc, transform, overrides)` draws in the document's
+- `svg.draw(c, ls, r, doc, transform, overrides)` draws in the document's
   `width x height` space. Effects map to one layer (opacity, path clip or
   clip-as-mask, mask, filter, blend), two when a non-path clip meets a mask;
   a single fill or stroke folds opacity into the alpha. Pattern tiles render
-  at the current scale (nearest sampling, as resvg). `Svg_Override{id,
+  at the current scale (nearest sampling, as resvg). `svg.Override{id,
   transform, replace_transform, opacity, fill, stroke, visible}` changes
   every instance of an id per draw (the transform applies inside the
   element's own transform; fill / stroke reach inheriting descendants), with
   no allocation once the renderer is warm. An element with an id and
   `display="none"` is kept (not drawn) so `visible = true` can show it: one
   file holds a sprite's alternate parts.
-- `svg_element_path(doc, out, id, text)` appends the filled geometry (the
+- A `<use>` of an element or a symbol is a `.Use` node drawing, under its
+  own transform and effects, the node its target converted to (`data`):
+  the target's own node when it is in the drawing, else a definition
+  converted once outside it (parent -1). A use whose copy would start from
+  the same computed style and viewport as a definition's draws that one,
+  so an id names one node per style and an override reaches every use;
+  a use under another inherited style gets its own definition, carrying
+  the same id. Each use still counts the elements and depth its copy would
+  have against the limits. A use of a use refers to the use; uses in clip
+  paths and of nested svgs are copies. On Inkscape's pixel-art tutorial
+  (1.9 MB) its 227 uses share 29 definitions: 7% fewer nodes, parsing 5%
+  faster, the image the same.
+- For editors: `Parse_Options.keep_attributes` keeps the attributes named
+  (`inkscape:label`, `class`, ...) in `doc.attributes`, by node, and
+  `keep_groups` gives every `<g>` a node of its own (otherwise one with no
+  id, transform or effect folds into its parent).
+- `svg.element_path(doc, out, id, text)` appends the filled geometry (the
   whole document or one element's subtree, under its transforms, text with
   a layout) to a `Path`, returning the fill rule (and whether shapes mix
   rules); strokes, images, clips, masks and filters are ignored.
@@ -445,14 +464,14 @@ vg.layer_stack_end(&ls, &c)
 
 SVG and Lottie files may come from anyone: parsing and drawing are bounded
 by `Limits` (`limits.odin`), one table row per kind of work a small file can
-multiply: nesting depth, SVG elements (`<use>` copies included), CSS
+multiply: nesting depth, SVG elements (what each `<use>` draws included), CSS
 selector steps, filter primitives, feTurbulence octaves, star points,
 repeater copies and layers per Lottie draw, dashes per stroke, COLR paints
 per glyph and decoded image pixels. Past a limit the work is cut short (a
 stroke with too many dashes draws undashed) and the limit is reported: a
-warning in `doc.warnings`, `Lottie_Renderer.limited` after a draw,
-`Canvas.limited` for dashes. `Svg_Parse_Options.limits` and
-`Lottie_Parse_Options.limits` replace `DEFAULT_LIMITS`, `Canvas.limits`
+warning in `doc.warnings`, `lottie.Renderer.limited` after a draw,
+`Canvas.limited` for dashes. `svg.Parse_Options.limits` and
+`lottie.Parse_Options.limits` replace `DEFAULT_LIMITS`, `Canvas.limits`
 the canvas's; a new limit is a row in the table and one `budget_take` (a
 running total) or `budget_cap` (one value) where the work happens.
 
@@ -467,29 +486,31 @@ checks on.
 
 ## Lottie import
 
-`lottie.odin` parses Lottie (Bodymovin JSON, After Effects exports; with
-`core:encoding/json` into a scratch arena) into a `Lottie_Document`: flat
-tables of compositions (the root, then precomp assets), layers (kind,
+`ovg/lottie` parses Lottie (`lottie/lottie.odin`; Bodymovin JSON, After Effects
+exports; with `core:encoding/json` into a scratch arena) into a
+`lottie.Document`: flat tables of compositions (the root, then precomp assets), layers (kind,
 parent, matte layer, in / out / start / stretch, transform, shapes, masks,
 precomp or bitmap index), shape items (a group's children contiguous, props
 by slot), transforms, masks, dashes and animatable properties, whose
 keyframes, values (easing handles, spatial tangents included) and bezier
-paths are stored once. `lottie_draw` (`lottie_draw.odin`) evaluates it at a
+paths are stored once. `lottie.draw` (`lottie/draw.odin`) evaluates it at a
 frame: properties interpolate per draw (binary search, cubic-bezier easing,
 hold, arc-length spatial position, path vertices), shape geometry builds per
 layer into the renderer's cubic contours (trim paths cut them), paints walk
 the shape tree bottom to top, and masks, track mattes, blend modes and group
 opacity over overlapping paints go through the layer stack. The document is
-read-only while drawing; each canvas has its own `Lottie_Renderer`, which
+read-only while drawing; each canvas has its own `lottie.Renderer`, which
 allocates nothing once warm.
 
 ```odin
-doc, err := vg.lottie_parse(data, {load_file = my_loader})   // image assets that aren't data: URIs
-defer vg.lottie_destroy(&doc)
-r: vg.Lottie_Renderer                     // one per document and canvas
-vg.lottie_renderer_bind(&r, &c, &doc)     // the document's image assets on this canvas
+import "deps:ovg/lottie"
+
+doc, err := lottie.parse(data, {load_file = my_loader})   // image assets that aren't data: URIs
+defer lottie.destroy(&doc)
+r: lottie.Renderer                     // one per document and canvas
+lottie.renderer_bind(&r, &c, &doc)     // the document's image assets on this canvas
 vg.layer_stack_begin(&ls, &c, w, h, nil, doc.uses_blend)
-vg.lottie_draw(&c, &ls, &r, &doc, vg.lottie_frame_at(&doc, seconds), vg.transform_scaling(w / doc.width, h / doc.height))
+lottie.draw(&c, &ls, &r, &doc, lottie.frame_at(&doc, seconds), vg.transform_scaling(w / doc.width, h / doc.height))
 vg.layer_stack_end(&ls, &c)
 ```
 
@@ -511,7 +532,7 @@ vg.layer_stack_end(&ls, &c)
 - Keyframes: temporal bezier easing per dimension, hold, spatial bezier
   position (`to` / `ti`), the old format's `e` end values; markers.
 - Layer effects (`ef`, parameters keyframed like any property), each a
-  filter layer (svg_filter.odin) around the layer's content, inside its
+  filter layer (filter.odin) around the layer's content, inside its
   masks, as lottie-web's SVG filters: Gaussian Blur (29; blurriness x 0.3
   = sigma, both / horizontal / vertical), Drop Shadow (25; colour, opacity,
   direction, distance, softness / 4 = sigma), Fill (21; colour, opacity),
@@ -522,21 +543,21 @@ vg.layer_stack_end(&ls, &c)
   size, fill / stroke colour, stroke width with stroke over or under the
   fill, justification left / right / center, tracking, line height,
   baseline shift, all caps, box text `sz` / `ps` wrapped greedily at
-  spaces) is laid out with `Lottie_Renderer.fonts` (a `Font_Collection`:
+  spaces) is laid out with `lottie.Renderer.fonts` (a `Font_Collection`:
   the `fonts` list's family and style pick the face; shaping, kerning,
   per-glyph fallback and colour emoji as for any text; without a
   collection, the bundled Vera). Families missing from the collection
-  collect in `Lottie_Renderer.missing`. Text animators (`t.a`): range
+  collect in `lottie.Renderer.missing`. Text animators (`t.a`): range
   selectors by characters, characters excluding spaces, words or lines;
   start / end / offset in percent or indices; shapes square, ramp up / down,
   triangle, round and smooth; amount, ease high / low, smoothness; they
   animate anchor, position, scale, rotation, skew, opacity, fill / stroke
   colour, stroke width and tracking per letter (a letter's matrix pivots on
   its anchor group, characters / words / lines, from the shaped layout's
-  glyph positions; `lottie_selector_mult` is lottie-web's selector math).
+  glyph positions; `lottie.selector_mult` is lottie-web's selector math).
   Positions follow the font's own advances and kerning, so spacing differs
   slightly from a browser's.
-- Overrides (`Lottie_Override`) replace a layer's transform, opacity,
+- Overrides (`lottie.Override`) replace a layer's transform, opacity,
   fill / stroke colour (text included), visibility, and a text layer's
   string (`text`).
 - Skipped with a warning in `doc.warnings`: other effects (stroke, levels,
@@ -653,7 +674,7 @@ every part follows:
   `*_no_allocation_when_warm` tests).
 - Variable-length data is flat arrays addressed by ranges; payloads few
   rows carry live in side tables; kinds and properties are enum-indexed
-  table rows (`svg_props`, `LOTTIE_EFFECTS`, `LIMIT_INFO`).
+  table rows (`svg.props`, `lottie.EFFECTS`, `LIMIT_INFO`).
 
 - **`Canvas` records, backends draw.** Drawing calls record `Command`s:
   shape instances whose words go into the frame (each shape once), with
@@ -832,7 +853,7 @@ every part follows:
   `side = .Right` runs along the path reversed. `text_layout_path` follows
   the turns; to draw, turn each glyph about its origin
   (`apply_transform(c, {t.x, t.y, -t.y, t.x, g.x, g.y})`, then the glyph at
-  0, 0), as `svg_draw` does.
+  0, 0), as `svg.draw` does.
 - **Font information** (cold, for font pickers and glyph browsers):
   `font_info` reads a font's typographic family and subfamily, full and
   PostScript names, glyph count and the GSUB / GPOS feature tags it has
@@ -867,7 +888,9 @@ every part follows:
 ```sh
 # with oglyph and odecs cloned next to ovg (see Use); every build takes -collection:deps=..
 # (fonts and shaping are tested in oglyph: odin test font / shape there)
-odin test . -collection:deps=.. -vet -strict-style    # core + software backend (svg_test.odin, lottie_test.odin: parsers, drawing; limits_test.odin: hostile files)
+odin test . -collection:deps=.. -vet -strict-style    # core + software backend
+odin test svg -collection:deps=.. -vet -strict-style  # SVG import: parsing, drawing, hostile files
+odin test lottie -collection:deps=.. -vet -strict-style # Lottie import: parsing, drawing, hostile files
 odin test curves -vet -strict-style                   # the curves package alone (core only)
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
@@ -894,4 +917,4 @@ curve), is drawn by `tools/mascot` (`odin run tools/mascot -collection:deps=.. -
 `assets/logo.svg` keeps its skins (green, pink, blue), eyes, mouths and tongue
 as layers a script can switch by id, each colour one traced path, plus a
 hidden `silhouette` (the whole chameleon as one outline) for
-`svg_element_path(&doc, &p, "silhouette")`.
+`svg.element_path(&doc, &p, "silhouette")`.

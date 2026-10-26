@@ -1,5 +1,6 @@
 package scenes
 
+import "../../lottie"
 import vg "../.."
 
 // The Lottie importer (lottie.odin) on both backends: a group transform,
@@ -52,12 +53,12 @@ LOTTIE_SCENE :: `{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 256, "h": 192,
 
 scene_lottie :: proc(c: ^vg.Canvas, r: ^Resources) {
 	if !r.lottie_ready {
-		r.lottie_doc, _ = vg.lottie_parse(transmute([]u8)string(LOTTIE_SCENE))
-		vg.lottie_renderer_bind(&r.lottie, c, &r.lottie_doc)
+		r.lottie_doc, _ = lottie.parse(transmute([]u8)string(LOTTIE_SCENE))
+		lottie.renderer_bind(&r.lottie_r, c, &r.lottie_doc)
 		r.lottie_ready = true
 	}
 	vg.layer_stack_begin(&r.layers, c, W, H, nil, r.lottie_doc.uses_blend)
-	vg.lottie_draw(c, &r.layers, &r.lottie, &r.lottie_doc, 17.5)
+	lottie.draw(c, &r.layers, &r.lottie_r, &r.lottie_doc, 17.5)
 	vg.layer_stack_end(&r.layers, c)
 }
 
@@ -92,12 +93,12 @@ LOTTIE_TEXT_FX_SCENE :: `{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 256, "
 
 scene_lottie_text_fx :: proc(c: ^vg.Canvas, r: ^Resources) {
 	if !r.lottie_fx_ready {
-		r.lottie_fx_doc, _ = vg.lottie_parse(transmute([]u8)string(LOTTIE_TEXT_FX_SCENE))
-		vg.lottie_renderer_bind(&r.lottie_fx, c, &r.lottie_fx_doc)
+		r.lottie_fx_doc, _ = lottie.parse(transmute([]u8)string(LOTTIE_TEXT_FX_SCENE))
+		lottie.renderer_bind(&r.lottie_fx, c, &r.lottie_fx_doc)
 		r.lottie_fx_ready = true
 	}
 	r.lottie_fx.fonts = &r.emoji_fonts
 	vg.layer_stack_begin(&r.layers, c, W, H, nil, r.lottie_fx_doc.uses_blend)
-	vg.lottie_draw(c, &r.layers, &r.lottie_fx, &r.lottie_fx_doc, 10)
+	lottie.draw(c, &r.layers, &r.lottie_fx, &r.lottie_fx_doc, 10)
 	vg.layer_stack_end(&r.layers, c)
 }

@@ -1,5 +1,6 @@
 package ovg
 
+import "core:mem"
 import "core:os"
 import image "deps:odecs/image"
 
@@ -21,4 +22,31 @@ load_image_file :: proc(c: ^Canvas, path: string, flags: Image_Flags = {}) -> (I
 	}
 	defer delete(data)
 	return load_image_mem(c, data, flags)
+}
+
+// Decoded straight-alpha RGBA8, owned by whoever decoded it.
+Bitmap :: struct {
+	pixels:        []u8,
+	width, height: u32,
+}
+
+// Decodes PNG / JPEG / ... bytes to straight RGBA8 with `allocator`. Images
+// over the budget's (or DEFAULT_LIMITS') Image_Pixels are not decoded.
+decode_image :: proc(data: []u8, allocator: mem.Allocator, budget: ^Budget = nil) -> (pixels: []u8, width, height: u32, ok: bool) {
+	info, ierr := image.info(data)
+	if ierr != nil {
+		return
+	}
+	if budget != nil && budget_over(budget, .Image_Pixels, info.width * info.height) {
+		return
+	} else if budget == nil && info.width * info.height > DEFAULT_LIMITS[.Image_Pixels] {
+		return
+	}
+	// Only the pixels go in `allocator`; the decoder's scratch is its own.
+	pixels = make([]u8, info.width * info.height * 4, allocator)
+	if image.decode_into(data, pixels) != nil {
+		delete(pixels, allocator)
+		return nil, 0, 0, false
+	}
+	return pixels, u32(info.width), u32(info.height), true
 }
