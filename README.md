@@ -696,6 +696,22 @@ every part follows:
   such, joins, caps, dashes along the curves) filled non-zero, so each
   pixel paints once however the stroke overlaps itself. Contours keep their
   winding, so non-zero and even-odd holes are exact.
+- **Hairlines without a stroke.** A shape built with `outline`
+  (`shape_from_path`) keeps its contours as drawn beside its fill: each
+  cell lists the pieces that draw, horizontal ones included, and not the
+  edges that only close contours the path leaves open. `hairline_shape`
+  (`hairline_shapes` for many places) draws them as a line `width` pixels
+  wide under any transform, so a document kept in its own units draws its
+  selection outlines and handles at every zoom with nothing rebuilt. A
+  pixel takes its share within width / 2 of each piece across the piece's
+  nearest point (the pixel box filtering a straight band), the largest:
+  against 64 x 64 samples of the true band that is within 0.01 on curves
+  and straight runs, and within about 0.1 to 0.3 on a pixel or two at
+  sharp corners and open ends, which round. Outlining the 15,457 shapes of
+  Inkscape's pixel-art tutorial at 1 px (1920 x 1080, RX 9070 XT): 2.3 ms
+  a frame, 0.43 ms of it recording, where stroke_path per shape takes
+  30.5 ms (26.5 ms recording), the images within 16 levels; the outlines
+  add 29% to building the shapes and 20% to their words.
 - **The software backend is the pixel reference for the GPU backend.** It
   evaluates the fragment shader's formulas and the same coverage function,
   samples textures like the GPU and uses the top-left fill rule.

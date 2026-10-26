@@ -279,6 +279,47 @@ test_sw_fill_shapes :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_sw_hairline_shape :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 60, 40)
+	clear_rect(&c, 0, 0, 60, 40, WHITE)
+	at :: proc(b: ^Software_Backend, x, y: int) -> u8 {
+		return b.pixels[(y * int(b.width) + x) * 4]
+	}
+	// An open L (its closing edge fills, not drawn), magnified 4x: the
+	// hairline stays 1 px, centered on the lines x = 10.5 and y = 30.5.
+	p: Path
+	defer path_destroy(&p)
+	path_move_to(&p, 2.5, 1.25)
+	path_line_to(&p, 2.5, 7.5)
+	path_line_to(&p, 12.5, 7.5)
+	s, ok := shape_from_path(&p, outline = true)
+	testing.expect(t, ok)
+	defer shape_destroy(&s)
+	plain, _ := shape_from_path(&p)
+	defer shape_destroy(&plain)
+	m := transform_multiply(transform_scaling(4, 4), transform_translation(0.5, 0.5))
+	hairline_shape(&c, &s, paint_color(rgb(0, 0, 0)), 1, m)
+	// Without an outline nothing draws.
+	hairline_shape(&c, &plain, paint_color(rgb(0, 0, 0)), 1, transform_translation(5, 0))
+	flush(&c)
+	testing.expect_value(t, at(&b, 10, 20), 0)
+	testing.expect_value(t, at(&b, 30, 30), 0)
+	testing.expect_value(t, at(&b, 9, 20), 255)
+	testing.expect_value(t, at(&b, 11, 20), 255)
+	testing.expect_value(t, at(&b, 30, 29), 255)
+	// The closing edge, from (10.5, 5.5) to (50.5, 30.5), is not drawn.
+	testing.expect_value(t, at(&b, 30, 18), 255)
+	testing.expect_value(t, at(&b, 15, 20), 255)
+	testing.expect_value(t, at(&b, 50, 20), 255)
+}
+
+@(test)
 test_font_glyph_shape :: proc(t: ^testing.T) {
 	font, _ := font_load(DEFAULT_FONT_DATA)
 	defer font_destroy(&font)

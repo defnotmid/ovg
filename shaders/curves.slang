@@ -497,3 +497,76 @@ int curves_winding(StructuredBuffer<uint> words, uint s, float2 p) {
     }
     return w;
 }
+
+// The share of the unit pixel at the origin (pixel units) within w / 2 of
+// the line through the quadratic's point nearest it, across the normal
+// there (curves.odin's band_coverage).
+float curves_projected_box(float x, float a, float b) {
+    float s1 = 0.5 * (a + b);
+    float s2 = 0.5 * (a - b);
+    float y = clamp(x, -s1, s1);
+    float q1 = max(y + s1, 0.0), q2 = max(y + s2, 0.0), q3 = max(y - s2, 0.0), q4 = max(y - s1, 0.0);
+    return (q1 * q1 - q2 * q2 - q3 * q3 + q4 * q4) / (2.0 * a * b);
+}
+
+float curves_band_coverage(float2 p1, float2 p2, float2 p3, float w) {
+    float2 a = p1 - 2.0 * p2 + p3;
+    float2 b = 2.0 * (p2 - p1);
+    float2 chord = p3 - p1;
+    float l2 = dot(chord, chord);
+    if (l2 == 0.0 && all(a == float2(0.0, 0.0))) return 0.0;
+    float t = l2 > 0.0 ? clamp(-dot(p1, chord) / l2, 0.0, 1.0) : 0.0;
+    for (int k = 0; k < 3; k++) {
+        float2 q = (a * t + b) * t + p1;
+        float2 dq = 2.0 * a * t + b;
+        float f = dot(q, dq);
+        float fp = dot(dq, dq) + 2.0 * dot(q, a);
+        if (fp > 0.0) t = clamp(t - f / fp, 0.0, 1.0);
+    }
+    float2 q = (a * t + b) * t + p1;
+    float d = sqrt(dot(q, q));
+    if (d >= 0.5 * w + 0.7072) return 0.0;
+    float2 n = q / d;
+    if (!(d > 1e-6)) {
+        float2 dq = 2.0 * a * t + b;
+        n = float2(-dq.y, dq.x) / sqrt(dot(dq, dq));
+    }
+    float wa = max(abs(n.x), abs(n.y));
+    float wb = max(min(abs(n.x), abs(n.y)), 1e-3);
+    return clamp(curves_projected_box(d + 0.5 * w, wa, wb) - curves_projected_box(d - 0.5 * w, wa, wb), 0.0, 1.0);
+}
+
+// The coverage of the pixel at `rc` (sides u, v in shape units) by the
+// shape's outline `width` pixels wide (curves.odin's hairline); 0 without
+// an outline.
+float curves_hairline(StructuredBuffer<uint> words, uint s, float2 rc, float2 u, float2 v, float width) {
+    uint outline = words[s + 4];
+    float det = u.x * v.y - u.y * v.x;
+    if (outline == 0u || det == 0.0 || !(width > 0.0)) return 0.0;
+    float4 m = float4(v.y, -u.y, -v.x, u.x) / det;
+    float reach = 0.5 * width + 0.7072;
+    float ex = reach * (abs(u.x) + abs(v.x));
+    float ey = reach * (abs(u.y) + abs(v.y));
+    Curves_Span g = curves_span(words, s, rc, -ex, ex, -ey, ey);
+    uint curves = s + words[s + 6];
+    float cov = 0.0;
+    for (int j = g.j0; j <= g.j1; j++) {
+        for (int i = g.i0; i <= g.i1; i++) {
+            uint cell = s + outline + 2u * uint(j * g.nx + i);
+            uint list = s + words[cell];
+            uint count = words[cell + 1];
+            for (uint k = 0; k < count; k++) {
+                uint c = curves + 6 * words[list + k];
+                float2 p1 = curves_point(words, c, rc);
+                float2 p3 = curves_point(words, c + 4, rc);
+                if (min(p1.x, p3.x) > ex || max(p1.x, p3.x) < -ex || min(p1.y, p3.y) > ey || max(p1.y, p3.y) < -ey) continue;
+                float2 p2 = curves_point(words, c + 2, rc);
+                float2 a1 = float2(m.x * p1.x + m.z * p1.y, m.y * p1.x + m.w * p1.y);
+                float2 a2 = float2(m.x * p2.x + m.z * p2.y, m.y * p2.x + m.w * p2.y);
+                float2 a3 = float2(m.x * p3.x + m.z * p3.y, m.y * p3.x + m.w * p3.y);
+                cov = max(cov, curves_band_coverage(a1, a2, a3, width));
+            }
+        }
+    }
+    return cov;
+}

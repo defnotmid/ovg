@@ -87,3 +87,65 @@ scene_curves_alpha :: proc(c: ^vg.Canvas, r: ^Resources) {
 	run(c, r, "fading", 0, 40, 48, -8, vg.paint_linear_gradient(0, 0, 200, 0, vg.rgba(255, 200, 40, 200), vg.rgba(80, 160, 255, 90)))
 	vg.restore(c)
 }
+
+// Hairlines (vg.hairline_shape): one shape's fill and its outline, the
+// outline at 1 px, at 2.5 px turned and magnified (the width stays), an
+// open path's (no closing edge), translucent and under a scissor, and a
+// small ring at many places (vg.hairline_shapes).
+scene_hairlines :: proc(c: ^vg.Canvas, r: ^Resources) {
+	vg.clear_rect(c, 0, 0, W, H, vg.rgb(245, 243, 238))
+	kept :: proc(r: ^Resources, built: vg.Shape) -> ^vg.Shape {
+		shape := new_clone(built)
+		append(&r.frame_shapes, shape)
+		return shape
+	}
+	p := &r.path
+	vg.path_reset(p)
+	for i in 0 ..< 5 {
+		a := f32(i) * 4 * math.PI / 5 - math.PI / 2
+		x, y := 50 + 38 * math.cos(a), 52 + 36 * math.sin(a)
+		if i == 0 {
+			vg.path_move_to(p, x, y)
+		} else {
+			vg.path_line_to(p, x, y)
+		}
+	}
+	vg.path_close(p)
+	vg.path_circle(p, 50, 52, 11)
+	star, ok := vg.shape_from_path(p, outline = true)
+	if !ok {
+		return
+	}
+	s := kept(r, star)
+	vg.fill_shape(c, s, vg.paint_color(vg.rgb(250, 210, 120)))
+	vg.hairline_shape(c, s, vg.paint_color(vg.rgb(20, 60, 200)), 1)
+	turned := vg.transform_multiply(vg.transform_multiply(vg.transform_translation(-50, -52), vg.transform_multiply(vg.transform_scaling(1.6, 1.6), vg.transform_rotation(0.3))), vg.transform_translation(150, 70))
+	vg.hairline_shape(c, s, vg.paint_color(vg.rgba(200, 30, 60, 170)), 2.5, turned)
+
+	// An open path: handle lines and a curve, the closing edge not drawn.
+	vg.path_reset(p)
+	vg.path_move_to(p, 20, 170)
+	vg.path_line_to(p, 60, 120)
+	vg.path_bezier_to(p, 90, 100, 120, 190, 160, 150)
+	vg.path_line_to(p, 175, 175)
+	if open_path, open_ok := vg.shape_from_path(p, outline = true); open_ok {
+		o := kept(r, open_path)
+		vg.hairline_shape(c, o, vg.paint_linear_gradient(20, 0, 175, 0, vg.rgb(0, 140, 90), vg.rgb(120, 0, 160)), 1.5)
+		vg.save(c)
+		vg.scissor(c, 90, 120, 60, 40)
+		vg.hairline_shape(c, o, vg.paint_color(vg.rgb(0, 0, 0)), 3, vg.transform_translation(8, -12))
+		vg.restore(c)
+	}
+
+	// One ring at many places.
+	vg.path_reset(p)
+	vg.path_circle(p, 0, 0, 3.5)
+	if ring_shape, ring_ok := vg.shape_from_path(p, outline = true); ring_ok {
+		ring := kept(r, ring_shape)
+		locals: [24]vg.Transform2D
+		for &l, k in locals {
+			l = vg.transform_translation(196 + f32(k % 6) * 9.3, 120 + f32(k / 6) * 9.7)
+		}
+		vg.hairline_shapes(c, ring, vg.paint_color(vg.rgb(30, 30, 30)), 1, locals[:])
+	}
+}

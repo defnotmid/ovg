@@ -23,6 +23,8 @@ SHAPE_BOX_FRAG_SPV :: #load("../shaders/ovg.shape_box_frag.spv")
 SHAPE_BOX_FRAG_MSL :: #load("../shaders/ovg.shape_box_frag.msl")
 SHAPE_GROUP_FRAG_SPV :: #load("../shaders/ovg.shape_group_frag.spv")
 SHAPE_GROUP_FRAG_MSL :: #load("../shaders/ovg.shape_group_frag.msl")
+SHAPE_HAIRLINE_FRAG_SPV :: #load("../shaders/ovg.shape_hairline_frag.spv")
+SHAPE_HAIRLINE_FRAG_MSL :: #load("../shaders/ovg.shape_hairline_frag.msl")
 
 MAX_FRAMES_IN_FLIGHT :: 4
 
@@ -74,6 +76,8 @@ SDL_Backend :: struct {
 	// For groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
 	// the instances.
 	shape_group_frag: ^sdl.GPUShader,
+	// For hairlines (vg.hairline_shape).
+	shape_hairline_frag: ^sdl.GPUShader,
 	shapes:           Shape_Store,
 	screen_width:     u32,
 	screen_height:    u32,
@@ -196,7 +200,8 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	b.shape_frag = shader(b, SHAPE_FRAG_SPV, SHAPE_FRAG_MSL, "fs_shape", .FRAGMENT, 2, 3, 0)
 	b.shape_box_frag = shader(b, SHAPE_BOX_FRAG_SPV, SHAPE_BOX_FRAG_MSL, "fs_shape_box", .FRAGMENT, 2, 3, 0)
 	b.shape_group_frag = shader(b, SHAPE_GROUP_FRAG_SPV, SHAPE_GROUP_FRAG_MSL, "fs_shape_group", .FRAGMENT, 2, 3, 0)
-	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil || b.shape_group_frag == nil {
+	b.shape_hairline_frag = shader(b, SHAPE_HAIRLINE_FRAG_SPV, SHAPE_HAIRLINE_FRAG_MSL, "fs_shape_hairline", .FRAGMENT, 2, 3, 0)
+	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil || b.shape_group_frag == nil || b.shape_hairline_frag == nil {
 		return .Shader_Compile
 	}
 	store_init(b)
@@ -269,7 +274,7 @@ destroy :: proc(b: ^SDL_Backend) {
 	// Always: the map allocates on its first shape, but a frame of only its
 	// own words still fills `pending` and makes the buffers.
 	store_destroy(b)
-	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag, b.shape_group_frag}) {
+	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag, b.shape_group_frag, b.shape_hairline_frag}) {
 		if s != nil {
 			sdl.ReleaseGPUShader(b.device, s)
 		}

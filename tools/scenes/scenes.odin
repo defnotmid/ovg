@@ -95,6 +95,7 @@ ALL := [?]Scene {
 	{"emoji", scene_emoji},
 	{"curves", scene_curves},
 	{"curves_alpha", scene_curves_alpha},
+	{"hairlines", scene_hairlines},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the

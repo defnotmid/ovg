@@ -20,10 +20,12 @@ Pipeline_Key :: struct {
 	blend:   vg.Composite_Operation_State,
 	format:  sdl.GPUTextureFormat,
 	// The shape pipeline (shapes.odin) instead of the triangle one, its
-	// box variant (instances without rotation or skew) and its group one.
-	shapes:  bool,
-	box:     bool,
-	group:   bool,
+	// box variant (instances without rotation or skew), its group one and
+	// its hairline one.
+	shapes:   bool,
+	box:      bool,
+	group:    bool,
+	hairline: bool,
 }
 
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
@@ -434,21 +436,22 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 }
 
 // Rows drawing `instances` with `base`'s state: one per stretch of
-// instances that are all boxes (no rotation or skew: the box shader) or
-// all not.
+// instances that are all hairlines (the hairline shader), all boxes (no
+// rotation or skew: the box shader) or all neither.
 @(private = "file")
 plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 	row := base
 	start := instances.start
 	for i in instances.start ..< instances.start + instances.count {
-		t := p.frame.shapes[i].transform
-		box := t[1] == 0 && t[2] == 0
-		if i > start && box != row.key.box {
+		inst := &p.frame.shapes[i]
+		hairline := inst.hairline > 0
+		box := !hairline && inst.transform[1] == 0 && inst.transform[2] == 0
+		if i > start && (box != row.key.box || hairline != row.key.hairline) {
 			row.verts = {start, i - start}
 			append(&p.b.rows, row)
 			start = i
 		}
-		row.key.box = box
+		row.key.box, row.key.hairline = box, hairline
 	}
 	row.verts = {start, instances.start + instances.count - start}
 	append(&p.b.rows, row)
@@ -1129,7 +1132,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		// No vertex input: the shader pulls its instances.
 		info := sdl.GPUGraphicsPipelineCreateInfo {
 			vertex_shader = b.shape_vert,
-			fragment_shader = b.shape_group_frag if key.group else (b.shape_box_frag if key.box else b.shape_frag),
+			fragment_shader = b.shape_group_frag if key.group else (b.shape_hairline_frag if key.hairline else (b.shape_box_frag if key.box else b.shape_frag)),
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},

@@ -345,6 +345,9 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, frame_words: []u32) {
 // sides `u` and `v` (instance_footprint): the shape shader's.
 @(private = "file")
 instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc, u, v: Vec2) -> f32 {
+	if inst.hairline > 0 {
+		return cv.hairline(words, rc, u, v, inst.hairline)
+	}
 	if inst.aliased {
 		// Off center as the shader samples it.
 		w := cv.winding(words, rc + (u + v) / 64)

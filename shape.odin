@@ -68,8 +68,9 @@ shape_solidity :: proc(b: ^Shape_Builder, s: Solidity) {
 }
 
 // Adds a path's contours under `t`. Every contour is closed, as filling
-// does; segments before the first move go nowhere, and a segment after a
-// close starts a contour where the closed one started.
+// does (with `b.outline`, one the path leaves open stays open in the
+// outline); segments before the first move go nowhere, and a segment after
+// a close starts a contour where the closed one started.
 shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
 		return transform_point(t, p.x, p.y)
@@ -78,6 +79,9 @@ shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 	for e in path_events_next(&it) {
 		switch e.kind {
 		case .Begin:
+			if b.outline {
+				cv.end_open(b)
+			}
 			shape_move_to(b, at(t, e.p[0]))
 		case .Line:
 			shape_line_to(b, at(t, e.p[1]))
@@ -90,6 +94,9 @@ shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 		case .Hole:
 			shape_solidity(b, .Hole)
 		}
+	}
+	if b.outline {
+		cv.end_open(b)
 	}
 	shape_close(b)
 }
@@ -124,7 +131,8 @@ shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index, o: ^ft.Outl
 
 // Builds the shape from the builder's curves; false (and no shape) when
 // there are none. `search` sizes the grid for the fastest drawing
-// (cv.build).
+// (cv.build); with `b.outline` (set before adding curves) it also draws as
+// a hairline (`hairline_shape`).
 shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true) -> (s: Shape, ok: bool) {
 	words, origin, extent := cv.build(b, allocator, search) or_return
 	return {data = words, origin = origin, extent = extent, allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}, true
@@ -170,8 +178,9 @@ shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
 
 // Builds a path's shape, its cubics within `tol` path units (0: each within
 // 1/4096 of its size; a shape drawn magnified wants the pixel fraction it
-// may miss by at its largest scale).
-shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true, scratch: ^Shape_Scratch = nil, tol: f32 = 0) -> (Shape, bool) {
+// may miss by at its largest scale). With `outline` it also draws as the
+// path's hairline (`hairline_shape`).
+shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true, scratch: ^Shape_Scratch = nil, tol: f32 = 0, outline := false) -> (Shape, bool) {
 	temp: Shape_Scratch
 	sc := scratch
 	if sc == nil {
@@ -180,6 +189,7 @@ shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true
 	}
 	shape_builder_reset(&sc.builder)
 	sc.builder.tol = tol
+	sc.builder.outline = outline
 	shape_add_path(&sc.builder, p)
 	return shape_build(&sc.builder, allocator, search)
 }

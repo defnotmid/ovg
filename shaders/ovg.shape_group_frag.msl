@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 755 "ovg.slang"
+#line 756 "ovg.slang"
 struct VS_Shape_Out_0
 {
     float4 position_0;
@@ -14,7 +14,7 @@ struct VS_Shape_Out_0
 };
 
 
-#line 751
+#line 752
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -52,57 +52,57 @@ struct KernelContext_0
 };
 
 
-#line 799
+#line 800
 void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 800
+#line 801
     uint _S1 = i_0->data_0.w;
 
-#line 800
+#line 801
     if((_S1 & 2147483648U) != 0U)
     {
 
-#line 800
+#line 801
         float4 _S2 = float4(kernelContext_0->members_0[_S1 & 2147483647U].clip_0) ;
 
         float2 _S3 = i_0->position_0.xy;
 
-#line 802
+#line 803
         bool _S4;
 
-#line 802
+#line 803
         if(any(_S3 < (_S2.xy)))
         {
 
-#line 802
+#line 803
             _S4 = true;
 
-#line 802
+#line 803
         }
         else
         {
 
-#line 802
+#line 803
             _S4 = any(_S3 >= (_S2.zw));
 
-#line 802
+#line 803
         }
 
-#line 802
+#line 803
         if(_S4)
         {
 
-#line 803
+#line 804
             discard_fragment();
 
-#line 802
+#line 803
         }
 
-#line 800
+#line 801
     }
 
-#line 806
+#line 807
     return;
 }
 
@@ -3290,314 +3290,314 @@ struct pixelInput_0
 };
 
 
-#line 858
+#line 868
 [[fragment]] pixelOutput_0 fs_shape_group(pixelInput_0 _S248 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 858
+#line 868
     thread KernelContext_0 kernelContext_24;
 
-#line 858
+#line 868
     (&kernelContext_24)->members_0 = members_1;
 
-#line 858
+#line 868
     (&kernelContext_24)->shapes_0 = shapes_1;
 
-#line 858
+#line 868
     (&kernelContext_24)->paints_0 = paints_1;
 
-#line 858
+#line 868
     (&kernelContext_24)->tex_texture_0 = tex_texture_1;
 
-#line 858
+#line 868
     (&kernelContext_24)->tex_sampler_0 = tex_sampler_1;
 
-#line 858
+#line 868
     thread VS_Shape_Out_0 _S249;
 
-#line 858
+#line 868
     (&_S249)->position_0 = position_1;
 
-#line 858
+#line 868
     (&_S249)->rc_0 = _S248.rc_7;
 
-#line 858
+#line 868
     (&_S249)->fpos_0 = _S248.fpos_4;
 
-#line 858
+#line 868
     (&_S249)->uv_0 = _S248.uv_2;
 
-#line 858
+#line 868
     (&_S249)->data_0 = _S248.data_3;
 
-#line 858
+#line 868
     shape_clip_0(&_S249, &kernelContext_24);
 
     uint _S250 = _S248.data_3.x;
 
-#line 860
+#line 870
     uint dims_0 = (&kernelContext_24)->shapes_0[_S250];
     uint nx_1 = dims_0 & 65535U;
     uint _S251 = dims_0 >> 16U;
 
-#line 862
+#line 872
     uint2 cell_2 = min(uint2(max(_S248.rc_7, float2(0.0f) )), uint2(nx_1, _S251) - uint2(1U) );
     uint _S252 = _S250 + 1U;
 
-#line 863
+#line 873
     uint at_0 = _S252 + cell_2.y * nx_1 + cell_2.x;
     uint _S253 = _S252 + nx_1 * _S251 + 1U;
 
     uint _S254 = (&kernelContext_24)->shapes_0[at_0];
 
-#line 866
+#line 876
     float4 acc_0 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 866
+#line 876
     uint k_6 = _S254;
 
-#line 866
+#line 876
     for(;;)
     {
 
-#line 866
+#line 876
         if(k_6 < ((&kernelContext_24)->shapes_0)[at_0 + 1U])
         {
         }
         else
         {
 
-#line 866
+#line 876
             break;
         }
 
-#line 867
+#line 877
         Shape_Instance_natural_0 s_9 = (&kernelContext_24)->members_0[_S248.data_3.z + (&kernelContext_24)->shapes_0[_S253 + k_6]];
 
-#line 867
+#line 877
         float4 _S255 = float4(s_9.t_0) ;
 
         float2 d_5 = _S248.fpos_4 - _S255.xy;
 
-#line 869
+#line 879
         float4 _S256 = float4(s_9.m_0) ;
         float _S257 = _S256.w;
 
-#line 870
+#line 880
         float _S258 = d_5.x;
 
-#line 870
+#line 880
         float _S259 = _S256.z;
 
-#line 870
+#line 880
         float _S260 = d_5.y;
 
-#line 870
+#line 880
         float _S261 = _S256.x;
 
-#line 870
+#line 880
         float _S262 = _S256.y;
 
-#line 870
+#line 880
         float2 rc_8 = float2(_S257 * _S258 - _S259 * _S260, _S261 * _S260 - _S262 * _S258) / float2((_S261 * _S257 - _S259 * _S262)) ;
         float2 epp_0 = _S255.zw;
 
-#line 871
+#line 881
         float4 _S263 = float4(s_9.bounds_0) ;
 
-#line 871
+#line 881
         bool _S264;
         if(any(rc_8 < (_S263.xy - epp_0)))
         {
 
-#line 872
+#line 882
             _S264 = true;
 
-#line 872
+#line 882
         }
         else
         {
 
-#line 872
+#line 882
             _S264 = any(rc_8 > (_S263.zw + epp_0));
 
-#line 872
+#line 882
         }
 
-#line 872
+#line 882
         if(_S264)
         {
 
-#line 873
+#line 883
             k_6 = k_6 + 1U;
 
-#line 866
+#line 876
             continue;
         }
 
-#line 866
+#line 876
         uint4 _S265 = uint4(s_9.data_1) ;
 
-#line 875
+#line 885
         uint _S266 = _S265.z;
 
-#line 875
+#line 885
         bool even_odd_3 = (_S266 & 1U) != 0U;
 
-#line 875
+#line 885
         bool _S267;
 
-#line 875
+#line 885
         float coverage_0;
 
         if((_S266 & 2U) != 0U)
         {
 
-#line 877
+#line 887
             float4 _S268 = float4(s_9.uv_1) ;
             int w_3 = curves_winding_0((&kernelContext_24)->shapes_0, _S265.x, rc_8 + (_S268.xy + _S268.zw) / float2(64.0f) );
             if(even_odd_3)
             {
 
-#line 879
+#line 889
                 _S267 = (w_3 & int(1)) != int(0);
 
-#line 879
+#line 889
             }
             else
             {
 
-#line 879
+#line 889
                 _S267 = w_3 != int(0);
 
-#line 879
+#line 889
             }
 
-#line 879
+#line 889
             if(_S267)
             {
 
-#line 879
+#line 889
                 coverage_0 = 1.0f;
 
-#line 879
+#line 889
             }
             else
             {
 
-#line 879
+#line 889
                 coverage_0 = 0.0f;
 
-#line 879
+#line 889
             }
 
-#line 877
+#line 887
         }
         else
         {
             if(_S262 == 0.0f)
             {
 
-#line 880
+#line 890
                 _S267 = _S259 == 0.0f;
 
-#line 880
+#line 890
             }
             else
             {
 
-#line 880
+#line 890
                 _S267 = false;
 
-#line 880
+#line 890
             }
 
-#line 880
+#line 890
             if(_S267)
             {
 
-#line 880
+#line 890
                 float4 _S269 = float4(s_9.uv_1) ;
 
-#line 880
+#line 890
                 coverage_0 = curves_coverage_0((&kernelContext_24)->shapes_0, _S265.x, rc_8, float2(abs(_S269.x), abs(_S269.w)), even_odd_3);
 
-#line 880
+#line 890
             }
             else
             {
 
-#line 880
+#line 890
                 float4 _S270 = float4(s_9.uv_1) ;
 
-#line 880
+#line 890
                 coverage_0 = curves_coverage_affine_0((&kernelContext_24)->shapes_0, _S265.x, rc_8, _S270.xy, _S270.zw, even_odd_3);
 
-#line 880
+#line 890
             }
 
-#line 877
+#line 887
         }
 
-#line 885
+#line 895
         if(coverage_0 < 0.00196078442968428f)
         {
 
-#line 886
+#line 896
             k_6 = k_6 + 1U;
 
-#line 866
+#line 876
             continue;
         }
 
-#line 888
+#line 898
         (&kernelContext_24)->paint_index_0 = _S265.y;
 
-#line 888
+#line 898
         int _S271 = shader_type_0(&kernelContext_24);
 
-#line 888
+#line 898
         float4 _S272 = fill_color_0(_S271, _S248.fpos_4, &kernelContext_24);
 
-#line 888
+#line 898
         float _S273 = stroke_mask_0(float2(0.5f, coverage_0), &kernelContext_24);
 
-#line 888
+#line 898
         float _S274 = scissor_mask_0(_S248.fpos_4, &kernelContext_24);
         float4 c_9 = _S272 * float4((_S273 * _S274)) ;
 
-#line 889
+#line 899
         acc_0 = c_9 + acc_0 * float4((1.0f - c_9.w)) ;
 
-#line 866
+#line 876
         k_6 = k_6 + 1U;
 
-#line 866
+#line 876
     }
 
-#line 892
+#line 902
     if((acc_0.w) < 0.00196078442968428f)
     {
 
-#line 893
+#line 903
         discard_fragment();
 
-#line 892
+#line 902
     }
 
 
     (&kernelContext_24)->paint_index_0 = _S248.data_3.y;
 
-#line 895
+#line 905
     int _S275 = shader_type_0(&kernelContext_24);
 
-#line 895
+#line 905
     float4 _S276 = fill_color_0(_S275, _S248.fpos_4, &kernelContext_24);
 
-#line 895
+#line 905
     float _S277 = scissor_mask_0(_S248.fpos_4, &kernelContext_24);
 
-#line 895
+#line 905
     pixelOutput_0 _S278 = { acc_0 * (_S276 * float4(_S277) ) };
     return _S278;
 }

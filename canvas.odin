@@ -452,18 +452,50 @@ fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENT
 // `fill_shape` at each of `locals`, sharing one paint row: a shape drawn
 // many times (an editor's anchors and handles) costs an instance each.
 fill_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, locals: []Transform2D) {
+	push_shapes(c, s, paint, 0, locals)
+}
+
+// Draws the outline of `s` (built with one: shape_from_path's `outline`)
+// as a line `width` pixels wide under the current transform and `local`,
+// whatever they scale or turn: a selection's or a handle's hairline, with
+// no stroke to build. Contours the path leaves open stay open; ends and
+// corners round. A pixel takes its share within width / 2 of the outline
+// (cv.hairline); the paint's fill rule, anti-aliasing and feather do not
+// apply. As with fill_shape, the frame keeps `s`'s address.
+hairline_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, local := TRANSFORM_IDENTITY) {
+	if width > 0 {
+		local := local
+		push_shapes(c, s, paint, width, ([^]Transform2D)(&local)[:1])
+	}
+}
+
+// `hairline_shape` at each of `locals`, sharing one paint row.
+hairline_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, locals: []Transform2D) {
+	if width > 0 {
+		push_shapes(c, s, paint, width, locals)
+	}
+}
+
+// Instances of `s` at each of `locals` with one paint row: fills, or
+// hairlines `hairline` pixels wide.
+@(private)
+push_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, locals: []Transform2D) {
 	cmd: Command
 	row := max(u32)
 	current := state(c).transform
 	for local in locals {
 		to := transform_multiply(local, current)
-		inst := paint_instance(paint, to)
+		inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
 		inst.transform = transform_multiply(shape_local(s), to)
-		if outside_target(c, device_bounds(s.data, inst.transform, 1 + inst.widen)) {
+		if outside_target(c, device_bounds(s.data, inst.transform, instance_reach(inst))) {
 			continue
 		}
 		if row == max(u32) {
-			cmd, row = shape_paint(c, paint)
+			pp := paint
+			if hairline > 0 {
+				pp.feather = 0
+			}
+			cmd, row = shape_paint(c, pp)
 		}
 		inst.shape = s
 		inst.paint = row

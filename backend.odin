@@ -239,7 +239,9 @@ Cmd_Draw_Shapes :: struct {
 // `shape` (kept by its owner; GPU backends upload it once), or when nil
 // `Frame.shape_words[words]` (a path filled this frame). A pixel's
 // coverage is its footprint's, `widen` pixels wider than the pixel (a
-// feathered edge), or with `aliased` its center's winding.
+// feathered edge), or with `aliased` its center's winding; with `hairline`
+// its share within hairline / 2 pixels of the shape's outline
+// (`hairline_shape`) instead.
 Shape_Instance :: struct {
 	shape:     ^Shape,
 	words:     Range,
@@ -248,6 +250,7 @@ Shape_Instance :: struct {
 	even_odd:  bool,
 	aliased:   bool,
 	widen:     f32,
+	hairline:  f32,
 }
 
 // The instance's shape words; `frame_words` is the frame's `shape_words`.
@@ -260,7 +263,12 @@ instance_words :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) 
 
 // The pixels the instance's coverage reaches.
 instance_bounds :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> Bounds {
-	return device_bounds(instance_words(inst, frame_words), inst.transform, 1 + inst.widen)
+	return device_bounds(instance_words(inst, frame_words), inst.transform, instance_reach(inst))
+}
+
+// How many pixels past the shape's bounds the instance's coverage reaches.
+instance_reach :: proc "contextless" (inst: Shape_Instance) -> f32 {
+	return 1 + 0.5 * inst.hairline if inst.hairline > 0 else 1 + inst.widen
 }
 
 // A pixel's sides in shape units under the instance's transform, widened:

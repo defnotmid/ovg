@@ -191,10 +191,13 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 @(private)
 gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, clip: [4]f32) -> Gpu_Shape_Instance {
 	t := inst.transform
-	epp := vg.shape_ems_per_pixel(t) * (1 + inst.widen)
+	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
 	x0, y0, x1, y1 := cv.bounds(words)
 	flags: u32 = (1 if inst.even_odd else 0) | (2 if inst.aliased else 0)
+	if inst.hairline > 0 {
+		flags = transmute(u32)inst.hairline
+	}
 	return {
 		m = {t[0], t[1], t[2], t[3]},
 		t = {t[4], t[5], epp.x, epp.y},

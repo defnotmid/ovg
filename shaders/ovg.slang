@@ -728,7 +728,8 @@ float4 fs_main(VS_Out i) : SV_Target {
 // the shape units one pixel spans per axis (t.zw), the shape's bounds, the
 // pixel's sides in shape units (uv: u.xy, v.xy: its footprint), and its
 // word offset in `shapes`, paint row and flags (bit 0: even-odd; bit 1:
-// aliased, the pixel center's winding), and its scissor's pixels (target
+// aliased, the pixel center's winding; a hairline's width instead), and its
+// scissor's pixels (target
 // pixels x0, y0, x1, y1: draws aren't scissored, so instances of any
 // scissor draw together).
 struct Shape_Instance {
@@ -846,6 +847,15 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
         return shape_fill(i, shape_aliased(i));
     }
     return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u));
+}
+
+// A hairline (ovg hairline_shape): the shape's outline drawn asfloat(data.z)
+// pixels wide under any transform.
+[shader("fragment")]
+float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
+    shape_clip(i);
+    paint_index = i.data.y;
+    return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
 }
 
 // A group (ovg Cmd_Draw_Shapes.group): a record over its instances'

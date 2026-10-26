@@ -30,7 +30,8 @@
 //
 //	[0] columns nx                [1] rows ny
 //	[2] cell width (f32)          [3] cell height (f32)
-//	[4] 0 (reserved)              [5] 0 (reserved)
+//	[4] word offset of the outline, 0 for none
+//	[5] 0 (reserved)
 //	[6] word offset of the curves [7] mean coverage (f32)
 //	[8..11] bounds min x, min y, max x, max y (f32)
 //	[12..] each cell, row by row: word offset of its piece list, piece
@@ -39,6 +40,10 @@
 //	       change i32: the backdrop is the bottom value plus the changes at
 //	       or below y), and the pieces, six f32 each (p1, p2, p3; p2 within
 //	       the box of p1 and p3).
+//	[outline..] when built with one (`hairline` reads it): each cell's
+//	       word offset of its outline list and its count, then the lists:
+//	       the pieces the contours draw, horizontal ones too, without the
+//	       edges that only close contours left open (the fill's).
 //
 // Cell (i, j) spans x in [i, i + 1] * width, y in [j, j + 1] * height;
 // pieces are in shape units: the source scaled so the shape's larger side is
@@ -85,6 +90,12 @@ Builder :: struct {
 	// `build`'s working arrays, kept for the next build (with `curves`'
 	// allocator).
 	scratch:     Scratch,
+	// Keep the contours as drawn too, for `hairline` (set before adding
+	// curves; `builder_reset` clears it): with it `unstroked` lists the
+	// curves closing contours left open (`end_open`), the fill's edges,
+	// which an outline does not draw.
+	outline:     bool,
+	unstroked:   [dynamic]u32,
 }
 
 @(private)
@@ -96,6 +107,12 @@ Scratch :: struct {
 	junctions:                      [dynamic]Junction,
 	steps:                          [dynamic]Step,
 	backdrop:                       [dynamic]i32,
+	// An outline's: the mono pieces of `unstroked` curves, whether each
+	// piece is drawn, the lists' starts, the lists.
+	hidden:                         [dynamic]u32,
+	drawn:                          [dynamic]bool,
+	outline_starts:                 [dynamic]int,
+	outline_lists:                  [dynamic]u32,
 }
 
 @(private)
@@ -120,6 +137,7 @@ Orientation :: enum u8 {
 
 builder_destroy :: proc(b: ^Builder) {
 	delete(b.curves)
+	delete(b.unstroked)
 	s := &b.scratch
 	delete(s.mono)
 	delete(s.split)
@@ -131,6 +149,10 @@ builder_destroy :: proc(b: ^Builder) {
 	delete(s.fill)
 	delete(s.step_ats)
 	delete(s.lists)
+	delete(s.hidden)
+	delete(s.drawn)
+	delete(s.outline_starts)
+	delete(s.outline_lists)
 	delete(s.junctions)
 	delete(s.steps)
 	delete(s.backdrop)
@@ -139,6 +161,8 @@ builder_destroy :: proc(b: ^Builder) {
 
 builder_reset :: proc(b: ^Builder) {
 	clear(&b.curves)
+	clear(&b.unstroked)
+	b.outline = false
 	b.open = false
 	b.contour = 0
 }
@@ -192,6 +216,19 @@ close :: proc(b: ^Builder) {
 	}
 }
 
+// Ends the open contour left open: its line back to the start fills, and
+// with `b.outline` the outline skips it (`unstroked`). A contour ended by
+// `move_to`, `close` or the build is closed in the outline too.
+end_open :: proc(b: ^Builder) {
+	if b.outline && b.open && b.start != b.last {
+		if b.unstroked.allocator.procedure == nil {
+			b.unstroked.allocator = b.curves.allocator
+		}
+		append(&b.unstroked, u32(len(b.curves)))
+	}
+	close(b)
+}
+
 // Winds the current contour as `o` requires, reversing it if needed.
 orient :: proc(b: ^Builder, o: Orientation) {
 	curves := b.curves[b.contour:]
@@ -216,7 +253,8 @@ orient :: proc(b: ^Builder, o: Orientation) {
 // words) when there are no curves or they span nothing. `search` tries grid
 // sizes for the one keeping the fullest cell smallest (for shapes kept and
 // drawn often); without it the grid is sized from the piece count alone
-// (for shapes built every frame).
+// (for shapes built every frame). With `b.outline` the words add the lists
+// `hairline` draws the contours from.
 build :: proc(b: ^Builder, allocator := context.allocator, search := true) -> (words: []u32, origin: Vec2, extent: f32, ok: bool) {
 	out := make([dynamic]u32, allocator)
 	origin, extent, ok = build_append(b, &out, search)
@@ -224,10 +262,14 @@ build :: proc(b: ^Builder, allocator := context.allocator, search := true) -> (w
 		delete(out)
 		return
 	}
+	if b.outline {
+		append_outline(b, &out, 0)
+	}
 	return out[:], origin, extent, true
 }
 
-// `build`, appending the words to `out` (reserved exactly when empty).
+// `build`, appending the words to `out` (reserved exactly when empty),
+// without an outline.
 build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin: Vec2, extent: f32, ok: bool) {
 	close(b)
 	if len(b.curves) == 0 {
@@ -240,6 +282,7 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 		s.at.allocator, s.places.allocator = alloc, alloc
 		s.counts.allocator, s.starts.allocator, s.fill.allocator, s.step_ats.allocator = alloc, alloc, alloc, alloc
 		s.lists.allocator, s.junctions.allocator, s.steps.allocator, s.backdrop.allocator = alloc, alloc, alloc, alloc
+		s.hidden.allocator, s.drawn.allocator, s.outline_starts.allocator, s.outline_lists.allocator = alloc, alloc, alloc, alloc
 	}
 	clear(&s.mono)
 	for c in b.curves {
@@ -475,6 +518,94 @@ build_append :: proc(b: ^Builder, out: ^[dynamic]u32, search := true) -> (origin
 	return origin, extent, true
 }
 
+// Appends the outline to the shape build_append just wrote at `out[base:]`
+// (its pieces still in the scratch) and points the header at it. The mono
+// pieces of the curves it skips: a curve's are its splits plus one.
+@(private = "file")
+append_outline :: proc(b: ^Builder, out: ^[dynamic]u32, base: int) {
+	s := &b.scratch
+	clear(&s.hidden)
+	m, u := 0, 0
+	for c, k in b.curves {
+		_, n := monotone_splits(c)
+		if u < len(b.unstroked) && int(b.unstroked[u]) == k {
+			for i in 0 ..= n {
+				append(&s.hidden, u32(m + i))
+			}
+			u += 1
+		}
+		m += n + 1
+	}
+	nx, ny := int(out[base]), int(out[base + 1])
+	lists := outline_lists(s, s.pieces[:], s.places[:], s.mono[:], transmute(f32)out[base + 3], nx, ny)
+	cells := nx * ny
+	at := len(out) - base
+	resize(out, len(out) + 2 * cells + len(lists))
+	d := out[base:]
+	d[4] = u32(at)
+	starts := s.outline_starts[:]
+	list_at := at + 2 * cells
+	for k in 0 ..< cells {
+		d[at + 2 * k], d[at + 2 * k + 1] = u32(list_at + starts[k]), u32(starts[k + 1] - starts[k])
+	}
+	copy(d[list_at:], lists)
+}
+
+// Each cell's list of the pieces an outline draws (`s.outline_starts`
+// spans them): those the cell's rows list, and horizontal ones in their
+// row, without the pieces of `s.hidden`'s mono pieces. A mono piece's
+// pieces are a run ending at its end point.
+@(private = "file")
+outline_lists :: proc(s: ^Scratch, pieces: []Curve, places: []Place, mono: []Curve, ch: f32, nx, ny: int) -> []u32 {
+	resize(&s.drawn, len(pieces))
+	drawn := s.drawn[:]
+	m, h := 0, 0
+	for c, k in pieces {
+		hide := h < len(s.hidden) && int(s.hidden[h]) == m
+		drawn[k] = !hide
+		if m + 1 < len(mono) && c.p3 == mono[m].p3 {
+			h += 1 if hide else 0
+			m += 1
+		}
+	}
+	rows :: #force_inline proc "contextless" (c: Curve, at: Place, ch: f32, ny: int) -> (j0, j1: int) {
+		if at.j0 <= at.j1 {
+			return at.j0, at.j1
+		}
+		j := row(c.p1.y, ch, ny)
+		return j, j
+	}
+	cells := nx * ny
+	resize(&s.outline_starts, cells + 1)
+	starts := s.outline_starts[:]
+	slice.zero(starts)
+	for c, k in pieces {
+		if drawn[k] {
+			j0, j1 := rows(c, places[k], ch, ny)
+			for j in j0 ..= j1 {
+				starts[j * nx + places[k].i + 1] += 1
+			}
+		}
+	}
+	for k in 0 ..< cells {
+		starts[k + 1] += starts[k]
+	}
+	resize(&s.outline_lists, starts[cells])
+	resize(&s.fill, cells)
+	fill := s.fill[:]
+	copy(fill, starts[:cells])
+	for c, k in pieces {
+		if drawn[k] {
+			j0, j1 := rows(c, places[k], ch, ny)
+			for j in j0 ..= j1 {
+				s.outline_lists[fill[j * nx + places[k].i]] = u32(k)
+				fill[j * nx + places[k].i] += 1
+			}
+		}
+	}
+	return s.outline_lists[:]
+}
+
 // Appends `c` split at its x and y extrema into pieces monotone in both,
 // each control point pinned inside its endpoints' box (rounding aside, the
 // split puts it there).
@@ -505,6 +636,23 @@ split_monotone :: proc(c: Curve, out: ^[dynamic]Curve) {
 		}
 		append(out, pin(piece))
 	}
+}
+
+// Where `c` turns in x or in y, inside it: the parameters split_monotone
+// splits it at.
+@(private = "file")
+monotone_splits :: #force_inline proc "contextless" (c: Curve) -> (ts: [2]f32, n: int) {
+	for axis in 0 ..< 2 {
+		den := c.p1[axis] - 2 * c.p2[axis] + c.p3[axis]
+		if den != 0 {
+			t := (c.p1[axis] - c.p2[axis]) / den
+			if t > 1e-6 && t < 1 - 1e-6 {
+				ts[n] = t
+				n += 1
+			}
+		}
+	}
+	return
 }
 
 // Appends a monotone `c` cut where it crosses the lines x = k * w, the cut
@@ -1116,4 +1264,96 @@ winding :: proc "contextless" (s: []u32, p: Vec2) -> i32 {
 		}
 	}
 	return w
+}
+
+// The coverage of the pixel centered at `rc` (shape units), whose sides are
+// `u` and `v` in shape units, by the shape's outline drawn `width` pixels
+// wide whatever the transform scales: for each outline piece near the
+// pixel, the share of the pixel within width / 2 of the piece's line through
+// its point nearest the pixel (the pixel box filtering a straight band:
+// exact for a straight piece, its ends round), the largest. 0 for a shape
+// built without an outline.
+hairline :: proc "contextless" (s: []u32, rc: Vec2, u, v: Vec2, width: f32) -> f32 {
+	outline := s[4]
+	det := u.x * v.y - u.y * v.x
+	if outline == 0 || det == 0 || !(width > 0) {
+		return 0
+	}
+	// Shape units to pixels: the inverse of the map whose columns are u, v.
+	m := [4]f32{v.y / det, -u.y / det, -v.x / det, u.x / det}
+	px :: #force_inline proc "contextless" (m: [4]f32, q: Vec2) -> Vec2 {
+		return {m[0] * q.x + m[2] * q.y, m[1] * q.x + m[3] * q.y}
+	}
+	// Past half the width and half the pixel's diagonal nothing counts.
+	reach := 0.5 * width + 0.7072
+	ex, ey := reach * (abs(u.x) + abs(v.x)), reach * (abs(u.y) + abs(v.y))
+	g := grid_span(s, rc, -ex, ex, -ey, ey)
+	cov: f32
+	for j in g.j0 ..= g.j1 {
+		for i in g.i0 ..= g.i1 {
+			cell := outline + 2 * u32(j * g.nx + i)
+			list := s[cell]
+			for k in 0 ..< s[cell + 1] {
+				c := s[6] + 6 * s[list + k]
+				p1 := Vec2{transmute(f32)s[c], transmute(f32)s[c + 1]} - rc
+				p3 := Vec2{transmute(f32)s[c + 4], transmute(f32)s[c + 5]} - rc
+				// The piece is in its ends' box.
+				if min(p1.x, p3.x) > ex || max(p1.x, p3.x) < -ex || min(p1.y, p3.y) > ey || max(p1.y, p3.y) < -ey {
+					continue
+				}
+				p2 := Vec2{transmute(f32)s[c + 2], transmute(f32)s[c + 3]} - rc
+				cov = max(cov, band_coverage(px(m, p1), px(m, p2), px(m, p3), width))
+			}
+		}
+	}
+	return cov
+}
+
+// The share of the unit pixel at the origin (pixel units) within w / 2 of
+// the line through the quadratic's point nearest it, across the normal
+// there. 0 for a point.
+@(private)
+band_coverage :: #force_inline proc "contextless" (p1, p2, p3: Vec2, w: f32) -> f32 {
+	a, b := p1 - 2 * p2 + p3, 2 * (p2 - p1)
+	chord := p3 - p1
+	l2 := chord.x * chord.x + chord.y * chord.y
+	if l2 == 0 && a == {} {
+		return 0
+	}
+	// From the chord's nearest point, Newton on B(t) . B'(t) = 0.
+	t := clamp(-(p1.x * chord.x + p1.y * chord.y) / l2, 0, 1) if l2 > 0 else 0
+	for _ in 0 ..< 3 {
+		q := (a * t + b) * t + p1
+		dq := 2 * a * t + b
+		f := q.x * dq.x + q.y * dq.y
+		fp := dq.x * dq.x + dq.y * dq.y + 2 * (q.x * a.x + q.y * a.y)
+		if fp > 0 {
+			t = clamp(t - f / fp, 0, 1)
+		}
+	}
+	q := (a * t + b) * t + p1
+	d := math.sqrt(q.x * q.x + q.y * q.y)
+	if d >= 0.5 * w + 0.7072 {
+		return 0
+	}
+	n := q / d
+	if !(d > 1e-6) {
+		dq := 2 * a * t + b
+		n = Vec2{-dq.y, dq.x} / math.sqrt(dq.x * dq.x + dq.y * dq.y)
+	}
+	// The pixel's projection on the normal: two uniforms' sum, of widths
+	// |n.x| and |n.y|, whose distribution is in closed form.
+	wa, wb := max(abs(n.x), abs(n.y)), max(min(abs(n.x), abs(n.y)), 1e-3)
+	return clamp(projected_box(d + 0.5 * w, wa, wb) - projected_box(d - 0.5 * w, wa, wb), 0, 1)
+}
+
+// The share of a unit box's projection, of widths a >= b along its sides,
+// at or below x (x from its center): P(X + Y <= x), X and Y uniform on
+// [-a/2, a/2] and [-b/2, b/2].
+@(private)
+projected_box :: #force_inline proc "contextless" (x, a, b: f32) -> f32 {
+	s1, s2 := 0.5 * (a + b), 0.5 * (a - b)
+	y := clamp(x, -s1, s1)
+	q :: #force_inline proc "contextless" (y: f32) -> f32 {return y * y if y > 0 else 0}
+	return (q(y + s1) - q(y + s2) - q(y - s2) + q(y - s1)) / (2 * a * b)
 }

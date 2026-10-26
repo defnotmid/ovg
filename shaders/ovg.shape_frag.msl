@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 755 "ovg.slang"
+#line 756 "ovg.slang"
 struct VS_Shape_Out_0
 {
     float4 position_0;
@@ -14,7 +14,7 @@ struct VS_Shape_Out_0
 };
 
 
-#line 751
+#line 752
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -52,57 +52,57 @@ struct KernelContext_0
 };
 
 
-#line 799
+#line 800
 void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 800
+#line 801
     uint _S1 = i_0->data_0.w;
 
-#line 800
+#line 801
     if((_S1 & 2147483648U) != 0U)
     {
 
-#line 800
+#line 801
         float4 _S2 = float4(kernelContext_0->members_0[_S1 & 2147483647U].clip_0) ;
 
         float2 _S3 = i_0->position_0.xy;
 
-#line 802
+#line 803
         bool _S4;
 
-#line 802
+#line 803
         if(any(_S3 < (_S2.xy)))
         {
 
-#line 802
+#line 803
             _S4 = true;
 
-#line 802
+#line 803
         }
         else
         {
 
-#line 802
+#line 803
             _S4 = any(_S3 >= (_S2.zw));
 
-#line 802
+#line 803
         }
 
-#line 802
+#line 803
         if(_S4)
         {
 
-#line 803
+#line 804
             discard_fragment();
 
-#line 802
+#line 803
         }
 
-#line 800
+#line 801
     }
 
-#line 806
+#line 807
     return;
 }
 
@@ -501,54 +501,54 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 }
 
 
-#line 824 "ovg.slang"
+#line 825 "ovg.slang"
 float shape_aliased_0(const VS_Shape_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 825
+#line 826
     int w_2 = curves_winding_0(kernelContext_1->shapes_0, i_3->data_0.x, i_3->rc_0 + (i_3->uv_0.xy + i_3->uv_0.zw) / float2(64.0f) );
 
-#line 825
+#line 826
     bool _S29;
     if(((i_3->data_0.z) & 1U) != 0U)
     {
 
-#line 826
+#line 827
         _S29 = (w_2 & int(1)) != int(0);
 
-#line 826
+#line 827
     }
     else
     {
 
-#line 826
+#line 827
         _S29 = w_2 != int(0);
 
-#line 826
+#line 827
     }
 
-#line 826
+#line 827
     float _S30;
 
-#line 826
+#line 827
     if(_S29)
     {
 
-#line 826
+#line 827
         _S30 = 1.0f;
 
-#line 826
+#line 827
     }
     else
     {
 
-#line 826
+#line 827
         _S30 = 0.0f;
 
-#line 826
+#line 827
     }
 
-#line 826
+#line 827
     return _S30;
 }
 
@@ -1174,33 +1174,33 @@ float scissor_mask_0(float2 p_3, KernelContext_0 thread* kernelContext_24)
 }
 
 
-#line 812
+#line 813
 float4 shape_fill_0(const VS_Shape_Out_0 thread* i_5, float coverage_0, KernelContext_0 thread* kernelContext_25)
 {
 
-#line 813
+#line 814
     if(coverage_0 < 0.00196078442968428f)
     {
 
-#line 814
+#line 815
         discard_fragment();
 
-#line 813
+#line 814
     }
 
-#line 813
+#line 814
     int _S99 = shader_type_0(kernelContext_25);
 
-#line 813
+#line 814
     float2 _S100 = i_5->fpos_0;
 
-#line 813
+#line 814
     float4 _S101 = fill_color_0(_S99, i_5->fpos_0, kernelContext_25);
 
-#line 813
+#line 814
     float _S102 = stroke_mask_0(float2(0.5f, coverage_0), kernelContext_25);
 
-#line 813
+#line 814
     float _S103 = scissor_mask_0(_S100, kernelContext_25);
 
 
@@ -3377,129 +3377,129 @@ struct pixelInput_0
 };
 
 
-#line 842 "ovg.slang"
+#line 843 "ovg.slang"
 [[fragment]] pixelOutput_0 fs_shape(pixelInput_0 _S255 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 842
+#line 843
     thread KernelContext_0 kernelContext_26;
 
-#line 842
+#line 843
     (&kernelContext_26)->members_0 = members_1;
 
-#line 842
+#line 843
     (&kernelContext_26)->shapes_0 = shapes_1;
 
-#line 842
+#line 843
     (&kernelContext_26)->paints_0 = paints_1;
 
-#line 842
+#line 843
     (&kernelContext_26)->tex_texture_0 = tex_texture_1;
 
-#line 842
+#line 843
     (&kernelContext_26)->tex_sampler_0 = tex_sampler_1;
 
-#line 842
+#line 843
     thread VS_Shape_Out_0 _S256;
 
-#line 842
+#line 843
     (&_S256)->position_0 = position_1;
 
-#line 842
+#line 843
     (&_S256)->rc_0 = _S255.rc_7;
 
-#line 842
+#line 843
     (&_S256)->fpos_0 = _S255.fpos_4;
 
-#line 842
+#line 843
     (&_S256)->uv_0 = _S255.uv_2;
 
-#line 842
+#line 843
     (&_S256)->data_0 = _S255.data_3;
 
-#line 842
+#line 843
     shape_clip_0(&_S256, &kernelContext_26);
 
     (&kernelContext_26)->paint_index_0 = _S255.data_3.y;
     uint _S257 = _S255.data_3.z;
 
-#line 845
+#line 846
     if((_S257 & 2U) != 0U)
     {
 
-#line 845
+#line 846
         thread VS_Shape_Out_0 _S258;
 
-#line 845
+#line 846
         (&_S258)->position_0 = position_1;
 
-#line 845
+#line 846
         (&_S258)->rc_0 = _S255.rc_7;
 
-#line 845
+#line 846
         (&_S258)->fpos_0 = _S255.fpos_4;
 
-#line 845
+#line 846
         (&_S258)->uv_0 = _S255.uv_2;
 
-#line 845
+#line 846
         (&_S258)->data_0 = _S255.data_3;
 
-#line 845
+#line 846
         float _S259 = shape_aliased_0(&_S258, &kernelContext_26);
 
-#line 845
+#line 846
         thread VS_Shape_Out_0 _S260;
 
-#line 845
+#line 846
         (&_S260)->position_0 = position_1;
 
-#line 845
+#line 846
         (&_S260)->rc_0 = _S255.rc_7;
 
-#line 845
+#line 846
         (&_S260)->fpos_0 = _S255.fpos_4;
 
-#line 845
+#line 846
         (&_S260)->uv_0 = _S255.uv_2;
 
-#line 845
+#line 846
         (&_S260)->data_0 = _S255.data_3;
 
-#line 845
+#line 846
         float4 _S261 = shape_fill_0(&_S260, _S259, &kernelContext_26);
 
-#line 845
+#line 846
         pixelOutput_0 _S262 = { _S261 };
         return _S262;
     }
     float _S263 = curves_coverage_affine_0((&kernelContext_26)->shapes_0, _S255.data_3.x, _S255.rc_7, _S255.uv_2.xy, _S255.uv_2.zw, (_S257 & 1U) != 0U);
 
-#line 848
+#line 849
     thread VS_Shape_Out_0 _S264;
 
-#line 848
+#line 849
     (&_S264)->position_0 = position_1;
 
-#line 848
+#line 849
     (&_S264)->rc_0 = _S255.rc_7;
 
-#line 848
+#line 849
     (&_S264)->fpos_0 = _S255.fpos_4;
 
-#line 848
+#line 849
     (&_S264)->uv_0 = _S255.uv_2;
 
-#line 848
+#line 849
     (&_S264)->data_0 = _S255.data_3;
 
-#line 848
+#line 849
     float4 _S265 = shape_fill_0(&_S264, _S263, &kernelContext_26);
 
-#line 848
+#line 849
     pixelOutput_0 _S266 = { _S265 };
 
-#line 848
+#line 849
     return _S266;
 }
 

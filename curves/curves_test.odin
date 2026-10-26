@@ -1,6 +1,7 @@
 package curves
 
 import "core:math"
+import "core:slice"
 import "core:testing"
 
 @(private = "file")
@@ -43,6 +44,138 @@ test_winding :: proc(t: ^testing.T) {
 	testing.expect_value(t, at(words, origin, extent, 15, 15), outer)
 	testing.expect_value(t, at(words, origin, extent, 40, 15), 0)
 	testing.expect_value(t, at(words, origin, extent, 15, -5), 0)
+}
+
+// The share of the unit pixel at `px` within w / 2 of the segment a b
+// (round ends), by 128 x 128 samples in f64.
+@(private = "file")
+sampled_band :: proc(px, a, b: [2]f64, w: f64) -> f64 {
+	N :: 128
+	d := b - a
+	l2 := d.x * d.x + d.y * d.y
+	inside := 0
+	for sy in 0 ..< N {
+		for sx in 0 ..< N {
+			p := px + {(f64(sx) + 0.5) / N - 0.5, (f64(sy) + 0.5) / N - 0.5}
+			t := clamp(((p.x - a.x) * d.x + (p.y - a.y) * d.y) / l2, 0, 1)
+			q := a + d * t - p
+			if q.x * q.x + q.y * q.y <= w * w / 4 {
+				inside += 1
+			}
+		}
+	}
+	return f64(inside) / (N * N)
+}
+
+// `hairline` at device pixel (x + 0.5, y + 0.5) under `t` (source units to
+// pixels: rotation, scale and translation).
+@(private = "file")
+hairline_at :: proc(words: []u32, origin: Vec2, extent: f32, t: [6]f32, x, y: f32, w: f32) -> f32 {
+	// Pixels to source units: t's inverse.
+	det := t[0] * t[3] - t[1] * t[2]
+	p := Vec2{x + 0.5 - t[4], y + 0.5 - t[5]}
+	src := Vec2{(t[3] * p.x - t[2] * p.y) / det, (t[0] * p.y - t[1] * p.x) / det}
+	u := Vec2{t[3], -t[1]} / det / extent
+	v := Vec2{-t[2], t[0]} / det / extent
+	return hairline(words, (src - origin) / extent, u, v, w)
+}
+
+@(test)
+test_hairline_lines :: proc(t: ^testing.T) {
+	// Long open segments at several angles and widths, away from their
+	// ends: the coverage is the band's (128 x 128 samples, so within 1/64).
+	worst: f64
+	for angle in ([5]f32{0, 0.1, 0.4, math.PI / 4, 1.3}) {
+		for w in ([3]f32{1, 1.5, 3}) {
+			b: Builder
+			defer builder_destroy(&b)
+			b.outline = true
+			dir := Vec2{math.cos(angle), math.sin(angle)}
+			a0, a1 := Vec2{50.3, 50.1} - dir * 400, Vec2{50.3, 50.1} + dir * 400
+			move_to(&b, a0)
+			line_to(&b, a1)
+			end_open(&b)
+			words, origin, extent, ok := build(&b)
+			testing.expect(t, ok)
+			defer delete(words)
+			for y in 44 ..< 57 {
+				for x in 44 ..< 57 {
+					got := hairline_at(words, origin, extent, {1, 0, 0, 1, 0, 0}, f32(x), f32(y), w)
+					want := sampled_band({f64(x) + 0.5, f64(y) + 0.5}, {f64(a0.x), f64(a0.y)}, {f64(a1.x), f64(a1.y)}, f64(w))
+					worst = max(worst, abs(f64(got) - want))
+				}
+			}
+		}
+	}
+	testing.expectf(t, worst < 1.0 / 64, "worst %v", worst)
+}
+
+@(test)
+test_hairline_outline :: proc(t: ^testing.T) {
+	I :: [6]f32{1, 0, 0, 1, 0, 0}
+	// An open V: its closing edge (y = 10, x from 10 to 90) fills but is not
+	// drawn; closed, it is, and so are horizontal edges.
+	open_v: Builder
+	defer builder_destroy(&open_v)
+	open_v.outline = true
+	move_to(&open_v, {10, 10})
+	line_to(&open_v, {50, 90})
+	line_to(&open_v, {90, 10})
+	end_open(&open_v)
+	words, origin, extent, ok := build(&open_v)
+	testing.expect(t, ok)
+	defer delete(words)
+	testing.expect_value(t, hairline_at(words, origin, extent, I, 50, 9.5, 1), 0)
+	testing.expect(t, winding(words, (Vec2{50, 20} - origin) / extent) != 0)
+	closed: Builder
+	defer builder_destroy(&closed)
+	closed.outline = true
+	move_to(&closed, {10, 10})
+	line_to(&closed, {50, 90})
+	line_to(&closed, {90, 10})
+	close(&closed)
+	cwords, corigin, cextent, _ := build(&closed)
+	defer delete(cwords)
+	testing.expect(t, abs(hairline_at(cwords, corigin, cextent, I, 50, 9.5, 1) - 1) < 1e-3)
+	// The fill is the same either way, and as without the outline.
+	plain: Builder
+	defer builder_destroy(&plain)
+	move_to(&plain, {10, 10})
+	line_to(&plain, {50, 90})
+	line_to(&plain, {90, 10})
+	pwords, _, _, _ := build(&plain)
+	defer delete(pwords)
+	testing.expect_value(t, pwords[4], 0)
+	testing.expect_value(t, hairline_at(pwords, origin, extent, I, 50, 49.5, 1), 0)
+	for q in ([3]Vec2{{50, 20}, {30, 30}, {50, 9.8}}) {
+		r := (q - origin) / extent
+		f := Vec2{1, 1} / extent
+		testing.expect_value(t, coverage(words, r, f, false), coverage(pwords, r, f, false))
+		testing.expect_value(t, coverage(cwords, r, f, false), coverage(pwords, r, f, false))
+	}
+	testing.expect(t, slice.equal(words[HEADER:words[4]], pwords[HEADER:]))
+
+	// The width stays in pixels under scale and rotation: a segment 4x
+	// magnified and turned by 0.3 covers as one drawn at 1:1 along it.
+	seg: Builder
+	defer builder_destroy(&seg)
+	seg.outline = true
+	move_to(&seg, {0, 0})
+	line_to(&seg, {100, 0})
+	end_open(&seg)
+	swords, sorigin, sextent, _ := build(&seg)
+	defer delete(swords)
+	c, s := math.cos(f32(0.3)), math.sin(f32(0.3))
+	tr := [6]f32{4 * c, 4 * s, -4 * s, 4 * c, 20.25, 30.5}
+	worst: f64
+	for y in 60 ..< 90 {
+		for x in 120 ..< 160 {
+			got := hairline_at(swords, sorigin, sextent, tr, f32(x), f32(y), 1)
+			want := sampled_band({f64(x) + 0.5, f64(y) + 0.5}, {20.25, 30.5}, {20.25 + 400 * f64(c), 30.5 + 400 * f64(s)}, 1)
+			worst = max(worst, abs(f64(got) - want))
+		}
+	}
+	testing.expectf(t, worst < 1.0 / 64, "worst %v", worst)
 }
 
 @(test)
