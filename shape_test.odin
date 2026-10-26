@@ -170,6 +170,49 @@ test_sw_fill_shape :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_sw_fill_shapes :: proc(t: ^testing.T) {
+	// One shape at many places, one paint row: the pixels fill_shape draws
+	// at each (the one off the target skipped).
+	draw :: proc(batch: bool) -> (pixels: []u8, paints, instances: int) {
+		b: Software_Backend
+		software_backend_init(&b)
+		defer software_backend_destroy(&b)
+		c: Canvas
+		canvas_init(&c, software_backend(&b))
+		defer canvas_destroy(&c)
+		set_size(&c, 40, 20)
+		clear_rect(&c, 0, 0, 40, 20, WHITE)
+		p: Path
+		defer path_destroy(&p)
+		path_circle(&p, 0, 0, 3)
+		s, _ := shape_from_path(&p)
+		defer shape_destroy(&s)
+		locals := [?]Transform2D{transform_translation(5, 5), transform_translation(12.5, 9.25), transform_multiply(transform_scaling(2, 1), transform_translation(30, 12)), transform_translation(80, 5)}
+		translate(&c, 1, 0)
+		paint := paint_color(rgb(0, 0, 255))
+		if batch {
+			fill_shapes(&c, &s, paint, locals[:])
+		} else {
+			for l in locals {
+				fill_shape(&c, &s, paint, l)
+			}
+		}
+		paints, instances = len(c.paints), len(c.shapes)
+		flush(&c)
+		return slice.clone(b.pixels), paints, instances
+	}
+	one, one_paints, one_instances := draw(false)
+	defer delete(one)
+	many, paints, instances := draw(true)
+	defer delete(many)
+	testing.expect_value(t, one_instances, 3)
+	testing.expect_value(t, one_paints, 3)
+	testing.expect_value(t, instances, 3)
+	testing.expect_value(t, paints, 1)
+	testing.expect(t, slice.equal(one, many))
+}
+
+@(test)
 test_font_glyph_shape :: proc(t: ^testing.T) {
 	font, _ := font_load(DEFAULT_FONT_DATA)
 	defer font_destroy(&font)

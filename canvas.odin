@@ -449,6 +449,28 @@ fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENT
 	push_shape(c, cmd, inst)
 }
 
+// `fill_shape` at each of `locals`, sharing one paint row: a shape drawn
+// many times (an editor's anchors and handles) costs an instance each.
+fill_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, locals: []Transform2D) {
+	cmd: Command
+	row := max(u32)
+	current := state(c).transform
+	for local in locals {
+		to := transform_multiply(local, current)
+		inst := paint_instance(paint, to)
+		inst.transform = transform_multiply(shape_local(s), to)
+		if outside_target(c, device_bounds(s.data, inst.transform, 1 + inst.widen)) {
+			continue
+		}
+		if row == max(u32) {
+			cmd, row = shape_paint(c, paint)
+		}
+		inst.shape = s
+		inst.paint = row
+		push_shape(c, cmd, inst)
+	}
+}
+
 
 // Whether shapes filled with `paint` under the current state can overlap
 // without showing it: opaque colours blended source-over with no global

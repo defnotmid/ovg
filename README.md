@@ -685,8 +685,9 @@ every part follows:
 - **One way to draw a path: its shape.** A fill or a stroke is a `Shape`
   (shape.odin) whose pixels take their exact area coverage. What makes a
   path long-lived owns its shape, built once and drawn under any transform
-  (`fill_shape`): fonts own glyph shapes, SVG documents their elements'
-  fills and strokes. `fill_path` and `stroke_path` build one for paths
+  (`fill_shape`; `fill_shapes` draws one at many transforms with one paint
+  row, as an editor's anchors): fonts own glyph shapes, SVG documents their
+  elements' fills and strokes. `fill_path` and `stroke_path` build one for paths
   made on the fly (in drawing coordinates, cubics within 1/16 px). A
   stroke is its outline (`stroke.odin`: lines and quadratics offset as
   such, joins, caps, dashes along the curves) filled non-zero, so each
