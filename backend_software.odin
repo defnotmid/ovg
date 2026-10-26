@@ -217,7 +217,10 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 	case Cmd_Clear_Rect:
 		sw_clear_rect(&r, c)
 	case Cmd_Draw_Shapes:
-		if c.group != 0 {
+		if c.group != 0 && frame.shapes[c.instances.start].marker != .None {
+			raster_markers(b, &r, images, frame, cmd, c)
+			return
+		} else if c.group != 0 {
 			raster_group(b, &r, images, frame, cmd, c)
 			return
 		}
@@ -236,8 +239,7 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 
 // A group, as the shape shader draws it: each pixel the instances
 // source-over in order (each as `raster_shape` shades it), then times the
-// tint, blended once. Markers' white instances leave a covered pixel as it
-// is, so a pixel of theirs stops there (as their shader does).
+// tint, blended once.
 @(private = "file")
 raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
 	instances := frame.shapes[c.instances.start:][:c.instances.count]
@@ -276,9 +278,6 @@ raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, fra
 		for y in iy0 ..< iy1 {
 			py := f32(y) + 0.5
 			for x in ix0 ..< ix1 {
-				if inst.marker != .None && acc[int(y - y0) * w + int(x - x0)][3] >= 1 {
-					continue
-				}
 				px := f32(x) + 0.5
 				cov := instance_coverage(inst, words, transform_point(inv, px, py), u, v)
 				if cov < 1.0 / 510 {
@@ -309,6 +308,88 @@ raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, fra
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
 			dst := load_texel(r.target, tx, ty)
 			store_texel(r.target, tx, ty, apply_blend(r.blend, a * t, dst))
+		}
+	}
+}
+
+// A group of markers (draw_markers), as their shader draws it: each pixel
+// the union of the markers' fills and of their outlines, a pixel stopping
+// once both are whole (or absent), then the fill's paint at the first and
+// the outlines' (the tint) at the second over it, blended once.
+@(private = "file")
+raster_markers :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
+	instances := frame.shapes[c.instances.start:][:c.instances.count]
+	area := EMPTY_BOUNDS
+	for inst in instances {
+		ib := instance_bounds(inst, frame.shape_words)
+		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
+	}
+	x0 := max(r.x0, i32(math.floor(area.minx)))
+	y0 := max(r.y0, i32(math.floor(area.miny)))
+	x1 := min(r.x1, i32(math.ceil(area.maxx)))
+	y1 := min(r.y1, i32(math.ceil(area.maxy)))
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	w, h := int(x1 - x0), int(y1 - y0)
+	if len(b.group) < w * h {
+		delete(b.group, b.allocator)
+		b.group = make([][4]f32, w * h, b.allocator)
+	}
+	// Per pixel: the fills' union, the outlines'.
+	acc := b.group[:w * h]
+	mem.zero_slice(acc)
+	filled, outline := instances[0].marker_fill, instances[0].hairline
+	for inst in instances {
+		ib := instance_bounds(inst, frame.shape_words)
+		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
+		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
+		inv := transform_inverse(inst.transform)
+		u, v := instance_footprint(inst)
+		circle := inst.marker == .Circle
+		for y in iy0 ..< iy1 {
+			py := f32(y) + 0.5
+			for x in ix0 ..< ix1 {
+				a := &acc[int(y - y0) * w + int(x - x0)]
+				if (!filled || a[0] >= 1) && (outline <= 0 || a[1] >= 1) {
+					continue
+				}
+				rc := transform_point(inv, f32(x) + 0.5, py)
+				if filled {
+					f := cv.marker(circle, rc, u, v, 0)
+					a[0] += f - a[0] * f
+				}
+				if outline > 0 {
+					o := cv.marker(circle, rc, u, v, outline)
+					a[1] += o - a[1] * o
+				}
+			}
+		}
+	}
+	fill := make_frag(images, cmd, frame.paints[instances[0].paint])
+	tint := make_frag(images, cmd, frame.paints[c.group - 1])
+	for y in y0 ..< y1 {
+		py := f32(y) + 0.5
+		for x in x0 ..< x1 {
+			a := acc[int(y - y0) * w + int(x - x0)]
+			px := f32(x) + 0.5
+			src: [4]f32
+			if a[0] >= 1.0 / 510 {
+				if f, keep := shade(&fill, px, py, 0.5, a[0]); keep {
+					src = f
+				}
+			}
+			if a[1] >= 1.0 / 510 {
+				if o, keep := shade(&tint, px, py, 0.5, a[1]); keep {
+					src = o + src * (1 - o[3])
+				}
+			}
+			if src[3] < 1.0 / 510 {
+				continue
+			}
+			tx, ty := u32(x - r.ox), u32(y - r.oy)
+			dst := load_texel(r.target, tx, ty)
+			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
 		}
 	}
 }

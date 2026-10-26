@@ -242,18 +242,20 @@ Cmd_Draw_Shapes :: struct {
 // feathered edge), or with `aliased` its center's winding; with `hairline`
 // its share within hairline / 2 pixels of the shape's outline
 // (`hairline_shape`) instead. A `marker` has no words: it is the unit
-// square or circle its transform scales and places, filled, or outlined
-// `hairline` pixels wide (`fill_markers`, cv.marker).
+// square or circle its transform scales and places, filled (`marker_fill`,
+// with its paint) and outlined `hairline` pixels wide (with its group's
+// tint) (`draw_markers`, cv.marker).
 Shape_Instance :: struct {
-	shape:     ^Shape,
-	words:     Range,
-	transform: Transform2D,
-	paint:     u32,
-	even_odd:  bool,
-	aliased:   bool,
-	marker:    Marker_Kind,
-	widen:     f32,
-	hairline:  f32,
+	shape:       ^Shape,
+	words:       Range,
+	transform:   Transform2D,
+	paint:       u32,
+	even_odd:    bool,
+	aliased:     bool,
+	marker:      Marker_Kind,
+	marker_fill: bool,
+	widen:       f32,
+	hairline:    f32,
 }
 
 Marker_Kind :: enum u8 {

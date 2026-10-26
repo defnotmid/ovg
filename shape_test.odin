@@ -340,7 +340,7 @@ test_sw_fill_markers :: proc(t: ^testing.T) {
 	points := [?]Vec2{{6.25, 7.5}, {8.75, 7.5}, {100, 100}}
 	paints := len(c.paints)
 	fill_markers(&c, .Circle, 5, 0, paint_color(rgb(0, 0, 255)), points[:])
-	testing.expect_value(t, len(c.paints) - paints, 2)
+	testing.expect_value(t, len(c.paints) - paints, 1)
 	if d, ok := c.commands[len(c.commands) - 1].type.(Cmd_Draw_Shapes); testing.expect(t, ok) {
 		testing.expect_value(t, d.instances.count, 2)
 		testing.expect(t, d.group != 0)
@@ -357,6 +357,49 @@ test_sw_fill_markers :: proc(t: ^testing.T) {
 	testing.expect_value(t, at(&b, 39, 15), [4]u8{255, 0, 0, 255})
 	testing.expect_value(t, at(&b, 45, 15), [4]u8{255, 255, 255, 255})
 	testing.expect_value(t, at(&b, 36, 15), [4]u8{255, 255, 255, 255})
+}
+
+@(test)
+test_sw_draw_markers :: proc(t: ^testing.T) {
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 60, 30)
+	clear_rect(&c, 0, 0, 60, 30, rgb(128, 128, 128))
+	at :: proc(b: ^Software_Backend, x, y: int) -> [4]u8 {
+		i := (y * int(b.width) + x) * 4
+		return {b.pixels[i], b.pixels[i + 1], b.pixels[i + 2], b.pixels[i + 3]}
+	}
+	// Squares filled white and outlined blue 2 px in one call (one group,
+	// two paint rows): every outline over every fill, the second square's
+	// outline over the first's fill where they overlap.
+	paints := len(c.paints)
+	draw_markers(&c, .Square, 6, 2, paint_color(rgb(255, 255, 255)), paint_color(rgb(0, 0, 255)), []Vec2{{12, 15}, {20, 15}})
+	testing.expect_value(t, len(c.paints) - paints, 2)
+	if d, ok := c.commands[len(c.commands) - 1].type.(Cmd_Draw_Shapes); testing.expect(t, ok) {
+		testing.expect_value(t, d.instances.count, 2)
+	}
+	// Outlined only (a handle circle).
+	draw_markers(&c, .Circle, 5, 2, nil, paint_color(rgb(255, 0, 0)), []Vec2{{45, 15}})
+	flush(&c)
+	WHITE_ :: [4]u8{255, 255, 255, 255}
+	BLUE_ :: [4]u8{0, 0, 255, 255}
+	GREY :: [4]u8{128, 128, 128, 255}
+	testing.expect_value(t, at(&b, 10, 15), WHITE_)
+	// x 14: the second square's outline (5 to 7 px left of 20.5 .. 20) over
+	// the first's fill.
+	testing.expect_value(t, at(&b, 14, 15), BLUE_)
+	testing.expect_value(t, at(&b, 6, 15), BLUE_)
+	testing.expect_value(t, at(&b, 22, 15), WHITE_)
+	testing.expect_value(t, at(&b, 3, 15), GREY)
+	// The ring is red (its corner here just outside the circle), its inside
+	// the background.
+	ring := at(&b, 39, 15)
+	testing.expectf(t, ring[0] >= 250 && ring[1] <= 5 && ring[2] <= 5, "ring %v", ring)
+	testing.expect_value(t, at(&b, 45, 15), GREY)
 }
 
 @(test)

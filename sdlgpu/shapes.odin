@@ -199,11 +199,12 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, c
 	if inst.hairline > 0 {
 		flags = transmute(u32)inst.hairline
 	}
-	// A marker: the unit square or circle, its kind where a shape's words are.
+	// A marker: the unit square or circle, its kind where a shape's words
+	// are (16 added when it is filled).
 	at := offset
 	x0, y0, x1, y1: f32 = -1, -1, 1, 1
 	if inst.marker != .None {
-		at = u32(inst.marker)
+		at = u32(inst.marker) | (16 if inst.marker_fill else 0)
 	} else {
 		x0, y0, x1, y1 = cv.bounds(words)
 	}

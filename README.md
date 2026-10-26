@@ -712,14 +712,17 @@ every part follows:
   a frame, 0.43 ms of it recording, where stroke_path per shape takes
   30.5 ms (26.5 ms recording), the images within 16 levels; the outlines
   add 29% to building the shapes and 20% to their words.
-- **Markers.** `fill_markers` draws squares or circles a fixed size in
-  pixels, filled or outlined, at many points with one paint: an editor's
-  anchors and handles. They are shape instances without words (the unit
-  square or circle scaled and placed) in one group: the GPU draws a record
-  per run of cells about a marker's size, and each pixel takes the closed-
-  form coverage (`cv.marker`: the square exact, the circle's edge straight
-  across the pixel, within 0.054 at a 2.5 px radius) of the markers its
-  cell lists, white, then the paint once, stopping once covered. The
+- **Markers.** `draw_markers` draws squares or circles a fixed size in
+  pixels at many points, filled with one paint and outlined with another
+  (either optional), every outline over every fill: an editor's anchors
+  and handles (`fill_markers` for one paint). They are shape instances
+  without words (the unit square or circle scaled and placed) in one
+  group: the GPU draws a record per run of cells about a marker's size,
+  and each pixel takes the union of its cell's markers' fills and of
+  their outlines in closed form (`cv.marker`: the square exact, the
+  circle's edge straight across the pixel, within 0.054 at a 2.5 px
+  radius), then each paint once, stopping once nothing more could change
+  it. The
   tutorial's 62,962 anchors (filled and outlined squares) and 117,000
   handles (circles) at 3.5 px x 2 on 2560 x 1440, with its outlines: on
   an M4 8.5 ms of GPU a frame where each marker as a shape took 49.6 ms

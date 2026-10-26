@@ -858,10 +858,12 @@ float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
     return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
 }
 
-// A group of markers (ovg fill_markers): as a group of shapes, each a
-// marker's closed-form coverage (its kind in data.x, an outline's width in
-// data.z), and a pixel stops once covered: the markers are white, so later
-// ones would leave it as it is.
+// A group of markers (ovg draw_markers): its records and cells a group of
+// shapes', each member a marker (its kind in data.x, 16 added when filled;
+// an outline's width in data.z) of closed-form coverage. A pixel takes the
+// union of the fills and of the outlines, stopping once both are whole (or
+// absent), then the fill's paint (the members' row) at the first and the
+// outlines' (the tint) at the second over it.
 [shader("fragment")]
 float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
     shape_clip(i);
@@ -870,7 +872,9 @@ float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
     uint2 cell = min(uint2(max(i.rc, 0.0)), uint2(nx, dims >> 16) - 1u);
     uint at = i.data.x + 1u + cell.y * nx + cell.x;
     uint lists = i.data.x + 1u + nx * (dims >> 16) + 1u;
-    float4 acc = float4(0, 0, 0, 0);
+    float cf = 0.0;
+    float co = 0.0;
+    uint fill_row = 0u;
     for (uint k = shapes[at]; k < shapes[at + 1u]; k++) {
         Shape_Instance s = members[i.data.z + shapes[lists + k]];
         float2 d = i.fpos - s.t.xy;
@@ -879,22 +883,36 @@ float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
         if (any(rc < s.bounds.xy - epp) || any(rc > s.bounds.zw + epp)) {
             continue;
         }
-        float coverage = curves_marker(s.data.x == 2u, rc, s.uv.xy, s.uv.zw, asfloat(s.data.z));
-        if (coverage < 1.0 / 510.0) {
-            continue;
+        bool circle = (s.data.x & 15u) == 2u;
+        bool filled = (s.data.x & 16u) != 0u;
+        float outline = asfloat(s.data.z);
+        fill_row = s.data.y;
+        if (filled) {
+            float f = curves_marker(circle, rc, s.uv.xy, s.uv.zw, 0.0);
+            cf += f - cf * f;
         }
-        paint_index = s.data.y;
-        float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
-        acc = c + acc * (1.0 - c.a);
-        if (acc.a >= 1.0) {
+        if (outline > 0.0) {
+            float o = curves_marker(circle, rc, s.uv.xy, s.uv.zw, outline);
+            co += o - co * o;
+        }
+        if ((!filled || cf >= 1.0) && (outline <= 0.0 || co >= 1.0)) {
             break;
         }
     }
-    if (acc.a < 1.0 / 510.0) {
+    float4 result = float4(0, 0, 0, 0);
+    if (cf >= 1.0 / 510.0) {
+        paint_index = fill_row;
+        result = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, cf)) * scissor_mask(i.fpos));
+    }
+    if (co >= 1.0 / 510.0) {
+        paint_index = i.data.y;
+        float4 o = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, co)) * scissor_mask(i.fpos));
+        result = o + result * (1.0 - o.a);
+    }
+    if (result.a < 1.0 / 510.0) {
         discard;
     }
-    paint_index = i.data.y;
-    return acc * (fill_color(shader_type(), i.fpos) * scissor_mask(i.fpos));
+    return result;
 }
 
 // A group (ovg Cmd_Draw_Shapes.group): a record over its instances'

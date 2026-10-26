@@ -477,22 +477,37 @@ hairline_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, locals:
 }
 
 // Markers `radius` pixels (half a square's side, a circle's radius) at each
-// of `points` (current units), filled, or with `outline` > 0 outlined that
-// many pixels wide, whatever the transform scales or turns: an editor's
-// anchors and handles. One batch, one paint: the markers are a group, so a
-// pixel takes their union once (the paint shading it) and stops once it is
-// covered, and each costs its pixels' closed-form coverage (cv.marker)
-// where a shape costs its curves.
-fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint: Paint, points: []Vec2) {
-	if kind == .None || !(radius > 0) {
+// of `points` (current units), whatever the transform scales or turns: an
+// editor's anchors and handles. Filled with `fill` and outlined `outline`
+// pixels wide on their edge with `stroke` (either nil for none), every
+// outline over every fill. One batch: the markers are a group, so a pixel
+// takes the fills' union and the outlines' once each, the outlines' over
+// the fills', and stops once nothing more could change it; each marker
+// costs its pixels' closed-form coverage (cv.marker) where a shape costs
+// its curves. A fill and a stroke both drawing images take two batches (a
+// draw binds one image).
+draw_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, fill, stroke: Maybe(Paint), points: []Vec2) {
+	fp, filled := fill.?
+	sp, stroked := stroke.?
+	stroked &&= outline > 0
+	if kind == .None || !(radius > 0) || !(filled || stroked) {
+		return
+	}
+	image :: proc(p: Paint) -> bool {
+		_, ok := p.flavor.(Paint_Image)
+		return ok
+	}
+	if filled && stroked && image(fp) && image(sp) {
+		draw_markers(c, kind, radius, outline, fill, nil, points)
+		draw_markers(c, kind, radius, outline, nil, stroke, points)
 		return
 	}
 	cmd: Command
-	row, white := max(u32), u32(0)
+	row, tint := max(u32), max(u32)
 	t := state(c).transform
 	// The target, grown by what a marker's coverage reaches past its center.
 	w, h := render_target_size(c)
-	reach := radius + 1 + 0.5 * max(outline, 0)
+	reach := radius + 1 + (0.5 * outline if stroked else 0)
 	x0, y0 := f32(c.current_render_origin.x) - reach, f32(c.current_render_origin.y) - reach
 	x1, y1 := x0 + f32(w) + 2 * reach, y0 + f32(h) + 2 * reach
 	start := len(c.shapes)
@@ -502,15 +517,40 @@ fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint:
 			continue
 		}
 		if row == max(u32) {
-			p := paint
-			p.feather, p.fill_rule = 0, .Non_Zero
-			cmd, row = shape_paint(c, p)
-			white = solid_paint(c, {1, 1, 1, 1})
+			// The fill's row on each marker, the stroke's the group's tint;
+			// the command binds the image one of them draws.
+			if filled {
+				p := fp
+				p.feather, p.fill_rule = 0, .Non_Zero
+				cmd, row = shape_paint(c, p)
+			}
+			if stroked {
+				p := sp
+				p.feather, p.fill_rule = 0, .Non_Zero
+				scmd: Command
+				scmd, tint = shape_paint(c, p)
+				if !filled || image(sp) {
+					cmd = scmd
+				}
+			}
+			row = row if filled else tint
+			tint = tint if stroked else row
 		}
-		append(&c.shapes, Shape_Instance{transform = {radius, 0, 0, radius, at.x, at.y}, paint = white, marker = kind, hairline = max(outline, 0)})
+		append(&c.shapes, Shape_Instance{transform = {radius, 0, 0, radius, at.x, at.y}, paint = row, marker = kind, marker_fill = filled,
+			hairline = outline if stroked else 0})
 	}
 	if n := len(c.shapes) - start; n > 0 {
-		push_instances(c, cmd, n, row + 1)
+		push_instances(c, cmd, n, tint + 1)
+	}
+}
+
+// `draw_markers` in one paint: filled, or with `outline` > 0 outlined that
+// many pixels wide.
+fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint: Paint, points: []Vec2) {
+	if outline > 0 {
+		draw_markers(c, kind, radius, outline, nil, paint, points)
+	} else {
+		draw_markers(c, kind, radius, 0, paint, nil, points)
 	}
 }
 
