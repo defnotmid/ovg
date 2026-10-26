@@ -9,25 +9,12 @@ import sh "deps:oglyph/shape"
 // contextual forms, Arabic joining, Indic reordering) and GPOS (kerning,
 // mark positioning) per segment of one font, size, script and direction.
 //
-// Font_Collection keeps the shared, read-only state: each face's layout
-// tables prepared on first use (sh.Layout). Mutable state (the glyph
-// buffer, plans, the per-codepoint and per-glyph tables of a layout)
-// lives in a `Text_Shaper`; the collection pools them so concurrent
-// layouts on one collection each take their own, and a warm shaper lays
-// out without allocating.
-
-// A plan of a shaper: for a face, script, direction and the feature
-// settings of a segment (Text_Shaper.plan_features[first:][:count], their
-// ranges dropped: a plan depends on tags, values and whether each is
-// global).
-@(private)
-Shape_Plan :: struct {
-	face:         Face_Id,
-	script:       sh.Script,
-	direction:    sh.Direction,
-	first, count: i32,
-	plan:         sh.Plan,
-}
+// The shared, read-only state is the font files' (Font_Files): each
+// file's layout tables (sh.Layout) and plans, made on first use. Mutable
+// state (the glyph buffer, the per-codepoint and per-glyph tables of a
+// layout) lives in a `Text_Shaper`; the collection pools them so
+// concurrent layouts on one collection each take their own, and a warm
+// shaper lays out without allocating.
 
 // A run of codepoints in one face, size, script and direction, and the
 // glyphs it shaped into (visual order, left to right).
@@ -37,6 +24,7 @@ Shape_Segment :: struct {
 	glyph_first, glyph_count: i32,
 	face:                     Face_Id,
 	font:                     ^Font, // the face's, for the layout's call
+	file:                     ^Font_File, // the face's: its tables and plans
 	em:                       f32,
 	script:                   sh.Script,
 	level:                    u8, // bidi embedding level: 0 LTR, 1 RTL, 2 numbers in RTL
@@ -67,8 +55,6 @@ Shape_Piece :: struct {
 // Shaping state for one layout at a time (pooled by Font_Collection).
 Text_Shaper :: struct {
 	shaper:         sh.Shaper,
-	plans:          [dynamic]Shape_Plan,
-	plan_features:  [dynamic]sh.Feature,
 	// The segment being shaped: its feature settings.
 	seg_features:   [dynamic]sh.Feature,
 	pieces:         [dynamic]Shape_Piece,
@@ -94,8 +80,6 @@ shaper_acquire :: proc(fonts: ^Font_Collection) -> ^Text_Shaper {
 	allocator := collection_allocator(fonts)
 	s := new(Text_Shaper, allocator)
 	sh.shaper_init(&s.shaper, allocator)
-	s.plans.allocator = allocator
-	s.plan_features.allocator = allocator
 	s.seg_features.allocator = allocator
 	s.pieces.allocator = allocator
 	s.features.allocator = allocator
@@ -118,13 +102,8 @@ shaper_release :: proc(fonts: ^Font_Collection, s: ^Text_Shaper) {
 
 @(private)
 shaper_destroy :: proc(s: ^Text_Shaper) {
-	allocator := s.plans.allocator
-	for &p in s.plans {
-		sh.plan_destroy(&p.plan)
-	}
+	allocator := s.glyphs.allocator
 	sh.shaper_destroy(&s.shaper)
-	delete(s.plans)
-	delete(s.plan_features)
 	delete(s.seg_features)
 	delete(s.pieces)
 	delete(s.features)
@@ -168,29 +147,6 @@ collection_allocator :: proc(fonts: ^Font_Collection) -> runtime.Allocator {
 	return runtime.heap_allocator()
 }
 
-// The face's layout tables, prepared on first use.
-@(private)
-font_shaping :: proc(fonts: ^Font_Collection, f: ^Font) -> ^sh.Layout {
-	sync.mutex_lock(&fonts.shape_lock)
-	defer sync.mutex_unlock(&fonts.shape_lock)
-	if f.shaping == nil {
-		allocator := font_allocator(f)
-		f.shaping = new(sh.Layout, allocator)
-		sh.layout_init(f.shaping, &f.face, allocator)
-	}
-	return f.shaping
-}
-
-// Frees the face's layout tables.
-@(private)
-font_shaping_destroy :: proc(f: ^Font) {
-	if f.shaping != nil {
-		sh.layout_destroy(f.shaping)
-		free(f.shaping, font_allocator(f))
-		f.shaping = nil
-	}
-}
-
 // Script and bidi level of each codepoint of the line [a, b) (script runs,
 // levels for a left-to-right paragraph: text_bidi.odin).
 @(private)
@@ -227,7 +183,7 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 
 	direction: sh.Direction = .RTL if seg.level & 1 == 1 else .LTR
 	shaper_segment_features(s, seg)
-	plan := shaper_plan(fonts, s, seg, direction)
+	plan := file_plan(fonts.files, seg.file, seg.font, seg.script, direction, s.seg_features[:])
 	sh.shape(&s.shaper, plan, &seg.font.face, s.chars.char[seg.first:seg.first + seg.count], s.seg_features[:], &s.glyphs)
 	if !s.shaper.ok {
 		// Past the shaper's limits: one glyph per codepoint.
@@ -282,34 +238,6 @@ features_equal :: proc(a, b: []sh.Feature) -> bool {
 		}
 	}
 	return true
-}
-
-// The shaper's plan for the segment's face, script and feature settings
-// and `direction`, made on first use.
-@(private)
-shaper_plan :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segment, direction: sh.Direction) -> ^sh.Plan {
-	feats := s.seg_features[:]
-	script := seg.script
-	search: for &p in s.plans {
-		if p.face != seg.face || p.script != script || p.direction != direction || int(p.count) != len(feats) {
-			continue
-		}
-		for k, i in s.plan_features[p.first:][:p.count] {
-			if k.tag != feats[i].tag || k.value != feats[i].value || sh.feature_is_global(k) != sh.feature_is_global(feats[i]) {
-				continue search
-			}
-		}
-		return &p.plan
-	}
-	p := Shape_Plan{face = seg.face, script = script, direction = direction, first = i32(len(s.plan_features)), count = i32(len(feats))}
-	for k in feats {
-		// Ranged settings are kept as covering one codepoint.
-		append(&s.plan_features, sh.Feature{k.tag, k.value, 0, 0 if sh.feature_is_global(k) else 1})
-	}
-	f := seg.font
-	sh.plan_init(&p.plan, font_shaping(fonts, f), &f.face, script, direction, 0, feats, s.plans.allocator)
-	append(&s.plans, p)
-	return &s.plans[len(s.plans) - 1].plan
 }
 
 // Adds a piece's feature settings, returning where they lie in

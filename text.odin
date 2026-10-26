@@ -19,9 +19,6 @@ Font :: struct {
 	data:           []u8,
 	// Face index in a collection file.
 	index:          i32,
-	// The face's layout tables prepared for shaping (text_shape.odin), made
-	// by a Font_Collection on first use. Freed by `font_destroy`.
-	shaping:        ^sh.Layout,
 	// COLR / CPAL colour glyphs (colr.odin); nil without them. Freed by
 	// `font_destroy`.
 	colr:           ^Colr,
@@ -39,6 +36,9 @@ Font :: struct {
 	// The variable font instance it draws, as a key: 0 for the default,
 	// else a hash of the face's coordinates.
 	instance:       u64,
+	// The FeatureVariations record its GSUB and GPOS lookups follow
+	// (sh.plan_variations): instances with the same records share plans.
+	plan_records:   [sh.Table_Kind]i32,
 }
 
 // The next of the process's font collection serials, from 1.
@@ -92,6 +92,7 @@ font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator, va
 	font.face = face
 	font.data = data
 	font.index = index
+	font.plan_records = sh.plan_variations(&face)
 	font.allocator = allocator
 	font.colr = colr_open(&font)
 	if font.colr == nil {
@@ -118,7 +119,6 @@ font_destroy :: proc(f: ^Font) {
 		free(fs, fs.allocator)
 		f.shapes = nil
 	}
-	font_shaping_destroy(f)
 }
 
 // The glyph's shape, built on first use (safe from several threads) and

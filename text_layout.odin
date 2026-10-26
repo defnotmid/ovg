@@ -175,8 +175,9 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		}
 		s.pieces[pi] = {n, size, shaper_add_piece_features(s, piece.style)}
 		// The face's characters, as its shaping tables map them.
-		font := font_collection_font(fonts, face)
-		cmap := &font_shaping(fonts, font).cmap
+		ff := font_collection_face(fonts, face)
+		font := &ff.font
+		cmap := &file_shaping(fonts.files, ff.file, &font.face).cmap
 		for r in piece.text {
 			id := face
 			if r != '\n' && r != ' ' && r != '\t' && glyph_drawable(font, Glyph_Index(sh.two_level_get(cmap, int(r)))) == 0 {
@@ -356,8 +357,9 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 		for j < b && s.chars[j].face == c.face && s.pieces[s.chars[j].piece].size == size && s.chars[j].script == c.script && s.chars[j].level == c.level {
 			j += 1
 		}
-		f := font_collection_font(fonts, c.face)
-		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = f, em = font_scale_for_em(f, size), script = c.script, level = c.level})
+		ff := font_collection_face(fonts, c.face)
+		f := &ff.font
+		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = f, file = ff.file, em = font_scale_for_em(f, size), script = c.script, level = c.level})
 		i = j
 	}
 	for &seg in s.segs {

@@ -173,9 +173,9 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, orange > 1000)
 }
 
-// Setting the emoji face again frees the old face's layout tables: no
-// pooled shaper may keep a plan for it (the new face takes the old one's
-// address, so the plan key alone would match freed tables).
+// Setting the emoji face again from the same data finds its file: the new
+// face shapes with the layout tables and plans the old one made, which
+// stay with the file.
 @(test)
 test_colr_emoji_reset :: proc(t: ^testing.T) {
 	fonts: Font_Collection
@@ -187,19 +187,15 @@ test_colr_emoji_reset :: proc(t: ^testing.T) {
 	emoji := EMOJI_FONT_DATA
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
 	text_layout(&fonts, {{text = "a\U0001F525", style = {size = 100}}}, {}, &l)
-	emoji_plans :: proc(fonts: ^Font_Collection) -> (n: int) {
-		for s in fonts.shapers {
-			for p in s.plans {
-				n += int(p.face == fonts.emoji.?.id)
-			}
-		}
-		return
-	}
-	testing.expect(t, emoji_plans(&fonts) > 0)
+	file := fonts.emoji.?.file
+	plans := file.plans
+	testing.expect(t, plans != nil)
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
-	testing.expect_value(t, emoji_plans(&fonts), 0)
+	testing.expect(t, fonts.emoji.?.file == file)
+	testing.expect_value(t, len(fonts.files.rows), 2)
 	text_layout(&fonts, {{text = "a\U0001F600\U0001F44D\U0001F3FD", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 3)
+	testing.expect(t, file.plans == plans)
 }
 
 // The fill cap is per glyph: a face keeps drawing colour glyphs after

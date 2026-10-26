@@ -58,7 +58,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.6), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.7), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -66,7 +66,7 @@ dependencies are Odin's own `vendor` packages:
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.6 https://github.com/defnotmid/oglyph
+git clone -b v0.0.7 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -850,11 +850,20 @@ every part follows:
   features shapes with them over all of it, else each piece's apply over
   its own codepoints.
   Letter-spacing turns off liga / clig / dlig (CSS) unless the piece sets
-  them, and is not added after attached marks. The
-  collection prepares a face's layout tables on first use and pools
-  `Text_Shaper`s (glyph buffer, plans per face, script, direction and
-  features, layout tables), so layouts may run concurrently on one
-  collection; a warm shaper does not allocate.
+  them, and is not added after attached marks. What a font file says
+  whatever the instance is a row of `Font_Files`, one per face of each
+  file: its family, weight and style, its layout tables (prepared on first
+  use) and its plans (per FeatureVariations record, script, direction and
+  features, each made on first use). A collection keeps a table of its
+  own, or shares one with other collections
+  (`font_collection_init(&c, files = &files)`), so every instance of a
+  file, in any of them, uses the one row: another instance costs about its
+  glyphs (Adwaita Sans, 14 glyphs at a new weight: 54 us where it took
+  357 with its own tables). Rows never move, and only making one (or its
+  tables, or a plan) takes the table's lock, so collections sharing it
+  may each run on their own threads. The collection pools `Text_Shaper`s
+  (glyph buffer and the layout's tables), so layouts may run concurrently
+  on one collection; a warm shaper does not allocate.
   Every call shapes what it is given: a `Text_Layout` is data out, kept
   by the caller and drawn again while its text is unchanged.
   `Text_Layout.advances` gives each glyph's pen step (its advance, plus
@@ -878,7 +887,7 @@ every part follows:
   by weight; `Text_Style.variations` (CSS font-variation-settings) picks
   the face whose instance those settings select, so instances apart in any
   axis (wdth, opsz) are told apart. A font is one instance for its life
-  (load another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it
+  (add another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it
   (oglyph/font lists a
   face's axes and named instances, and `ft.name_string` names them:
   "Weight", "Bold"). Not handled: explicit bidi controls

@@ -25,17 +25,24 @@ Face_Id :: struct {
 }
 
 Font_Face :: struct {
-	family: string, // owned
+	family: string, // its file's
 	weight: int,
 	italic: bool,
 	font:   Font,
 	id:     Face_Id,
+	// The font file face it draws an instance of: a row of the collection's
+	// `files`.
+	file:   ^Font_File,
 }
 
 Font_Collection :: struct {
-	// Its allocator is the collection's: faces, their family names and their
-	// fonts' shapes (collection_allocator).
+	// Its allocator is the collection's: faces and their fonts' shapes
+	// (collection_allocator).
 	faces:          [dynamic]Font_Face,
+	// The font files its faces draw instances of: font_collection_init's,
+	// shared with other collections, else its own (`owns_files`).
+	files:          ^Font_Files,
+	owns_files:     bool,
 	// Used when nothing matches, and as the last fallback for glyphs.
 	fallback:       Font_Face,
 	// Colour emoji face tried after `faces` (font_collection_set_emoji);
@@ -44,8 +51,7 @@ Font_Collection :: struct {
 	// The family text that names none is drawn in (borrowed); empty, or
 	// a family no face has: every face competes by weight and style.
 	default_family: string,
-	// Guards the shaping state below and each face's layout tables
-	// (prepared on first use), so layouts may run concurrently on one
+	// Guards the shaper pool, so layouts may run concurrently on one
 	// collection.
 	shape_lock:     sync.Mutex,
 	// Idle shapers (text_shape.odin), one per concurrent layout.
@@ -80,14 +86,17 @@ PLACE_EMOJI :: -2
 @(private = "file")
 PLACE_GONE :: -3
 
-font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator) {
+// A collection whose faces' files are `files` (shared with the other
+// collections given it), else a table of its own.
+font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator, files: ^Font_Files = nil) {
 	c.faces = make([dynamic]Font_Face, allocator)
 	c.places = make([dynamic]i32, allocator)
 	c.by_family = make([dynamic]Family_Entry, allocator)
+	c.files = files
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
 	font, _ := font_load(data, 0, allocator)
-	family, weight, italic := font_identity(data, &font, allocator)
-	c.fallback = {family, weight, italic, font, face_id_new(c, PLACE_FALLBACK)}
+	file := font_file(collection_files(c), data, 0, &font)
+	c.fallback = {file.family, file.weight, file.italic, font, face_id_new(c, PLACE_FALLBACK), file}
 }
 
 font_collection_destroy :: proc(c: ^Font_Collection) {
@@ -97,17 +106,18 @@ font_collection_destroy :: proc(c: ^Font_Collection) {
 	}
 	delete(c.shapers)
 	for &f in c.faces {
-		delete(f.family, allocator)
 		font_destroy(&f.font)
 	}
 	delete(c.faces)
 	delete(c.places)
 	delete(c.by_family)
-	delete(c.fallback.family, allocator)
 	font_destroy(&c.fallback.font)
 	if e, ok := &c.emoji.?; ok {
-		delete(e.family, allocator)
 		font_destroy(&e.font)
+	}
+	if c.owns_files {
+		font_files_destroy(c.files)
+		free(c.files, allocator)
 	}
 	c^ = {}
 }
@@ -128,14 +138,12 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 	if err != nil {
 		return false
 	}
-	drop_shapers(c)
 	if old, ok := &c.emoji.?; ok {
 		c.places[old.id.index] = PLACE_GONE
-		delete(old.family, allocator)
 		font_destroy(&old.font)
 	}
-	family, weight, italic := font_identity(data, &font, allocator)
-	c.emoji = Font_Face{family, weight, italic, font, face_id_new(c, PLACE_EMOJI)}
+	file := font_file(collection_files(c), data, 0, &font)
+	c.emoji = Font_Face{file.family, file.weight, file.italic, font, face_id_new(c, PLACE_EMOJI), file}
 	return true
 }
 
@@ -143,21 +151,25 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 // end when past the last), variable ones at the instance `variations` pick
 // (font_load). Family, weight and style come from the font's tables, the
 // weight from a wght setting and the style from ital or slnt when given.
-// Returns the number of faces added. Not while layouts run on the
-// collection (faces move; their ids stay).
+// Faces of data added before (to this collection or one sharing its
+// files) share its file's tables and plans: another instance costs about
+// its glyphs. Returns the number of faces added. Not while layouts run on
+// the collection (faces move; their ids stay).
 font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int), variations: []Font_Variation = nil) -> int {
 	allocator := collection_allocator(c)
 	// A collection never initialized takes its allocator here, not from
 	// the first append.
 	c.faces.allocator = allocator
 	c.by_family.allocator = allocator
+	files := collection_files(c)
 	added := 0
 	for index in 0 ..< 64 {
 		font, err := font_load(data, i32(index), allocator, variations)
 		if err != nil {
 			break
 		}
-		family, weight, italic := font_identity(data, &font, allocator)
+		file := font_file(files, data, i32(index), &font)
+		family, weight, italic := file.family, file.weight, file.italic
 		for v in variations {
 			switch v.tag {
 			case "wght":
@@ -169,9 +181,9 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 			}
 		}
 		id := face_id_new(c, i32(len(c.faces)))
-		append(&c.faces, Font_Face{family, weight, italic, font, id})
+		append(&c.faces, Font_Face{family, weight, italic, font, id, file})
 		h := family_hash(family)
-		inject_at(&c.by_family, family_first(c, h), Family_Entry{h, id, c.faces[len(c.faces) - 1].family, i32(weight), italic})
+		inject_at(&c.by_family, family_first(c, h), Family_Entry{h, id, family, i32(weight), italic})
 		added += 1
 	}
 	if at := len(c.faces) - added; before < at {
@@ -182,14 +194,10 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 }
 
 // Removes and frees face `i` (of `faces`), whose id names no face after
-// it; a `default_family` that is its name becomes empty. Not while layouts
-// run on the collection.
+// it (its file stays in the collection's files). Not while layouts run on
+// the collection.
 font_collection_remove :: proc(c: ^Font_Collection, i: int) {
-	drop_shapers(c)
 	face := &c.faces[i]
-	if raw_data(c.default_family) == raw_data(face.family) {
-		c.default_family = ""
-	}
 	c.places[face.id.index] = PLACE_GONE
 	h := family_hash(face.family)
 	for k := family_first(c, h); k < len(c.by_family) && c.by_family[k].hash == h; k += 1 {
@@ -198,7 +206,6 @@ font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 			break
 		}
 	}
-	delete(face.family, collection_allocator(c))
 	font_destroy(&face.font)
 	ordered_remove(&c.faces, i)
 	face_places(c, i)
@@ -296,16 +303,17 @@ face_places :: proc(c: ^Font_Collection, from: int) {
 	}
 }
 
-// Pooled shapers hold plans made for faces (keyed by face id): a face
-// going takes them with it.
+// The collection's files, a table of its own made for a collection
+// without one.
 @(private = "file")
-drop_shapers :: proc(c: ^Font_Collection) {
-	sync.mutex_lock(&c.shape_lock)
-	for s in c.shapers {
-		shaper_destroy(s)
+collection_files :: proc(c: ^Font_Collection) -> ^Font_Files {
+	if c.files == nil {
+		allocator := collection_allocator(c)
+		c.files = new(Font_Files, allocator)
+		font_files_init(c.files, allocator)
+		c.owns_files = true
 	}
-	clear(&c.shapers)
-	sync.mutex_unlock(&c.shape_lock)
+	return c.files
 }
 
 // The best face for `family` (case-insensitive): with `variations`, one

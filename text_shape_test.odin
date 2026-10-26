@@ -1,10 +1,12 @@
 package ovg
 
+import "base:runtime"
 import "core:log"
 import "core:os"
 import "core:mem"
 import "core:slice"
 import "core:testing"
+import "core:thread"
 import "core:unicode/utf8"
 
 import ft "deps:oglyph/font"
@@ -120,7 +122,7 @@ test_shape_legacy_kern_table :: proc(t: ^testing.T) {
 	g := fx_layout(&s, "AV", "")
 	testing.expect_value(t, len(g), 2)
 	font := &s.fonts.fallback.font
-	testing.expect(t, font.shaping != nil)
+	testing.expect(t, s.fonts.fallback.file.shaping != nil)
 	em := font_scale_for_em(font, 100)
 	adv, _ := font_glyph_advance(font, g[0].glyph)
 	// Vera's kern table: A V -131 (fontTools).
@@ -389,8 +391,9 @@ test_font_collection_uses_its_allocator :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(own.allocation_map), 0)
 }
 
-// Faces go where `before` puts them; a removed face frees its name and
-// font, and a default family naming it is cleared.
+// Faces go where `before` puts them; a removed face frees its font, and
+// its family's name, its file's, stays (a default family naming it still
+// names it, now no face's: every face competes).
 @(test)
 test_font_collection_place_and_remove :: proc(t: ^testing.T) {
 	own: mem.Tracking_Allocator
@@ -410,7 +413,7 @@ test_font_collection_place_and_remove :: proc(t: ^testing.T) {
 		text_layout_init(&l, mem.tracking_allocator(&own))
 		text_layout(&fonts, {{text = "office", style = {size = 20}}}, {}, &l)
 		font_collection_remove(&fonts, 0)
-		testing.expect_value(t, fonts.default_family, "")
+		testing.expect_value(t, fonts.default_family, "JetBrains Mono")
 		testing.expect_value(t, len(fonts.faces), 1)
 		testing.expect_value(t, fonts.faces[0].family, "Bitstream Vera Sans")
 		text_layout(&fonts, {{text = "office", style = {size = 20}}}, {}, &l)
@@ -706,4 +709,101 @@ test_font_variation :: proc(t: ^testing.T) {
 	// The smallest size is the default instance's or the third face.
 	testing.expect(t, pick(&fonts, &l, small[:]) == (&fonts.faces[0].font if opsz.min == opsz.default else &fonts.faces[2].font))
 	testing.expect(t, pick(&fonts, &l, large[:]) == &fonts.faces[3].font)
+}
+
+// Collections sharing font files share each file's row (its family, layout
+// tables and plans), made once for every face of the file in any of them,
+// from any thread, and lay out as collections of their own do; a removed
+// face's file keeps its plans.
+@(test)
+test_font_files :: proc(t: ^testing.T) {
+	mono := #load("demo/media/JetBrainsMono-Regular.ttf")
+	files: Font_Files
+	font_files_init(&files)
+	defer font_files_destroy(&files)
+	a, b, alone: Font_Collection
+	font_collection_init(&a, files = &files)
+	defer font_collection_destroy(&a)
+	font_collection_init(&b, files = &files)
+	defer font_collection_destroy(&b)
+	font_collection_init(&alone)
+	defer font_collection_destroy(&alone)
+	for c in ([?]^Font_Collection{&a, &b, &alone}) {
+		testing.expect_value(t, font_collection_add(c, mono), 1)
+	}
+	file := a.faces[0].file
+	testing.expect(t, b.faces[0].file == file && alone.faces[0].file != file)
+	testing.expect(t, a.fallback.file == b.fallback.file)
+	testing.expect_value(t, len(files.rows), 2)
+	l, la: Text_Layout
+	defer text_layout_destroy(&l)
+	defer text_layout_destroy(&la)
+	pieces := []Text_Piece{{text = "office -> ffi", style = {family = "JetBrains Mono", size = 20}}}
+	text_layout(&a, pieces, {}, &l)
+	text_layout(&alone, pieces, {}, &la)
+	testing.expect(t, slice.equal(l.glyphs[:], la.glyphs[:]))
+	plans := file.plans
+	testing.expect(t, plans != nil && file.shaping != nil)
+	text_layout(&b, pieces, {}, &l)
+	testing.expect(t, file.plans == plans)
+	font_collection_remove(&a, 0)
+	text_layout(&b, pieces, {}, &l)
+	testing.expect(t, file.plans == plans && slice.equal(l.glyphs[:], la.glyphs[:]))
+
+	// Threads making instances at once, each in a collection of its own
+	// sharing the files, against each instance laid out alone.
+	data := mono
+	adwaita, err := os.read_entire_file("/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf", context.allocator)
+	defer delete(adwaita)
+	if err == nil {
+		data = adwaita
+	}
+	INSTANCES :: 8
+	Worker :: struct {
+		files:  ^Font_Files,
+		data:   []u8,
+		glyphs: [INSTANCES]u64,
+	}
+	instance_glyphs :: proc(files: ^Font_Files, data: []u8, k: int) -> (sum: u64) {
+		vars := []Font_Variation{{"wght", f32(100 + 100 * k)}}
+		c: Font_Collection
+		font_collection_init(&c, allocator = runtime.heap_allocator(), files = files)
+		defer font_collection_destroy(&c)
+		font_collection_add(&c, data, variations = vars)
+		l: Text_Layout
+		text_layout_init(&l, runtime.heap_allocator())
+		defer text_layout_destroy(&l)
+		text_layout(&c, {{text = "Variable fonts", style = {size = 30, variations = vars}}}, {}, &l)
+		for g in l.glyphs {
+			sum = sum * 31 + u64(g.glyph) + u64(transmute(u32)g.x) << 16
+		}
+		return
+	}
+	shared: Font_Files
+	font_files_init(&shared, runtime.heap_allocator())
+	defer font_files_destroy(&shared)
+	workers: [4]Worker
+	threads: [4]^thread.Thread
+	for &w, i in workers {
+		w = {files = &shared, data = data}
+		threads[i] = thread.create_and_start_with_poly_data(&w, proc(w: ^Worker) {
+			for k in 0 ..< INSTANCES {
+				w.glyphs[k] = instance_glyphs(w.files, w.data, k)
+			}
+		})
+	}
+	for th in threads {
+		thread.join(th)
+		thread.destroy(th)
+	}
+	for k in 0 ..< INSTANCES {
+		own: Font_Files
+		font_files_init(&own, runtime.heap_allocator())
+		want := instance_glyphs(&own, data, k)
+		font_files_destroy(&own)
+		for w in workers {
+			testing.expect_value(t, w.glyphs[k], want)
+		}
+	}
+	testing.expect_value(t, len(shared.rows), 2)
 }
