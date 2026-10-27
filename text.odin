@@ -196,6 +196,23 @@ font_v_metrics :: proc(f: ^Font) -> Font_V_Metrics {
 	return {i32(f.face.ascent), i32(f.face.descent), i32(f.face.line_gap)}
 }
 
+// The face's ascent and descent as fractions of the em that sum to one:
+// OS/2's typographic ones where it has them, else hhea's, scaled to fill
+// the em, as Inkscape's line boxes take them.
+font_em_box :: proc(f: ^Font) -> (ascent, descent: f32) {
+	a, d := f.face.ascent, -f.face.descent
+	if os2 := f.face.tables[.OS2]; os2.size >= 72 {
+		ta, td := int(ft.read_i16(f.face.data, os2.at + 68)), -int(ft.read_i16(f.face.data, os2.at + 70))
+		if ta + td > 0 {
+			a, d = ta, td
+		}
+	}
+	if a + d <= 0 {
+		return 0.8, 0.2
+	}
+	return f32(a) / f32(a + d), f32(d) / f32(a + d)
+}
+
 font_glyph_index :: proc(f: ^Font, r: rune) -> Glyph_Index {
 	return Glyph_Index(ft.glyph_index(&f.face, r))
 }

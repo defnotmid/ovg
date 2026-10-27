@@ -29,6 +29,12 @@ Text_Baseline :: enum u8 {
 	// The top / bottom of the em box (`text-before-edge`, `text-after-edge`).
 	Top,
 	Bottom,
+	// The top of the first line's box, the lines stacking as CSS line
+	// boxes (as Inkscape lays out SVG 2 text): each as high as its tallest
+	// inline box, the first piece's face and size and each run's, every box
+	// a line height high with its face's em box (font_em_box) centred in
+	// it, so a baseline sits half the leading and the ascent below its top.
+	Line_Top,
 }
 
 Text_Style :: struct {
@@ -76,6 +82,12 @@ Text_Options :: struct {
 	baseline:    Text_Baseline,
 	// Line advance in ems of the first piece's size; 0 means 1.2.
 	line_height: f32,
+	// Lines wider than this break at their line break opportunities
+	// (oglyph's line_breaks, UAX #14) into lines that fit, where they can:
+	// a word wider than it has a line of its own. Spaces a line breaks
+	// after hang past its end, outside its width. 0: lines end only at
+	// "\n".
+	width:       f32,
 }
 
 // Consecutive glyphs of one face, size and paint. The face is named by its
@@ -89,8 +101,16 @@ Text_Run :: struct {
 }
 
 Text_Line :: struct {
-	first, count: int, // glyphs
-	width:        f32,
+	first, count:         int, // glyphs
+	width:                f32,
+	// The codepoints it holds, in `clusters`' indices: up to the next
+	// line's first (its newline, or the spaces it breaks after, are its).
+	text_start, text_end: i32,
+	// Its baseline (before the pieces' dy), and how far its box reaches
+	// above and below it (Line_Top: as stacked; else the first piece's
+	// face's ascent and descent).
+	y:                    f32,
+	above, below:         f32,
 }
 
 Text_Layout :: struct {
@@ -185,7 +205,8 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 					id = f
 				}
 			}
-			s.chars[n] = {char = r, piece = i32(pi), face = id}
+			// The other columns are written before they're read.
+			s.chars.char[n], s.chars.piece[n], s.chars.face[n] = r, i32(pi), id
 			top = max(top, r)
 			n += 1
 		}
@@ -211,29 +232,30 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		for b < n && s.chars[b].char != '\n' {
 			b += 1
 		}
-		// Letter spacing follows every glyph but the last of a line (as usvg
-		// lays it out), so it doesn't widen the line or shift alignment.
-		trailing: f32
-		layout_line(fonts, s, pieces, l, a, b, &pen, &next_piece, &trailing)
-		// Offsets of pieces starting at the line end (or with the newline).
-		for next_piece < len(pieces) && s.pieces[next_piece].start <= b {
-			pen += {pieces[next_piece].dx, pieces[next_piece].dy}
-			next_piece += 1
-		}
-		layout_end_line(l, &line_start, pen.x - trailing)
+		next := b + 1 if b < n else n
+		layout_paragraph(fonts, s, pieces, l, a, b, next, opts.width, line_height, &pen, &next_piece, &line_start)
 		if b >= n {
 			break
 		}
 		pen.x = 0
 		pen.y += line_height
-		a = b + 1
+		a = next
 	}
 
-	shift := baseline_shift(first_font, first_em, first_size, opts.baseline)
+	shift := baseline_shift(first_font, first_em, first_size, opts.baseline, line_height)
 	asc, desc := font_extent(first_font, first_em)
+	if opts.baseline == .Line_Top {
+		stack_line_boxes(l, first_font, first_size, line_height)
+		shift = 0
+	} else {
+		for &line in l.lines {
+			line.above, line.below = asc, desc
+		}
+	}
 	l.min = {1e9, 1e9}
 	l.max = {-1e9, -1e9}
-	for line in l.lines {
+	for &line in l.lines {
+		line.y += opts.y + shift
 		dx: f32
 		switch opts.align {
 		case .Left:
@@ -339,6 +361,129 @@ resolve_face :: proc(fonts: ^Font_Collection, l: ^Text_Layout, st: Text_Style) -
 	return face, size
 }
 
+// Lays out the paragraph [a, b) (the text up to a newline) from the pen:
+// one line, or with a `width` the lines it breaks into, the pen at the start
+// of each next one. `next` is where the next paragraph starts: the last
+// line holds the codepoints up to it.
+@(private = "file")
+layout_paragraph :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Piece, l: ^Text_Layout, a, b, next: i32, width, line_height: f32, pen: ^Vec2, next_piece, line_start: ^int) {
+	glyphs, runs := len(l.glyphs), len(l.runs)
+	run_count := l.runs[runs - 1].count if runs > 0 else 0
+	start_pen, start_piece := pen^, next_piece^
+	// Letter spacing follows every glyph but the last of a line (as usvg
+	// lays it out), so it doesn't widen the line or shift alignment.
+	trailing: f32
+	layout_line(fonts, s, pieces, l, a, b, pen, next_piece, &trailing)
+	if width <= 0 || pen.x - trailing <= width {
+		layout_end_paragraph(s, pieces, b, pen, next_piece)
+		layout_end_line(l, line_start, pen.x - trailing, a, next, start_pen.y)
+		return
+	}
+	// Too wide: each codepoint's share of the line from the glyphs just
+	// placed (a piece's dx at its first), where it may break; then the
+	// glyphs go and the lines are laid out one by one.
+	for k in a ..< b {
+		s.chars[k].advance = 0
+	}
+	for g in glyphs ..< len(l.glyphs) {
+		s.chars[l.clusters[g]].advance += l.advances[g]
+	}
+	for p := start_piece; p < len(pieces) && s.pieces[p].start < b; p += 1 {
+		s.chars[max(s.pieces[p].start, a)].advance += pieces[p].dx
+	}
+	sh.line_breaks(s.chars.char[a:b], s.chars.brk[a:b])
+	scratch_size(&l.glyphs, glyphs)
+	scratch_size(&l.clusters, glyphs)
+	scratch_size(&l.advances, glyphs)
+	resize(&l.runs, runs)
+	if runs > 0 {
+		l.runs[runs - 1].count = run_count
+	}
+	pen^, next_piece^ = start_pen, start_piece
+	for start := a; start < b; {
+		end, hang := line_end(s, start, b, width)
+		y := pen.y
+		first := len(l.glyphs)
+		trailing = 0
+		layout_line(fonts, s, pieces, l, start, end, pen, next_piece, &trailing)
+		w := pen.x - trailing
+		if hang < end {
+			// The spaces it ends with hang, their letter spacing with them;
+			// the last word's goes instead.
+			for g in first ..< len(l.glyphs) {
+				if l.clusters[g] >= hang {
+					w -= l.advances[g]
+				}
+			}
+			if hang > start {
+				w += trailing - pieces[s.chars[hang - 1].piece].style.letter_spacing
+			}
+		}
+		if end < b {
+			layout_end_line(l, line_start, w, start, end, y)
+			pen.x = 0
+			pen.y += line_height
+		} else {
+			layout_end_paragraph(s, pieces, b, pen, next_piece)
+			layout_end_line(l, line_start, w, start, next, y)
+		}
+		start = end
+	}
+}
+
+// Where the line starting at codepoint `start` ends: at its last break
+// opportunity where it fits `width`, at a mandatory break, or where its
+// first word ends when not even that fits. `hang`: where the spaces it
+// ends with start (`end` for none), which don't count toward the width.
+@(private = "file")
+line_end :: proc(s: ^Text_Shaper, start, b: i32, width: f32) -> (end, hang: i32) {
+	// Spaces that hang past the end of a line (CSS white-space: normal):
+	// Zs but the no-break ones, and tabs.
+	hangs :: proc "contextless" (r: rune) -> bool {
+		switch r {
+		case ' ', '\t', 0x1680, 0x2000 ..= 0x2006, 0x2008 ..= 0x200A, 0x205F, 0x3000:
+			return true
+		}
+		return false
+	}
+	w, spaces: f32
+	fit, fit_hang: i32 = -1, -1
+	run := start
+	for k in start ..< b {
+		w += s.chars[k].advance
+		if hangs(s.chars[k].char) {
+			spaces += s.chars[k].advance
+		} else {
+			spaces = 0
+			run = k + 1
+		}
+		brk := s.chars[k].brk
+		if brk == .None {
+			continue
+		}
+		if w - spaces > width {
+			if fit >= 0 {
+				return fit, fit_hang
+			}
+			return k + 1, run
+		}
+		fit, fit_hang = k + 1, run
+		if brk == .Mandatory {
+			break
+		}
+	}
+	return fit, fit_hang
+}
+
+// Offsets of pieces starting at the paragraph's end (or with its newline).
+@(private = "file")
+layout_end_paragraph :: proc(s: ^Text_Shaper, pieces: []Text_Piece, b: i32, pen: ^Vec2, next_piece: ^int) {
+	for next_piece^ < len(pieces) && s.pieces[next_piece^].start <= b {
+		pen^ += {pieces[next_piece^].dx, pieces[next_piece^].dy}
+		next_piece^ += 1
+	}
+}
+
 // Shapes the codepoints [a, b) of one line and places their glyphs from the
 // pen: segments of one font, size, script and direction, shaped, then laid
 // out in visual order.
@@ -407,9 +552,42 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 	scratch_size(&l.advances, k)
 }
 
+// Places the lines as CSS line boxes from the first one's top (Line_Top):
+// each as high as its tallest inline box, the strut's (the first piece's
+// face and size) and each run's.
 @(private = "file")
-layout_end_line :: proc(l: ^Text_Layout, line_start: ^int, width: f32) {
-	append(&l.lines, Text_Line{line_start^, len(l.glyphs) - line_start^, width})
+stack_line_boxes :: proc(l: ^Text_Layout, strut: ^Font, strut_size, line_height: f32) {
+	inline_box :: proc(f: ^Font, size, line_height: f32) -> (above, below: f32) {
+		a, d := font_em_box(f)
+		half := (line_height - size) * 0.5
+		return half + a * size, half + d * size
+	}
+	strut_above, strut_below := inline_box(strut, strut_size, line_height)
+	baseline, below: f32
+	r := 0
+	for &line, i in l.lines {
+		above_line, below_line := strut_above, strut_below
+		end := line.first + line.count
+		for r < len(l.runs) && l.runs[r].first + l.runs[r].count <= line.first {
+			r += 1
+		}
+		for k := r; k < len(l.runs) && l.runs[k].first < end; k += 1 {
+			f := font_collection_font(l.fonts, l.runs[k].face)
+			a, b := inline_box(f, l.runs[k].em * f32(f.face.units_per_em), line_height)
+			above_line, below_line = max(above_line, a), max(below_line, b)
+		}
+		baseline = above_line if i == 0 else baseline + below + above_line
+		below = below_line
+		for &g in l.glyphs[line.first:][:line.count] {
+			g.y += baseline - line.y
+		}
+		line.y, line.above, line.below = baseline, above_line, below_line
+	}
+}
+
+@(private = "file")
+layout_end_line :: proc(l: ^Text_Layout, line_start: ^int, width: f32, text_start, text_end: i32, y: f32) {
+	append(&l.lines, Text_Line{line_start^, len(l.glyphs) - line_start^, width, text_start, text_end, y, 0, 0})
 	line_start^ = len(l.glyphs)
 }
 
@@ -419,10 +597,14 @@ font_extent :: proc(font: ^Font, em: f32) -> (ascent, descent: f32) {
 	return f32(vm.ascent) * em, -f32(vm.descent) * em
 }
 
-// How far below `y` the first baseline sits for an SVG dominant-baseline.
-baseline_shift :: proc(font: ^Font, em, size: f32, b: Text_Baseline) -> f32 {
+// How far below `y` the first baseline sits for an SVG dominant-baseline
+// (Line_Top: in a line `line_height` pixels high).
+baseline_shift :: proc(font: ^Font, em, size: f32, b: Text_Baseline, line_height: f32 = 0) -> f32 {
 	asc, desc := font_extent(font, em)
 	switch b {
+	case .Line_Top:
+		a, _ := font_em_box(font)
+		return (line_height - size) * 0.5 + a * size
 	case .Alphabetic:
 		return 0
 	case .Top:

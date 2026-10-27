@@ -40,6 +40,10 @@ Shape_Char :: struct {
 	script: sh.Script,
 	level:  u8, // bidi level (oglyph's bidi_levels)
 	bidi:   sh.Bidi_Class, // scratch
+	// Wrapping (text_layout.odin): the break after it, and its share of
+	// the line's width (its glyphs' advances).
+	brk:     sh.Line_Break,
+	advance: f32,
 }
 
 // A piece of the text: its first codepoint, size and feature settings

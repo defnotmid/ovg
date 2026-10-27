@@ -918,6 +918,22 @@ every part follows:
   (U+202A..U+202E, U+2066..U+2069), a right-to-left paragraph direction,
   vertical text, MVAR's varied line metrics (ascent and descent stay the
   default instance's). All text, UI labels too, lays out this one way.
+- **Wrapping**: with `Text_Options.width`, a paragraph wider than it
+  breaks into lines that fit at oglyph's `line_breaks` opportunities
+  (UAX #14): each line ends at its last opportunity where it fits (or at
+  a mandatory break); a word wider than the width has a line of its own;
+  the spaces a line breaks after hang past its end, outside its width
+  and alignment. Each `Text_Line` carries its baseline `y` and the
+  codepoints it holds (`text_start`, `text_end`, in `clusters`' indices,
+  tiling the text: a newline or the spaces of a break are the line's
+  before it), and every line is returned, however many the caller has
+  room for. `align` places each line by its own width at `x`;
+  `Text_Baseline.Line_Top` puts `y` at the top of the first line's box
+  (half the leading and the ascent above its baseline, as CSS places
+  it). A paragraph that fits takes the one-line path as before; one that
+  doesn't is shaped once to measure and again line by line, each line
+  with its own bidi order: a 360-glyph paragraph in Noto Sans at 14 px
+  lays out in 15 us, wrapped into 9 lines at 300 px in 34 us (-o:speed).
 - **Shaping** is oglyph's (`deps:oglyph/shape`; its README has the
   details): HarfBuzz's shapers and lookups, checked against HarfBuzz with
   no differences over its corpora, about HarfBuzz's speed (0.99-1.10x its

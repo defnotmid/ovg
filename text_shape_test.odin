@@ -214,6 +214,68 @@ test_shape_pieces_and_lines :: proc(t: ^testing.T) {
 	testing.expect(t, abs(l.glyphs[3].y - (2 + 24)) < 0.01)
 }
 
+// Wrapping: a line breaks after the last space where it fits, the space
+// hanging outside its width; a word wider than the width has a line of its
+// own; newlines still end lines. Line ranges tile the text, baselines step
+// by the line height, and with Line_Top the first sits half the leading and
+// the em box's ascent below y.
+@(test)
+test_text_layout_wrap :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	l := &s.layout
+	width_of :: proc(s: ^Shape_Fx, text: string) -> f32 {
+		text_layout(&s.fonts, {{text = text, style = {size = 20}}}, {}, &s.layout)
+		return s.layout.lines[0].width
+	}
+	ranges :: proc(l: ^Text_Layout) -> [dynamic][2]i32 {
+		out := make([dynamic][2]i32, context.temp_allocator)
+		for line in l.lines {
+			append(&out, [2]i32{line.text_start, line.text_end})
+		}
+		return out
+	}
+	expect_ranges :: proc(t: ^testing.T, l: ^Text_Layout, want: [][2]i32, loc := #caller_location) {
+		got := ranges(l)
+		testing.expectf(t, len(got) == len(want), "%v lines, want %v", got, want, loc = loc)
+		for r, i in want {
+			if i < len(got) {
+				testing.expectf(t, got[i] == r, "line %d: %v, want %v", i, got[i], r, loc = loc)
+			}
+		}
+	}
+	text :: "aaa bbb ccc"
+	w2 := width_of(&s, "aaa bbb")
+	w3 := width_of(&s, text)
+	text_layout(&s.fonts, {{text = text, style = {size = 20}}}, {width = w2 + 1}, l)
+	expect_ranges(t, l, {{0, 8}, {8, 11}})
+	testing.expect(t, abs(l.lines[0].width - w2) < 0.01)
+	testing.expect(t, abs(l.lines[1].y - l.lines[0].y - 24) < 0.01)
+	testing.expect_value(t, l.glyphs[l.lines[1].first].x, 0)
+	// Exactly as wide: one line.
+	text_layout(&s.fonts, {{text = text, style = {size = 20}}}, {width = w3}, l)
+	expect_ranges(t, l, {{0, 11}})
+	// A word wider than the width, and newlines.
+	text_layout(&s.fonts, {{text = "aaaaaaaa bb", style = {size = 20}}}, {width = 10}, l)
+	expect_ranges(t, l, {{0, 9}, {9, 11}})
+	text_layout(&s.fonts, {{text = "aa bb\ncc", style = {size = 20}}}, {width = width_of(&s, "aa") + 1}, l)
+	expect_ranges(t, l, {{0, 3}, {3, 6}, {6, 8}})
+	// Centred lines, each by its own width.
+	text_layout(&s.fonts, {{text = text, style = {size = 20}}}, {x = 100, width = w2 + 1, align = .Center}, l)
+	testing.expect(t, abs(l.glyphs[l.lines[1].first].x - (100 - l.lines[1].width / 2)) < 0.01)
+	// Line_Top: half the leading and the em box's ascent below y, and the
+	// next line a line height below (one face and size).
+	font := &s.fonts.fallback.font
+	a, d := font_em_box(font)
+	testing.expect(t, abs(a + d - 1) < 0.0001)
+	text_layout(&s.fonts, {{text = "aa\nbb", style = {size = 20}}}, {y = 10, baseline = .Line_Top, line_height = 1.5}, l)
+	testing.expect(t, abs(l.lines[0].y - (10 + 5 + a * 20)) < 0.01)
+	testing.expect(t, abs(l.lines[1].y - l.lines[0].y - 30) < 0.01)
+	testing.expect(t, abs(l.lines[0].above + l.lines[0].below - 30) < 0.01)
+	testing.expect(t, abs(l.glyphs[0].y - l.lines[0].y) < 0.01)
+}
+
 // Each glyph's advance is the pen's step past it: kerned by Vera's kern
 // table (the pair's value on the left glyph's advance), each glyph starts
 // where the one before it ends and the advances add up to the line's
