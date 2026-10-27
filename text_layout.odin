@@ -1,7 +1,6 @@
 package ovg
 
-import "core:unicode"
-
+import fc "deps:oglyph/collection"
 import ft "deps:oglyph/font"
 import sh "deps:oglyph/shape"
 
@@ -174,8 +173,8 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	defer shaper_release(fonts, s)
 	clear(&s.features)
 
-	// Codepoints with their piece and face: the piece's face, else the first
-	// face covering them (per-glyph fallback). Sized for one per byte,
+	// Codepoints with their piece and face: the piece's face, else the one
+	// fallback picks (oglyph's collection_fallback). Sized for one per byte,
 	// filled, then cut to the count.
 	bytes := 0
 	for piece in pieces {
@@ -184,9 +183,6 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	scratch_size(&s.pieces, len(pieces))
 	scratch_size(&s.chars, bytes)
 	n: i32
-	// The highest codepoint: emoji and mark fallback have nothing to do
-	// below the first they look at.
-	top: rune
 	first: Face_Id
 	for piece, pi in pieces {
 		face, size := resolve_face(fonts, l, piece.style)
@@ -194,30 +190,14 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 			first = face
 		}
 		s.pieces[pi] = {n, size, shaper_add_piece_features(s, piece.style)}
-		// The face's characters, as its shaping tables map them.
-		ff := font_collection_face(fonts, face)
-		font := &ff.font
-		cmap := &file_shaping(fonts.files, ff.file, &font.face).cmap
 		for r in piece.text {
-			id := face
-			if r != '\n' && r != ' ' && r != '\t' && glyph_drawable(font, Glyph_Index(sh.two_level_get(cmap, int(r)))) == 0 {
-				if f, g := font_collection_glyph(fonts, r, face); g != 0 {
-					id = f
-				}
-			}
 			// The other columns are written before they're read.
-			s.chars.char[n], s.chars.piece[n], s.chars.face[n] = r, i32(pi), id
-			top = max(top, r)
+			s.chars.char[n], s.chars.piece[n], s.chars.face[n] = r, i32(pi), face
 			n += 1
 		}
 	}
 	scratch_size(&s.chars, int(n))
-	if top >= 0x200D {
-		emoji_fallback(fonts, s.chars.char[:n], s.chars.face[:n])
-	}
-	if top >= 0x300 {
-		mark_fallback(fonts, s)
-	}
+	fc.collection_fallback(&fonts.collection, s.chars.char[:n], s.chars.piece[:n], s.chars.face[:n])
 
 	first_font, first_size := font_collection_font(fonts, first), s.pieces[0].size
 	first_em := font_scale_for_em(first_font, first_size)
@@ -276,31 +256,6 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	}
 	if len(l.glyphs) == 0 {
 		l.min, l.max = {opts.x, opts.y}, {opts.x, opts.y}
-	}
-}
-
-// Keeps emoji sequences in one face so they shape into one glyph: a rune
-// asking for emoji presentation (U+FE0F after it, or after a joiner in a
-// colour face) takes a colour face, and joiners, variation selectors,
-// skin-tone modifiers, keycaps and tags stay in the face of the rune before.
-@(private = "file")
-emoji_fallback :: proc(fonts: ^Font_Collection, runes: []rune, face: []Face_Id) {
-	continues :: proc(r: rune) -> bool {
-		return r == 0x200D || r == 0xFE0E || r == 0xFE0F || r == 0x20E3 || (r >= 0x1F3FB && r <= 0x1F3FF) || (r >= 0xE0020 && r <= 0xE007F)
-	}
-	for i in 0 ..< len(runes) {
-		r := runes[i]
-		if i > 0 && runes[i - 1] != '\n' && continues(r) {
-			face[i] = face[i - 1]
-			continue
-		}
-		wants := i + 1 < len(runes) && runes[i + 1] == 0xFE0F
-		wants ||= i > 0 && runes[i - 1] == 0x200D && font_collection_font(fonts, face[i - 1]).colr != nil
-		if wants && font_collection_font(fonts, face[i]).colr == nil {
-			if f, g := font_collection_emoji_glyph(fonts, r); g != 0 {
-				face[i] = f
-			}
-		}
 	}
 }
 
@@ -503,8 +458,7 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 			j += 1
 		}
 		ff := font_collection_face(fonts, c.face)
-		f := &ff.font
-		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = f, file = ff.file, em = font_scale_for_em(f, size), script = c.script, level = c.level})
+		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = ff, em = ft.scale_for_em(&ff.face, size), script = c.script, level = c.level})
 		i = j
 	}
 	for &seg in s.segs {
@@ -630,54 +584,4 @@ font_x_height :: proc(font: ^Font, em, size: f32) -> f32 {
 		return f32(y1) * em
 	}
 	return size * 0.5
-}
-
-
-// A combining mark that fell back to another face than its base's takes
-// the cluster (base and its marks) to the first such face that has them
-// all: marks attach to their base only when shaped with it. Runes that kept
-// their neighbour's face cost one comparison.
-@(private = "file")
-mark_fallback :: proc(fonts: ^Font_Collection, s: ^Text_Shaper) {
-	is_mark :: proc(r: rune) -> bool {
-		return unicode.is_nonspacing_mark(r) || unicode.is_enclosing_mark(r) || unicode.is_spacing_mark(r)
-	}
-	n := len(s.chars)
-	char, piece, face := s.chars.char[:n], s.chars.piece[:n], s.chars.face[:n]
-	for i := 1; i < n; i += 1 {
-		if face[i] == face[i - 1] || !is_mark(char[i]) {
-			continue
-		}
-		// The cluster: back to its base, on to its last mark (one piece).
-		base := i - 1
-		for base > 0 && is_mark(char[base]) && piece[base - 1] == piece[i] {
-			base -= 1
-		}
-		end := i + 1
-		for end < n && is_mark(char[end]) && piece[end] == piece[i] {
-			end += 1
-		}
-		if piece[base] != piece[i] {
-			i = end - 1
-			continue
-		}
-		for k in base ..< end {
-			id := face[k]
-			f := font_collection_font(fonts, id)
-			has_all := true
-			for j in base ..< end {
-				if font_glyph_index_drawable(f, char[j]) == 0 {
-					has_all = false
-					break
-				}
-			}
-			if has_all {
-				for j in base ..< end {
-					face[j] = id
-				}
-				break
-			}
-		}
-		i = end - 1
-	}
 }

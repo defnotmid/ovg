@@ -139,7 +139,7 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, l.runs[0].face == fonts.fallback.id && l.runs[1].face == fonts.emoji.?.id)
 	testing.expect_value(t, len(l.glyphs), 5) // a, fire, space, technologist, flag
 	for g in l.glyphs[1:] {
-		testing.expect(t, g.glyph == l.glyphs[2].glyph || font_glyph_is_colour(&(&fonts.emoji.?).font, g.glyph))
+		testing.expect(t, g.glyph == l.glyphs[2].glyph || font_glyph_is_colour(font_collection_font(&fonts, fonts.emoji.?.id), g.glyph))
 	}
 	// A keycap: Vera has "1", but U+FE0F asks for the emoji face (and,
 	// missing from it, leaves no glyph).

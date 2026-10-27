@@ -64,7 +64,7 @@ text_scratch_destroy :: proc(s: ^Text_Scratch) {
 	delete(s.shift)
 	delete(s.mults)
 	delete(s.values)
-	if s.own_fonts.fallback.font.data != nil {
+	if s.own_fonts.fallback.data != nil {
 		vg.font_collection_destroy(&s.own_fonts)
 	}
 	s^ = {}
@@ -161,7 +161,7 @@ text_fonts :: proc(r: ^Renderer) -> ^vg.Font_Collection {
 	if r.fonts != nil {
 		return r.fonts
 	}
-	if r.text.own_fonts.fallback.font.data == nil {
+	if r.text.own_fonts.fallback.data == nil {
 		vg.font_collection_init(&r.text.own_fonts)
 	}
 	return &r.text.own_fonts

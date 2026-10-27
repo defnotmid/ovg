@@ -65,7 +65,7 @@ scene_curves_alpha :: proc(c: ^vg.Canvas, r: ^Resources) {
 	run :: proc(c: ^vg.Canvas, r: ^Resources, s: string, x0, y, size, spacing: f32, paint: vg.Paint) {
 		x := x0
 		clear(&r.glyphs)
-		font := &r.fonts.fallback.font
+		font := vg.font_collection_font(&r.fonts, r.fonts.fallback.id)
 		sc := vg.font_scale_for_em(font, size)
 		for ch in s {
 			g := vg.font_glyph_index(font, ch)

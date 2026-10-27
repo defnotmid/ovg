@@ -1,54 +1,38 @@
 package ovg
 
 import "base:runtime"
-import "core:hash"
 import "core:math"
 import "core:mem"
 import "core:sync"
 
+import fc "deps:oglyph/collection"
 import ft "deps:oglyph/font"
-import sh "deps:oglyph/shape"
 
-// Fonts read by ovg/font (font/font.odin): metrics, kerning and glyph
-// outlines; glyphs draw as shapes. Shaped layout is `text_layout` over a Font_Collection
-// (text_shape.odin).
-
+// A face as drawing reads it (oglyph/font reads its tables: metrics, glyph
+// outlines): glyphs draw as shapes, colour glyphs with their COLR paint.
+// Bitmap colour glyphs (sbix, CBDT) aren't drawn. Shaped layout is
+// `text_layout` over a Font_Collection (text_shape.odin).
 Font :: struct {
-	face:           ft.Face,
+	face:      ft.Face,
 	// Borrowed TTF/OTF bytes; must outlive the font.
-	data:           []u8,
+	data:      []u8,
 	// Face index in a collection file.
-	index:          i32,
+	index:     i32,
 	// COLR / CPAL colour glyphs (colr.odin); nil without them. Freed by
 	// `font_destroy`.
-	colr:           ^Colr,
-	// Has bitmap colour glyphs (sbix, CBDT), which are not drawn: glyphs
-	// without an outline count as missing for fallback.
-	bitmap_colour:  bool,
+	colr:      ^Colr,
 	// The glyphs' shapes (shape.odin), each built on first use and kept
 	// for the font's life, and the outline glyphs are read into; made on
 	// first use. Freed by `font_destroy`.
-	shapes:         ^Font_Shapes,
+	shapes:    ^Font_Shapes,
 	// What the font allocates with when it builds on first use (its
 	// shapes), whatever allocator the drawing code runs under: the
 	// context's at `font_load`; the heap for a font made otherwise.
-	allocator:      mem.Allocator,
+	allocator: mem.Allocator,
 	// The variable font instance it draws, as a key: 0 for the default,
 	// else a hash of the face's coordinates.
-	instance:       u64,
-	// The FeatureVariations record its GSUB and GPOS lookups follow
-	// (sh.plan_variations): instances with the same records share plans.
-	plan_records:   [sh.Table_Kind]i32,
+	instance:  u64,
 }
-
-// The next of the process's font collection serials, from 1.
-@(private)
-serial_next :: proc "contextless" () -> u32 {
-	return sync.atomic_add(&serials, 1) + 1
-}
-
-@(private = "file")
-serials: u32
 
 @(private)
 Font_Shapes :: struct {
@@ -79,26 +63,24 @@ Font_V_Metrics :: struct {
 // `{{"wght", 700}}`; axes not named keep their default): outlines,
 // advances, glyph boxes and shaping follow it, for the font's life.
 font_load :: proc(data: []u8, index: i32 = 0, allocator := context.allocator, variations: []Font_Variation = nil) -> (font: Font, err: Error) {
-	face, face_err := ft.load(data, int(index))
-	if face_err != nil {
+	face, ok := fc.face_load(data, index, variations)
+	if !ok {
 		return {}, .Font_Parse
 	}
-	if len(variations) > 0 {
-		ft.set_variations(&face, variations)
-		if ft.has_variation(&face) {
-			font.instance = hash.fnv64a(mem.slice_to_bytes(face.coords[:face.axis_count])) | 1
-		}
+	return font_from_face(&face, allocator), nil
+}
+
+// The font drawing face `face` (a collection's, or face_load's).
+font_from_face :: proc(face: ^Font_Face, allocator := context.allocator) -> Font {
+	font := Font {
+		face      = face.face,
+		data      = face.data,
+		index     = face.index,
+		allocator = allocator,
+		instance  = face.instance,
 	}
-	font.face = face
-	font.data = data
-	font.index = index
-	font.plan_records = sh.plan_variations(&face)
-	font.allocator = allocator
 	font.colr = colr_open(&font)
-	if font.colr == nil {
-		font.bitmap_colour = face.tables[.sbix].at != 0 || face.tables[.CBDT].at != 0
-	}
-	return font, nil
+	return font
 }
 
 // Frees what a font owns beyond its borrowed data (colour glyph cache and
@@ -166,20 +148,6 @@ font_shapes :: proc(f: ^Font) -> ^Font_Shapes {
 		return old
 	}
 	return fresh
-}
-
-// The glyph for `r`, or 0 when the face lacks it or has only a bitmap for it.
-font_glyph_index_drawable :: proc(f: ^Font, r: rune) -> Glyph_Index {
-	return glyph_drawable(f, font_glyph_index(f, r))
-}
-
-// `g`, or 0 when the face has only a bitmap for it.
-@(private)
-glyph_drawable :: #force_inline proc(f: ^Font, g: Glyph_Index) -> Glyph_Index {
-	if g != 0 && f.bitmap_colour && ft.glyph_empty(&f.face, ft.Glyph(g)) {
-		return 0
-	}
-	return g
 }
 
 // Scale from font units to pixels so ascent - descent == `height`.

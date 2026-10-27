@@ -58,7 +58,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.9), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -66,7 +66,7 @@ dependencies are Odin's own `vendor` packages:
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.9 https://github.com/defnotmid/oglyph
+git clone -b v0.0.10 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -847,6 +847,13 @@ every part follows:
   shape (a feather widens each pixel's footprint; aliased takes each pixel
   center's winding). Text has this one path, exact at any position,
   transform and size: there is no glyph atlas.
+- **Font collections** are oglyph's (`deps:oglyph/collection`: the
+  faces, their files' shaping tables and plans, family matching and
+  fallback, usable without ovg). `Font_Collection` embeds one (`faces`,
+  `fallback`, `emoji`, `default_family` read through) with what drawing
+  makes of each face, a `Font` per `Face_Id` (its glyphs' shapes and COLR
+  paint), and the layouts' scratch; it tells oglyph that a glyph a face
+  has only as a bitmap counts as missing, ovg drawing outlines.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set;
@@ -854,8 +861,10 @@ every part follows:
   scores, so finding one is a binary search and a sweep of the family,
   not a scan: 0.23 us for a 72-face family among 2,380 faces, from 15 us) and
   shapes with `oglyph/shape`: each line is split into
-  segments of one font (per-glyph fallback picks the first face covering a
-  codepoint), size, script and bidi level (each character's Unicode script,
+  segments of one font (per-glyph fallback, oglyph's
+  `collection_fallback`, picks the first face covering a codepoint, keeps
+  emoji sequences in one colour face and marks with their base), size,
+  script and bidi level (each character's Unicode script,
   characters of every script taking the script around them; levels
   from oglyph's `bidi_levels`, UAX #9's weak and neutral rules for a
   left-to-right paragraph over the Unicode database's bidi classes:
@@ -875,7 +884,7 @@ every part follows:
   its own codepoints.
   Letter-spacing turns off liga / clig / dlig (CSS) unless the piece sets
   them, and is not added after attached marks. What a font file says
-  whatever the instance is a row of `Font_Files`, one per face of each
+  whatever the instance is a row of `Font_Files` (oglyph's `Files`), one per face of each
   file: its family, weight and style, its layout tables (prepared on first
   use) and its plans (per FeatureVariations record, script, direction and
   features, each made on first use). A collection keeps a table of its
@@ -929,8 +938,17 @@ every part follows:
   before it), and every line is returned, however many the caller has
   room for. `align` places each line by its own width at `x`;
   `Text_Baseline.Line_Top` puts `y` at the top of the first line's box
-  (half the leading and the ascent above its baseline, as CSS places
-  it). A paragraph that fits takes the one-line path as before; one that
+  and stacks the lines as CSS line boxes, as Inkscape lays out SVG 2
+  text: each as high as its tallest inline box (the first piece's face
+  and size, and each run's), every box a line height high with its
+  face's em box centred in it (`font_em_box`: the OS/2 typographic
+  ascent and descent, else hhea's, scaled to fill the em), and
+  `Text_Line.above` / `below` give each box's reach. Against Inkscape
+  1.4.4's own lines (its plain-SVG export) of the 24 single-font
+  paragraphs of its tutorial-tracing-pixelart.svg (Liberation Sans and
+  Serif, 6 to 8 px, line heights 120 to 150%, 230 to 300 px wide): all
+  98 lines break where it breaks them, every baseline within 0.0012 px of
+  its. A paragraph that fits takes the one-line path as before; one that
   doesn't is shaped once to measure and again line by line, each line
   with its own bidi order: a 360-glyph paragraph in Noto Sans at 14 px
   lays out in 15 us, wrapped into 9 lines at 300 px in 34 us (-o:speed).

@@ -120,7 +120,7 @@ test_shape_legacy_kern_table :: proc(t: ^testing.T) {
 	// Vera has a `kern` table and no GPOS.
 	g := fx_layout(&s, "AV", "")
 	testing.expect_value(t, len(g), 2)
-	font := &s.fonts.fallback.font
+	font := font_collection_font(&s.fonts, s.fonts.fallback.id)
 	testing.expect(t, s.fonts.fallback.file.shaping != nil)
 	em := font_scale_for_em(font, 100)
 	adv, _ := font_glyph_advance(font, g[0].glyph)
@@ -203,7 +203,7 @@ test_shape_pieces_and_lines :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(l.glyphs), 4)
 	testing.expect_value(t, len(l.lines), 2)
 	testing.expect_value(t, len(l.runs), 2)
-	font := &s.fonts.fallback.font
+	font := font_collection_font(&s.fonts, s.fonts.fallback.id)
 	em := font_scale_for_em(font, 20)
 	// Kerning continues across pieces of one face and size.
 	// Vera's kern table: B C -36 (fontTools).
@@ -266,7 +266,7 @@ test_text_layout_wrap :: proc(t: ^testing.T) {
 	testing.expect(t, abs(l.glyphs[l.lines[1].first].x - (100 - l.lines[1].width / 2)) < 0.01)
 	// Line_Top: half the leading and the em box's ascent below y, and the
 	// next line a line height below (one face and size).
-	font := &s.fonts.fallback.font
+	font := font_collection_font(&s.fonts, s.fonts.fallback.id)
 	a, d := font_em_box(font)
 	testing.expect(t, abs(a + d - 1) < 0.0001)
 	text_layout(&s.fonts, {{text = "aa\nbb", style = {size = 20}}}, {y = 10, baseline = .Line_Top, line_height = 1.5}, l)
@@ -400,9 +400,9 @@ test_font_collection_uses_its_allocator :: proc(t: ^testing.T) {
 		font_collection_init(&fonts, nil, mem.tracking_allocator(&own))
 		context.allocator = mem.tracking_allocator(&other)
 		testing.expect(t, font_collection_add(&fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
-		f := &fonts.faces[0].font
+		f := font_collection_font(&fonts, fonts.faces[0].id)
 		testing.expect(t, font_glyph_shape(f, font_glyph_index(f, 'A')) != nil)
-		testing.expect(t, font_glyph_shape(&fonts.fallback.font, font_glyph_index(&fonts.fallback.font, 'A')) != nil)
+		testing.expect(t, font_glyph_shape(font_collection_font(&fonts, fonts.fallback.id), font_glyph_index(font_collection_font(&fonts, fonts.fallback.id), 'A')) != nil)
 		font_collection_destroy(&fonts)
 	}
 	testing.expect_value(t, other.total_allocation_count, 0)
@@ -466,7 +466,7 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, font_collection_add(&fonts, bebas, before = 0), 1)
 	testing.expect_value(t, fonts.faces[1].family, "JetBrains Mono")
-	testing.expect(t, font_collection_font(&fonts, id) == &fonts.faces[1].font)
+	testing.expect(t, font_collection_font(&fonts, id) == font_collection_font(&fonts, fonts.faces[1].id))
 	text_layout(&fonts, {{text = "office", style = {family = "JetBrains Mono", size = 20}}}, {}, &again)
 	testing.expect(t, again.runs[0].face == id && slice.equal(again.glyphs[:], l.glyphs[:]))
 	// Bebas Neue, where JetBrains Mono was, shapes as it does alone.
@@ -475,13 +475,13 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 	text_layout(&alone, {{text = "office", style = {family = "Bebas Neue", size = 20}}}, {}, &l)
 	testing.expect(t, again.runs[0].face == fonts.faces[0].id && slice.equal(again.glyphs[:], l.glyphs[:]))
 	// Each layout resolves its runs in the collection it was laid out with.
-	testing.expect(t, text_layout_font(&l, l.runs[0]) == &alone.faces[0].font)
-	testing.expect(t, text_layout_font(&again, again.runs[0]) == &fonts.faces[0].font)
+	testing.expect(t, text_layout_font(&l, l.runs[0]) == font_collection_font(&alone, alone.faces[0].id))
+	testing.expect(t, text_layout_font(&again, again.runs[0]) == font_collection_font(&fonts, fonts.faces[0].id))
 
 	font_collection_remove(&fonts, 1)
 	testing.expect(t, font_collection_font(&fonts, id) == nil)
-	testing.expect(t, font_collection_font(&fonts, fonts.faces[0].id) == &fonts.faces[0].font)
-	testing.expect(t, font_collection_font(&fonts, fonts.fallback.id) == &fonts.fallback.font)
+	testing.expect(t, font_collection_font(&fonts, fonts.faces[0].id) == font_collection_font(&fonts, fonts.faces[0].id))
+	testing.expect(t, font_collection_font(&fonts, fonts.fallback.id) == font_collection_font(&fonts, fonts.fallback.id))
 	testing.expect(t, font_collection_font(&fonts, {}) == nil)
 	testing.expect(t, font_collection_font(&fonts, alone.faces[0].id) == nil)
 	testing.expect(t, font_collection_font(&alone, fonts.fallback.id) == nil)
@@ -489,7 +489,7 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 	testing.expect(t, fonts.emoji == nil)
 	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
 	first := fonts.emoji.?.id
-	testing.expect(t, font_collection_font(&fonts, first) == &(&fonts.emoji.?).font)
+	testing.expect(t, font_collection_font(&fonts, first) == font_collection_font(&fonts, fonts.emoji.?.id))
 	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
 	testing.expect(t, font_collection_font(&fonts, first) == nil && fonts.emoji.?.id != first)
 }
@@ -725,8 +725,8 @@ test_font_variation :: proc(t: ^testing.T) {
 		return text_layout_font(l, l.runs[0])
 	}
 	// The smallest size is the default instance's or the third face.
-	testing.expect(t, pick(&fonts, &l, small[:]) == (&fonts.faces[0].font if opsz.min == opsz.default else &fonts.faces[2].font))
-	testing.expect(t, pick(&fonts, &l, large[:]) == &fonts.faces[3].font)
+	testing.expect(t, pick(&fonts, &l, small[:]) == (font_collection_font(&fonts, fonts.faces[0].id) if opsz.min == opsz.default else font_collection_font(&fonts, fonts.faces[2].id)))
+	testing.expect(t, pick(&fonts, &l, large[:]) == font_collection_font(&fonts, fonts.faces[3].id))
 }
 
 // Collections sharing font files share each file's row (its family, layout

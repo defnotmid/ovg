@@ -3,13 +3,15 @@ package ovg
 import "base:runtime"
 import "core:sync"
 
+import fc "deps:oglyph/collection"
+import ft "deps:oglyph/font"
 import sh "deps:oglyph/shape"
 
 // OpenType shaping for `text_layout` with ovg/shape: GSUB (ligatures,
 // contextual forms, Arabic joining, Indic reordering) and GPOS (kerning,
 // mark positioning) per segment of one font, size, script and direction.
 //
-// The shared, read-only state is the font files' (Font_Files): each
+// The shared, read-only state is the font files' (oglyph's Files): each
 // file's layout tables (sh.Layout) and plans, made on first use. Mutable
 // state (the glyph buffer, the per-codepoint and per-glyph tables of a
 // layout) lives in a `Text_Shaper`; the collection pools them so
@@ -23,8 +25,7 @@ Shape_Segment :: struct {
 	first, count:             i32, // codepoints
 	glyph_first, glyph_count: i32,
 	face:                     Face_Id,
-	font:                     ^Font, // the face's, for the layout's call
-	file:                     ^Font_File, // the face's: its tables and plans
+	font:                     ^Font_Face, // the face's, for the layout's call
 	em:                       f32,
 	script:                   sh.Script,
 	level:                    u8, // bidi embedding level: 0 LTR, 1 RTL, 2 numbers in RTL
@@ -187,15 +188,14 @@ shaper_shape :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, seg: ^Shape_Segme
 
 	direction: sh.Direction = .RTL if seg.level & 1 == 1 else .LTR
 	shaper_segment_features(s, seg)
-	plan := file_plan(fonts.files, seg.file, seg.font, seg.script, direction, s.seg_features[:])
+	plan := fc.file_plan(fonts.files, seg.font, seg.script, direction, s.seg_features[:])
 	sh.shape(&s.shaper, plan, &seg.font.face, s.chars.char[seg.first:seg.first + seg.count], s.seg_features[:], &s.glyphs)
 	if !s.shaper.ok {
 		// Past the shaper's limits: one glyph per codepoint.
 		resize(&s.glyphs, first)
 		for i in seg.first ..< seg.first + seg.count {
-			g := font_glyph_index(seg.font, s.chars[i].char)
-			adv, _ := font_glyph_advance(seg.font, g)
-			append(&s.glyphs, sh.Glyph{id = u16(g), cluster = i, advance = adv})
+			g := ft.glyph_index(&seg.font.face, s.chars[i].char)
+			append(&s.glyphs, sh.Glyph{id = g, cluster = i, advance = i32(ft.advance(&seg.font.face, g))})
 		}
 		return
 	}
