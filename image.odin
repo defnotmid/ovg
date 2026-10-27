@@ -470,6 +470,13 @@ image_store_alloc :: proc(s: ^Image_Store, info: Image_Info) -> (Image_Id, Error
 	return {slot_map_insert(&s.entries, Image_Entry{info = info, image = img})}, nil
 }
 
+// An image whose backend storage was made outside the store (a backend's
+// own constructor, such as sdlgpu's image_borrow_texture); removing it
+// frees the storage through the backend as any other.
+image_store_add :: proc(s: ^Image_Store, info: Image_Info, image: Backend_Image) -> Image_Id {
+	return {slot_map_insert(&s.entries, Image_Entry{info = info, image = image})}
+}
+
 // An id with `info` but no backend storage. The layer stack records drawing
 // against such stand-ins and replaces them with real images before the frame
 // reaches the backend.

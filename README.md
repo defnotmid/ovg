@@ -120,6 +120,10 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - `vgsdl.image_texture(&c, id)` is the `^sdl.GPUTexture` behind a canvas image,
   and `vgsdl.offscreen_texture(&gpu)` is the default screen texture, for
   compositing in host UI code. `vgsdl.read_texture` copies a texture back.
+  `vgsdl.image_borrow_texture(&c, id, texture, w, h, format)` is the other
+  way round: an image that draws a texture the caller keeps (another
+  renderer's output), never released with the image; given its id again it
+  points the image at a new texture without allocating, frame after frame.
 - Each `flush` records one command buffer (its streams uploaded in a copy
   pass: vertices, paints, shape instances and shape words; then a render
   pass per target run) and waits on a fence, unless

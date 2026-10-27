@@ -32,11 +32,13 @@ MAX_FRAMES_IN_FLIGHT :: 4
 
 // A GPU texture backing one canvas image (`Backend_Image.user`).
 Image :: struct {
-	texture: ^sdl.GPUTexture,
-	format:  sdl.GPUTextureFormat,
-	width:   u32,
-	height:  u32,
-	flags:   vg.Image_Flags,
+	texture:  ^sdl.GPUTexture,
+	format:   sdl.GPUTextureFormat,
+	width:    u32,
+	height:   u32,
+	flags:    vg.Image_Flags,
+	// The caller's texture (image_borrow_texture), never released here.
+	borrowed: bool,
 }
 
 // A backend-owned texture kept across frames, with the frame it was last
@@ -421,6 +423,27 @@ image_store_texture :: proc(images: ^vg.Image_Store, id: vg.Image_Id) -> ^sdl.GP
 	return (^Image)(entry.image.user).texture
 }
 
+// An image of canvas `c` (on this backend) that draws `texture`, which stays
+// the caller's: removing the image (vg.delete_image) leaves the texture, and
+// the texture must outlive the frames that draw the image. Given an image
+// this made before (`id`), it points that image at `texture` instead, with
+// no allocation, so an image can follow a texture that changes from frame
+// to frame (another renderer's output). The texture is sampled as `format`
+// with `flags`.
+image_borrow_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id, texture: ^sdl.GPUTexture, width, height: u32, format: vg.Pixel_Format, flags: vg.Image_Flags = {}) -> vg.Image_Id {
+	b := (^SDL_Backend)(c.backend.data)
+	info := vg.Image_Info{flags, width, height, format}
+	img := Image{texture, texture_format(format), width, height, flags, true}
+	if entry := vg.image_store_get(&c.images, id); entry != nil && entry.image.user != nil && (^Image)(entry.image.user).borrowed {
+		(^Image)(entry.image.user)^ = img
+		entry.info = info
+		return id
+	}
+	p := new(Image, b.allocator)
+	p^ = img
+	return vg.image_store_add(&c.images, info, {user = p})
+}
+
 // The default screen texture of the last frame flushed without an output.
 offscreen_texture :: proc(b: ^SDL_Backend) -> ^sdl.GPUTexture {
 	return b.offscreen.texture if b.offscreen != nil else nil
@@ -463,7 +486,9 @@ release_image :: proc(b: ^SDL_Backend, img: ^Image) {
 		return
 	}
 	// SDL defers the release until submitted work no longer uses it.
-	sdl.ReleaseGPUTexture(b.device, img.texture)
+	if !img.borrowed {
+		sdl.ReleaseGPUTexture(b.device, img.texture)
+	}
 	free(img, b.allocator)
 }
 
