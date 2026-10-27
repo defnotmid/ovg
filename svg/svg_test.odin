@@ -720,6 +720,66 @@ test_svg_element_path_text :: proc(t: ^testing.T) {
 	}
 }
 
+// SVG 2 wrapped text: shape-inside's rect less shape-padding, lines
+// placed from its top and those reaching below it not drawn; inline-size
+// from the text's x, y, each line centred by text-anchor; white-space's
+// newlines and line-height as a percentage and as a number.
+@(test)
+test_svg_wrapped_text :: proc(t: ^testing.T) {
+	fonts: vg.Font_Collection
+	vg.font_collection_init(&fonts)
+	defer vg.font_collection_destroy(&fonts)
+	markup := `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+<rect id="r" x="10" y="20" width="100" height="30" display="none"/>
+<text style="font-size:10px;line-height:150%;shape-inside:url(#r);shape-padding:5">aaa bbb ccc ddd eee fff ggg hhh</text>
+<text x="50" y="80" style="font-size:10px;inline-size:40px;text-anchor:middle">aa bb cc dd ee</text>
+<text x="0" y="120" style="font-size:10px;line-height:2;white-space:pre-line">a
+   b</text>
+</svg>`
+	doc, err := parse(transmute([]u8)string(markup), {fonts = &fonts})
+	defer destroy(&doc)
+	testing.expect_value(t, err, Error.None)
+	testing.expect_value(t, len(doc.texts), 3)
+	w := doc.texts[0].wrap
+	testing.expect(t, w.inside && w.width == 90 && w.x == 15 && w.y == 25 && w.bottom == 45 && w.line_height == 15)
+	l: vg.Text_Layout
+	defer vg.text_layout_destroy(&l)
+	pieces: [dynamic]vg.Text_Piece
+	defer delete(pieces)
+	tp: vg.Text_Path
+	defer vg.text_path_destroy(&tp)
+	lay :: proc(fonts: ^vg.Font_Collection, doc: ^Document, i: int, l: ^vg.Text_Layout, pieces: ^[dynamic]vg.Text_Piece, tp: ^vg.Text_Path) {
+		tx := &doc.texts[i]
+		layout_chunk(fonts, doc, &doc.chunks[tx.chunks.start], {}, 0, l, pieces, tp, &tx.wrap)
+	}
+	lay(&fonts, &doc, 0, &l, &pieces, &tp)
+	testing.expect(t, len(l.lines) >= 2 && abs(l.lines[1].y - l.lines[0].y - 15) < 0.01)
+	first_line := l.lines[0].count
+	// Only the first line's box (25 to 40) fits above 45.
+	text: Layout
+	defer layout_destroy(&text)
+	layout(&doc, &fonts, &text)
+	drawn: u32
+	for run in text.runs[text.texts[0].start:][:text.texts[0].count] {
+		drawn += run.glyphs.count
+	}
+	testing.expect_value(t, int(drawn), first_line)
+	// inline-size: lines of at most 40 px, each centred on x = 50.
+	w = doc.texts[1].wrap
+	testing.expect(t, !w.inside && w.width == 40)
+	lay(&fonts, &doc, 1, &l, &pieces, &tp)
+	testing.expect(t, len(l.lines) >= 2)
+	for line in l.lines {
+		testing.expect(t, abs(l.glyphs[line.first].x - (50 - line.width / 2)) < 0.01)
+	}
+	// pre-line: the newline breaks the line, the spaces after it go; the
+	// lines two font sizes apart.
+	testing.expect_value(t, doc.pieces[doc.chunks[doc.texts[2].chunks.start].pieces.start].text, "a\nb")
+	testing.expect_value(t, doc.texts[2].wrap.line_height, 20)
+	lay(&fonts, &doc, 2, &l, &pieces, &tp)
+	testing.expect(t, len(l.lines) == 2 && abs(l.lines[1].y - l.lines[0].y - 20) < 0.01)
+}
+
 // Hostile input (limits.odin): each file finishes quickly, cut short with the
 // limit recorded, instead of crashing, hanging or exhausting memory. These
 // documents grow large arrays: the heap allocator, as programs use (the test

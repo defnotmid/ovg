@@ -141,21 +141,26 @@ layout :: proc(doc: ^Document, fonts: ^vg.Font_Collection, out: ^Layout) {
 		along: f32
 		for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
 			ch := &doc.chunks[ci]
-			pen, along = layout_chunk(fonts, doc, ch, pen, along, &out.line, &out.pieces, &out.path)
+			pen, along = layout_chunk(fonts, doc, ch, pen, along, &out.line, &out.pieces, &out.path, &t.wrap)
 			for family in out.line.missing {
 				if family != "" && !slice.contains(out.missing[:], family) {
 					append(&out.missing, family)
 				}
 			}
+			drawn := wrap_glyphs(&out.line, &t.wrap)
 			for run in out.line.runs {
+				count := min(run.count, drawn - run.first)
+				if count <= 0 {
+					break
+				}
 				start := len(out.glyphs)
-				append(&out.glyphs, ..out.line.glyphs[run.first:][:run.count])
+				append(&out.glyphs, ..out.line.glyphs[run.first:][:count])
 				turned := len(out.line.turns) > 0
 				resize(&out.turns, len(out.glyphs))
 				if turned {
-					copy(out.turns[start:], out.line.turns[run.first:][:run.count])
+					copy(out.turns[start:], out.line.turns[run.first:][:count])
 				}
-				append(&out.runs, Glyph_Run{run.face, run.em, {u32(start), u32(run.count)}, ch.pieces.start + run.paint, turned})
+				append(&out.runs, Glyph_Run{run.face, run.em, {u32(start), u32(count)}, ch.pieces.start + run.paint, turned})
 			}
 		}
 		append(&out.texts, vg.Range{u32(first), u32(len(out.runs) - first)})

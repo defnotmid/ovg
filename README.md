@@ -418,7 +418,17 @@ vg.layer_stack_end(&ls, &c)
   percentage of the path, side; not nested, no positions of its own, method
   and spacing ignored; text after it continues from its last glyph), CSS
   whitespace collapsing (the XML reader trims
-  bodies, so text whitespace is protected before parsing). Images: data:
+  bodies, so text whitespace is protected before parsing), white-space
+  (pre, pre-wrap and pre-line keep newlines as line breaks), line-height,
+  and SVG 2 wrapped text: `shape-inside` naming a rect (less
+  `shape-padding`; other shapes and shape-subtract are not wrapped into)
+  and `inline-size`, laid out as one chunk by `text_layout`'s width,
+  text-align (else text-anchor) placing each line, a shape-inside's lines
+  from its top as Inkscape stacks them (`Line_Top`) and those reaching
+  below it not drawn (`svg.Text.wrap` keeps the area). Inkscape 1.4.4's
+  tutorial-tracing-pixelart.svg: its 29 wrapped texts (111 lines, mixed
+  Liberation Serif and Sans) break where Inkscape breaks them, every
+  baseline within 0.0012 px of its plain-SVG export. Images: data:
   URIs and other hrefs through `svg.Parse_Options.load_file`; raster
   (odecs' image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
 - `svg.draw(c, ls, r, doc, transform, overrides)` draws in the document's

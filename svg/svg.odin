@@ -139,6 +139,25 @@ Shape :: struct {
 
 Text :: struct {
 	chunks: vg.Range,
+	wrap:   Text_Wrap,
+}
+
+// SVG 2 wrapped text (shape-inside, inline-size), laid out as one chunk:
+// its lines break to fit `width` (0: not wrapped), and only at newlines
+// with `no_wrap` (white-space pre and nowrap). shape-inside places the
+// first line's box top at `y`, each line at `x` by `align` (the rect's
+// left, middle or right, less shape-padding), and doesn't draw lines that
+// reach below `bottom`; inline-size takes the first chunk's x, y as the
+// first baseline's. `line_height` (pixels; 0: normal) applies to every
+// text's lines.
+Text_Wrap :: struct {
+	width:       f32,
+	no_wrap:     bool,
+	inside:      bool,
+	x, y:        f32,
+	bottom:      f32,
+	align:       vg.Text_Align,
+	line_height: f32,
 }
 
 // Text starting at an absolute position (the text element, or a tspan
@@ -500,10 +519,12 @@ parse :: proc(data: []u8, opts: Parse_Options = {}, allocator := context.allocat
 
 // Text whitespace is significant in SVG, but the XML reader trims text
 // bodies and drops whitespace-only ones: in the copy it parses, whitespace
-// in the content of <text> elements becomes SPACE (a private-use
-// character), turned back into spaces by the text whitespace handling.
+// in the content of <text> elements becomes SPACE, a newline NEWLINE
+// (private-use characters), turned back by the text whitespace handling.
 @(private)
 SPACE :: "\uE000"
+@(private)
+NEWLINE :: "\uE001"
 
 @(private)
 prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
@@ -567,7 +588,7 @@ prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 		}
 		if depth > 0 && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			append(&out, ..data[run:i])
-			append(&out, SPACE)
+			append(&out, NEWLINE if ch == '\n' else SPACE)
 			run = i + 1
 		}
 	}
@@ -764,6 +785,14 @@ Computed :: struct {
 	anchor:           vg.Text_Align,
 	baseline:         vg.Text_Baseline,
 	letter_spacing:   f32,
+	// line-height in pixels, or (`line_height_ems`) in ems of the font
+	// size where it is used; 0: normal.
+	line_height:      f32,
+	line_height_ems:  bool,
+	white_space:      White_Space,
+	// text-align, for wrapped text (`text_align_set`: declared).
+	text_align:       vg.Text_Align,
+	text_align_set:   bool,
 	crisp:            bool,
 	srgb_filters:     bool,
 	preserve_space:   bool,
@@ -792,6 +821,21 @@ Computed :: struct {
 	overflow_visible: bool,
 	css_transform:    string,
 	baseline_set:     bool,
+	// SVG 2 wrapped text: shape-inside's value, shape-padding and
+	// inline-size in pixels.
+	shape_inside:     string,
+	shape_padding:    f32,
+	inline_size:      f32,
+}
+
+// CSS white-space, which SVG 2 reads for xml:space.
+@(private)
+White_Space :: enum u8 {
+	Normal,
+	Pre,
+	Nowrap,
+	Pre_Wrap,
+	Pre_Line,
 }
 
 @(private)
@@ -1223,6 +1267,56 @@ props := [Prop]Prop_Info {
 				st.letter_spacing = length_px(l, percent_base(p, 0), st.font_size)
 			}
 		}, proc(st, from: ^Computed) {st.letter_spacing = from.letter_spacing}},
+	.Line_Height = {"line-height", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			if v == "normal" {
+				st.line_height, st.line_height_ems = 0, false
+			} else if l, ok := parse_length(v); ok && l.v >= 0 {
+				// A number inherits as one; a percentage or length as the
+				// length it is here.
+				st.line_height, st.line_height_ems = l.v, l.unit == .None
+				if l.unit != .None {
+					st.line_height = length_px(l, st.font_size, st.font_size)
+				}
+			}
+		}, proc(st, from: ^Computed) {st.line_height, st.line_height_ems = from.line_height, from.line_height_ems}},
+	.White_Space = {"white-space", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			switch v {
+			case "normal":
+				st.white_space = .Normal
+			case "pre":
+				st.white_space = .Pre
+			case "nowrap":
+				st.white_space = .Nowrap
+			case "pre-wrap":
+				st.white_space = .Pre_Wrap
+			case "pre-line":
+				st.white_space = .Pre_Line
+			}
+		}, proc(st, from: ^Computed) {st.white_space = from.white_space}},
+	.Text_Align = {"text-align", true, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			switch v {
+			case "start", "left", "justify":
+				st.text_align, st.text_align_set = .Left, true
+			case "center":
+				st.text_align, st.text_align_set = .Center, true
+			case "end", "right":
+				st.text_align, st.text_align_set = .Right, true
+			}
+		}, proc(st, from: ^Computed) {st.text_align, st.text_align_set = from.text_align, from.text_align_set}},
+	.Shape_Inside = {"shape-inside", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.shape_inside = "" if v == "none" || v == "auto" else v
+		}, proc(st, from: ^Computed) {st.shape_inside = from.shape_inside}},
+	.Shape_Padding = {"shape-padding", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			if l, ok := parse_length(v); ok {
+				st.shape_padding = max(length_px(l, 0, st.font_size), 0)
+			}
+		}, proc(st, from: ^Computed) {st.shape_padding = from.shape_padding}},
+	.Inline_Size = {"inline-size", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
+			st.inline_size = 0
+			if l, ok := parse_length(v); ok {
+				st.inline_size = max(length_px(l, percent_base(p, 0), st.font_size), 0)
+			}
+		}, proc(st, from: ^Computed) {st.inline_size = from.inline_size}},
 	.Clip_Path = {"clip-path", false, proc(p: ^Parser, st, parent: ^Computed, v: string) {
 			st.clip_path = "" if v == "none" else v
 		}, proc(st, from: ^Computed) {st.clip_path = from.clip_path}},
@@ -2519,6 +2613,8 @@ Text_State :: struct {
 	// character starts a chunk (entering or leaving one).
 	path:       i32,
 	path_break: bool,
+	// SVG 2 wrapped text: one chunk, whatever x and y its tspans give.
+	wrapped:    bool,
 }
 
 @(private)
@@ -2533,7 +2629,8 @@ convert_text :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	}
 	text := i32(len(doc.texts))
 	piece_start := len(doc.pieces)
-	append(&doc.texts, Text{chunks = {u32(len(doc.chunks)), 0}})
+	wrap := text_wrap(p, st)
+	append(&doc.texts, Text{chunks = {u32(len(doc.chunks)), 0}, wrap = wrap})
 	doc.nodes[n].data = text
 	ts := Text_State {
 		text       = text,
@@ -2542,6 +2639,7 @@ convert_text :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 		last_space = true,
 		baseline   = st.baseline,
 		lists      = make([dynamic]Text_Lists, p.tmp),
+		wrapped    = wrap.width > 0,
 	}
 	cst := st^
 	cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
@@ -2550,7 +2648,7 @@ convert_text :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 	// Trailing whitespace of the whole text goes.
 	t := &doc.texts[text]
 	t.chunks.count = u32(len(doc.chunks)) - t.chunks.start
-	for i := len(doc.pieces) - 1; i >= piece_start && !st.preserve_space; i -= 1 {
+	for i := len(doc.pieces) - 1; i >= piece_start && !preserves_spaces(st); i -= 1 {
 		pc := &doc.pieces[i]
 		pc.text = strings.trim_right(pc.text, " ")
 		if pc.text != "" {
@@ -2563,6 +2661,49 @@ convert_text :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 		return
 	}
 	doc.nodes[n].bbox = text_bbox(p, t^, st.font_size)
+}
+
+// The text's SVG 2 content area: shape-inside's rect (less shape-padding;
+// a shape other than a rect isn't supported), else inline-size.
+@(private)
+text_wrap :: proc(p: ^Parser, st: ^Computed) -> (w: Text_Wrap) {
+	w.line_height = st.line_height * (st.font_size if st.line_height_ems else 1)
+	w.align = st.text_align if st.text_align_set else st.anchor
+	w.no_wrap = st.white_space == .Pre || st.white_space == .Nowrap
+	if st.shape_inside != "" {
+		el, found := ref(p, st.shape_inside)
+		if found && local_name(p.x.elements[el].ident) == "rect" {
+			re := &p.x.elements[el]
+			pad := st.shape_padding
+			x := attr_length(p, re, "x", 0, 0, st.font_size) + pad
+			y := attr_length(p, re, "y", 1, 0, st.font_size) + pad
+			width := attr_length(p, re, "width", 0, 0, st.font_size) - 2 * pad
+			height := attr_length(p, re, "height", 1, 0, st.font_size) - 2 * pad
+			if width > 0 && height > 0 {
+				w.inside, w.width, w.y, w.bottom = true, width, y, y + height
+				switch w.align {
+				case .Left:
+					w.x = x
+				case .Center:
+					w.x = x + width / 2
+				case .Right:
+					w.x = x + width
+				}
+				return
+			}
+		} else if found {
+			warn(p, "shape-inside supports rects only")
+		}
+	}
+	w.width = st.inline_size
+	return
+}
+
+// Whether the text keeps its spaces (xml:space="preserve", white-space pre
+// and pre-wrap).
+@(private)
+preserves_spaces :: proc(st: ^Computed) -> bool {
+	return st.preserve_space || st.white_space == .Pre || st.white_space == .Pre_Wrap
 }
 
 // Reads the x / y / dx / dy / rotate lists of a text or tspan.
@@ -2634,7 +2775,7 @@ collect_text :: proc(p: ^Parser, el: u32, st: ^Computed, ts: ^Text_State) {
 	for v in p.x.elements[el].value {
 		switch c in v {
 		case string:
-			s := text_whitespace(p, c, st.preserve_space, &ts.last_space)
+			s := text_whitespace(p, c, preserves_spaces(st), st.white_space == .Pre || st.white_space == .Pre_Wrap || st.white_space == .Pre_Line, &ts.last_space)
 			if s != "" {
 				text_emit(p, s, st, ts)
 			}
@@ -2781,7 +2922,7 @@ text_emit :: proc(p: ^Parser, s: string, st: ^Computed, ts: ^Text_State) {
 		x, y, dx, dy, rot := text_char_pos(ts, ts.chars)
 		_, has_x := x.?
 		_, has_y := y.?
-		new_chunk := has_x || has_y || ts.chunk < 0 || ts.path_break
+		new_chunk := ts.chunk < 0 || (!ts.wrapped && (has_x || has_y || ts.path_break))
 		ddx, ddy := dx.? or_else 0, dy.? or_else 0
 		if new_chunk || ddx != 0 || ddy != 0 || rot != cur_rot {
 			flush(p, s, piece_from, off, st, ts, style, cur_dx, cur_dy, cur_rot)
@@ -2804,18 +2945,30 @@ text_emit :: proc(p: ^Parser, s: string, st: ^Computed, ts: ^Text_State) {
 
 // Text whitespace (CSS white-space: normal, as resvg and browsers): any
 // whitespace is a space, runs collapse (across tspans), the text's leading
-// and trailing spaces go. xml:space="preserve" keeps every space.
+// and trailing spaces go. xml:space="preserve" (and white-space pre,
+// pre-wrap) keeps every space. With `newlines` (white-space pre, pre-wrap,
+// pre-line) a newline stays one, a line break, the spaces around it going
+// where they collapse.
 @(private)
-text_whitespace :: proc(p: ^Parser, s: string, preserve: bool, last_space: ^bool) -> string {
+text_whitespace :: proc(p: ^Parser, s: string, preserve, newlines: bool, last_space: ^bool) -> string {
 	out := make([]u8, len(s), p.sa)
 	n := 0
 	src := transmute([]u8)s
 	for i := 0; i < len(src); i += 1 {
 		c := src[i]
-		if c == 0xEE && i + 2 < len(src) && src[i + 1] == 0x80 && src[i + 2] == 0x80 {
-			// SPACE: whitespace protected from the XML reader.
-			c = ' '
+		if c == 0xEE && i + 2 < len(src) && src[i + 1] == 0x80 && (src[i + 2] == 0x80 || src[i + 2] == 0x81) {
+			// SPACE, NEWLINE: whitespace protected from the XML reader.
+			c = ' ' if src[i + 2] == 0x80 else '\n'
 			i += 2
+		}
+		if newlines && c == '\n' {
+			if !preserve && n > 0 && out[n - 1] == ' ' {
+				n -= 1
+			}
+			out[n] = '\n'
+			n += 1
+			last_space^ = true
+			continue
 		}
 		if preserve {
 			if c == '\n' || c == '\r' || c == '\t' {
@@ -2842,6 +2995,19 @@ text_whitespace :: proc(p: ^Parser, s: string, preserve: bool, last_space: ^bool
 	return string(out[:n])
 }
 
+// How many of a layout's glyphs a wrapped text draws: shape-inside leaves
+// out the lines whose box reaches below its rect.
+wrap_glyphs :: proc(l: ^vg.Text_Layout, wrap: ^Text_Wrap) -> int {
+	if wrap.inside {
+		for line in l.lines {
+			if line.y + line.below > wrap.bottom + 0.001 {
+				return line.first
+			}
+		}
+	}
+	return len(l.glyphs)
+}
+
 // The text's bounding box: laid out with the parse fonts, else estimated.
 @(private)
 text_bbox :: proc(p: ^Parser, t: Text, font_size: f32) -> vg.Rect {
@@ -2855,8 +3021,9 @@ text_bbox :: proc(p: ^Parser, t: Text, font_size: f32) -> vg.Rect {
 		defer vg.text_layout_destroy(&l)
 		pen: vg.Vec2
 		along: f32
+		wrap := t.wrap
 		for ci in t.chunks.start ..< t.chunks.start + t.chunks.count {
-			pen, along = layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, along, &l, &pieces, &tp)
+			pen, along = layout_chunk(p.opts.fonts, doc, &doc.chunks[ci], pen, along, &l, &pieces, &tp, &wrap)
 			if len(l.glyphs) > 0 {
 				box = box_union(box, {l.min.x, l.min.y, l.max.x - l.min.x, l.max.y - l.min.y})
 			}
@@ -2882,10 +3049,11 @@ text_bbox :: proc(p: ^Parser, t: Text, font_size: f32) -> vg.Rect {
 	return box
 }
 
-// Lays out one chunk into `l` from the pen position left by the previous
-// chunk (and its distance along a path); returns where this one ends.
-// `pieces` and `tp` are scratch.
-layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk, pen: vg.Vec2, along: f32, l: ^vg.Text_Layout, pieces: ^[dynamic]vg.Text_Piece, tp: ^vg.Text_Path) -> (end: vg.Vec2, end_along: f32) {
+// Lays out one chunk of a text into `l` from the pen position left by the
+// previous chunk (and its distance along a path); returns where this one
+// ends. A wrapped text (`wrap`, its Text's) is one chunk, its lines broken
+// and placed by text_layout. `pieces` and `tp` are scratch.
+layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk, pen: vg.Vec2, along: f32, l: ^vg.Text_Layout, pieces: ^[dynamic]vg.Text_Piece, tp: ^vg.Text_Path, wrap: ^Text_Wrap) -> (end: vg.Vec2, end_along: f32) {
 	clear(pieces)
 	y := ch.y if ch.has_y else pen.y
 	x := ch.x if ch.has_x else pen.x
@@ -2900,7 +3068,21 @@ layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk
 		append(pieces, vg.Text_Piece{pc.text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
 		total_dy += pc.dy
 	}
-	vg.text_layout(fonts, pieces[:], {x = x, y = y, baseline = ch.baseline}, l)
+	opts := vg.Text_Options{x = x, y = y, baseline = ch.baseline}
+	if wrap.line_height > 0 && len(pieces) > 0 {
+		// In ems of the first piece's size.
+		opts.line_height = wrap.line_height / pieces[0].style.size
+	}
+	if wrap.width > 0 && ch.path < 0 {
+		opts.align = wrap.align
+		opts.width = 0 if wrap.no_wrap else wrap.width
+		if wrap.inside {
+			opts.x, opts.y, opts.baseline = wrap.x, wrap.y, .Line_Top
+		}
+		vg.text_layout(fonts, pieces[:], opts, l)
+		return {l.max.x, l.max.y}, x
+	}
+	vg.text_layout(fonts, pieces[:], opts, l)
 	if len(l.glyphs) == 0 {
 		return ({x, y + total_dy} if ch.path < 0 else pen), x
 	}
