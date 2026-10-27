@@ -40,6 +40,13 @@ Image_Flag :: enum u32 {
 	Premultiplied,
 	// Nearest-neighbour sampling instead of bilinear.
 	Nearest,
+	// Contents last through one render: they are undefined when a render
+	// starts, so each frame clears or overwrites the image before reading
+	// it, and nothing writes or reads it between renders (an update or a
+	// read is an error). A backend may drop the contents between renders:
+	// the software backend lends such images their pixels for one render, so
+	// players sharing it hold one render's worth between them.
+	Transient,
 }
 Image_Flags :: bit_set[Image_Flag;u32]
 

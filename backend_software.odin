@@ -1,9 +1,9 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 import "core:mem"
-import "core:sync"
-import "core:thread"
+import common "deps:odecs/common"
 
 import cv "curves"
 
@@ -21,21 +21,37 @@ Software_Backend :: struct {
 	origin:    [2]i32,
 	// The intermediate of a blur's two passes, reused.
 	blur_tmp:  []u8,
-	// A shape group's pixels before its tint, reused.
-	group:     [][4]f32,
-	// Borrowed task pool (the caller owns it) the heaviest filters
-	// (feTurbulence) run row bands on; nil runs them on the calling thread.
-	pool:      ^thread.Pool,
+	// A run's draws by band (sw_draw_run): band k's are
+	// `binned[starts[k]:starts[k + 1]]`, in drawing order; `bounds` holds
+	// the run's instances' bounds by their index in the frame's shapes.
+	binned:    [dynamic]Sw_Binned,
+	starts:    [dynamic]u32,
+	bounds:    [dynamic]Bounds,
+	// `.Transient` images' pixels, one block carved in order for a render
+	// (sw_lend) and kept at the largest render's size.
+	transient: []u8,
+	// The caller's pool a frame's row bands run on (odecs' Work_Pool: one
+	// band a range); nil runs them all on the calling thread. A band takes
+	// a group's scratch from context.temp_allocator, so each of the pool's
+	// threads must have its own (an Odin thread's default, as odecs'
+	// Static_Pool's workers do).
+	pool:      ^common.Work_Pool,
 }
 
 software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocator) {
 	b^ = {allocator = allocator}
+	b.binned = make([dynamic]Sw_Binned, allocator)
+	b.starts = make([dynamic]u32, allocator)
+	b.bounds = make([dynamic]Bounds, allocator)
 }
 
 software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.pixels, b.allocator)
 	delete(b.blur_tmp, b.allocator)
-	delete(b.group, b.allocator)
+	delete(b.binned)
+	delete(b.starts)
+	delete(b.bounds)
+	delete(b.transient, b.allocator)
 	b^ = {}
 }
 
@@ -75,6 +91,10 @@ sw_set_size :: proc(data: rawptr, width, height: u32, dpi: f32) {
 @(private = "file")
 sw_alloc_image :: proc(data: rawptr, info: Image_Info) -> (Backend_Image, Error) {
 	b := (^Software_Backend)(data)
+	if .Transient in info.flags {
+		// Pixels are lent for each render (sw_lend).
+		return {}, nil
+	}
 	pixels, err := make([]u8, int(info.width * info.height * bytes_per_pixel(info.format)), b.allocator)
 	if err != nil {
 		return {}, .Out_Of_Memory
@@ -84,6 +104,9 @@ sw_alloc_image :: proc(data: rawptr, info: Image_Info) -> (Backend_Image, Error)
 
 @(private = "file")
 sw_update_image :: proc(data: rawptr, img: ^Backend_Image, info: Image_Info, src: Image_Source, x, y: u32) -> Error {
+	if .Transient in info.flags {
+		return .Unsupported_Operation
+	}
 	bpp := bytes_per_pixel(info.format)
 	src_stride := image_source_stride(src)
 	dst_stride := info.width * bpp
@@ -107,6 +130,9 @@ sw_delete_image :: proc(data: rawptr, img: Backend_Image, id: Image_Id) {
 
 @(private = "file")
 sw_read_image :: proc(data: rawptr, img: Backend_Image, info: Image_Info, allocator: mem.Allocator) -> ([]u8, Error) {
+	if .Transient in info.flags {
+		return nil, .Unsupported_Operation
+	}
 	n := int(info.width * info.height * bytes_per_pixel(info.format))
 	pixels, err := make([]u8, n, allocator)
 	if err != nil {
@@ -141,7 +167,7 @@ Sw_Target :: struct {
 sw_active_target :: proc(b: ^Software_Backend, images: ^Image_Store) -> (Sw_Target, bool) {
 	if image_id_valid(b.target) {
 		entry := image_store_get(images, b.target)
-		if entry == nil {
+		if entry == nil || entry.image.pixels == nil {
 			return {}, false
 		}
 		return {entry.image.pixels, entry.info.width, entry.info.height, entry.info.format}, true
@@ -149,37 +175,221 @@ sw_active_target :: proc(b: ^Software_Backend, images: ^Image_Store) -> (Sw_Targ
 	return {b.pixels, b.width, b.height, .RGBA8}, true
 }
 
+// Clears and draws gather into runs on one target, each drawn in row bands
+// (sw_draw_run); a target switch, a filter, a program or an external ends a
+// run and runs on its own, after it.
 @(private = "file")
 sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, frame: Frame) {
 	b := (^Software_Backend)(data)
+	sw_lend(b, images)
 	b.target = {}
 	b.origin = {}
-	for cmd in frame.commands {
-		if rt, ok := cmd.type.(Cmd_Set_Render_Target); ok {
+	// The frame's instances' bounds: room for its largest frame, kept.
+	if len(b.bounds) < len(frame.shapes) {
+		resize(&b.bounds, len(frame.shapes))
+	}
+	run := 0
+	for cmd, i in frame.commands {
+		#partial switch _ in cmd.type {
+		case Cmd_Clear_Rect, Cmd_Draw_Shapes:
+			continue
+		}
+		sw_draw_run(b, images, frame, frame.commands[run:i])
+		run = i + 1
+		#partial switch v in cmd.type {
+		case Cmd_Set_Render_Target:
 			b.target = {}
-			b.origin = rt.origin
-			if id, is_image := rt.target.(Image_Id); is_image {
+			b.origin = v.origin
+			if id, is_image := v.target.(Image_Id); is_image {
 				b.target = id
 			}
-			continue
+		case Cmd_Filter_Image:
+			sw_filter_image(b, images, cmd, v.target_image, frame.filters[v.filter])
+		case Cmd_Run_Program:
+			sw_run_program(images, frame, frame.runs[v.run])
+		case Cmd_Run_External:
+			v.fn(v.user, nil, images)
 		}
-		if f, ok := cmd.type.(Cmd_Filter_Image); ok {
-			sw_filter_image(b, images, cmd, f.target_image, frame.filters[f.filter])
-			continue
+	}
+	sw_draw_run(b, images, frame, frame.commands[run:])
+	sw_take_back(b, images)
+}
+
+// Gives every `.Transient` image of the store pixels for this render,
+// each its span of one block sized for them all (grown, never shrunk).
+// Out of memory leaves them without pixels: what draws into one or samples
+// it is skipped.
+@(private = "file")
+sw_lend :: proc(b: ^Software_Backend, images: ^Image_Store) {
+	total := 0
+	for &slot in images.entries.slots {
+		if e := &slot.value; slot.occupied && sw_transient(e) {
+			total += sw_span(e.info)
 		}
-		if p, ok := cmd.type.(Cmd_Run_Program); ok {
-			sw_run_program(images, frame, frame.runs[p.run])
-			continue
+	}
+	if len(b.transient) < total {
+		delete(b.transient, b.allocator)
+		b.transient, _ = make([]u8, total, b.allocator)
+	}
+	at := 0
+	for &slot in images.entries.slots {
+		if e := &slot.value; slot.occupied && sw_transient(e) {
+			n := int(e.info.width * e.info.height * bytes_per_pixel(e.info.format))
+			e.image.pixels = b.transient[at:][:n] if len(b.transient) >= total else nil
+			at += sw_span(e.info)
 		}
-		if e, ok := cmd.type.(Cmd_Run_External); ok {
-			e.fn(e.user, nil, images)
-			continue
+	}
+}
+
+// Takes the lent pixels back (sw_lend).
+@(private = "file")
+sw_take_back :: proc(b: ^Software_Backend, images: ^Image_Store) {
+	for &slot in images.entries.slots {
+		if e := &slot.value; slot.occupied && sw_transient(e) {
+			e.image.pixels = nil
 		}
-		target, ok := sw_active_target(b, images)
-		if !ok {
-			continue
+	}
+}
+
+@(private = "file")
+sw_transient :: #force_inline proc "contextless" (e: ^Image_Entry) -> bool {
+	return !e.virtual && !e.borrowed && .Transient in e.info.flags
+}
+
+// A transient image's span of the block: its pixels, rounded up to a cache
+// line so each starts on one.
+@(private = "file")
+sw_span :: #force_inline proc "contextless" (info: Image_Info) -> int {
+	n := int(info.width * info.height * bytes_per_pixel(info.format))
+	return (n + 63) &~ 63
+}
+
+// A draw of a run in the bands it reaches: the command (its index in the
+// run) and its instance (index in the frame's shapes; SW_NO_INSTANCE for a
+// clear).
+@(private = "file")
+Sw_Binned :: struct {
+	cmd:  u32,
+	inst: u32,
+}
+
+@(private = "file")
+SW_NO_INSTANCE :: max(u32)
+
+@(private = "file")
+Sw_Run :: struct {
+	b:      ^Software_Backend,
+	images: ^Image_Store,
+	frame:  Frame,
+	cmds:   []Command,
+	target: Sw_Target,
+	origin: [2]i32,
+}
+
+// Draws a run's commands (clears and shape draws on the current target):
+// each instance (or clear) is binned once into the row bands it reaches,
+// then every band draws its own, in order, on the caller's pool. A pixel
+// gets the same draws in the same order as drawing the commands one after
+// another, so the result is the same.
+@(private = "file")
+sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cmds: []Command) {
+	if len(cmds) == 0 {
+		return
+	}
+	target, ok := sw_active_target(b, images)
+	if !ok {
+		return
+	}
+	run := Sw_Run{b, images, frame, cmds, target, b.origin}
+	rows := int(target.height)
+	bands := (rows + SW_BAND_ROWS - 1) / SW_BAND_ROWS
+	if bands == 0 {
+		return
+	}
+	// Count each band's draws into starts[k + 1] (keeping the instances'
+	// bounds), sum them into ends, fill each band from its start (leaving
+	// starts[k] at band k's end), then shift back.
+	resize(&b.starts, bands + 1)
+	mem.zero_slice(b.starts[:])
+	for fill in ([2]bool{false, true}) {
+		if fill {
+			for band in 0 ..< bands {
+				b.starts[band + 1] += b.starts[band]
+			}
+			// Sized from the count: the bins keep their largest run's room.
+			total := int(b.starts[bands])
+			if total == 0 {
+				return
+			}
+			if cap(b.binned) < total {
+				reserve(&b.binned, total)
+			}
+			resize(&b.binned, total)
 		}
-		sw_run_command(b, images, frame, cmd, target)
+		for cmd, k in cmds {
+			r := sw_raster(&run, cmd)
+			#partial switch c in cmd.type {
+			case Cmd_Clear_Rect:
+				sw_bin(&run, fill, {u32(k), SW_NO_INSTANCE}, max(r.y0, i32(c.y)), min(r.y1, i32(c.y + c.h)))
+			case Cmd_Draw_Shapes:
+				for i in c.instances.start ..< c.instances.start + c.instances.count {
+					if !fill {
+						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
+					}
+					ib := b.bounds[i]
+					sw_bin(&run, fill, {u32(k), i}, max(r.y0, i32(math.floor(ib.miny))), min(r.y1, i32(math.ceil(ib.maxy))))
+				}
+			}
+		}
+	}
+	for band := bands; band > 0; band -= 1 {
+		b.starts[band] = b.starts[band - 1]
+	}
+	b.starts[0] = 0
+	sw_bands(b, rows, &run, sw_run_band)
+}
+
+// A draw reaching rows [y0, y1) (drawing coordinates) of the run's target:
+// counted in each band it reaches, or placed there (`fill`).
+@(private = "file")
+sw_bin :: proc(run: ^Sw_Run, fill: bool, item: Sw_Binned, y0, y1: i32) {
+	if y0 >= y1 {
+		return
+	}
+	b := run.b
+	for band in int(y0 - run.origin.y) / SW_BAND_ROWS ..= int(y1 - 1 - run.origin.y) / SW_BAND_ROWS {
+		if fill {
+			b.binned[b.starts[band]] = item
+			b.starts[band] += 1
+		} else {
+			b.starts[band + 1] += 1
+		}
+	}
+}
+
+// One band of a run: its draws, a command's together. A group's pixels
+// before its tint go through the band's scratch, in the temp arena of the
+// thread drawing the band.
+@(private = "file")
+sw_run_band :: proc(data: rawptr, y0, y1: int) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	run := (^Sw_Run)(data)
+	b := run.b
+	k := y0 / SW_BAND_ROWS
+	items := b.binned[b.starts[k]:b.starts[k + 1]]
+	top, bottom := i32(y0) + run.origin.y, i32(y1) + run.origin.y
+	scratch: [][4]f32
+	for i := 0; i < len(items); {
+		j := i + 1
+		for j < len(items) && items[j].cmd == items[i].cmd {
+			j += 1
+		}
+		cmd := run.cmds[items[i].cmd]
+		if c, ok := cmd.type.(Cmd_Draw_Shapes); ok && c.group != 0 && scratch == nil {
+			scratch = make([][4]f32, int(run.target.width) * (y1 - y0), context.temp_allocator)
+		}
+		sw_band_command(run, cmd, items[i:j], top, bottom, scratch)
+		i = j
 	}
 }
 
@@ -195,17 +405,18 @@ Raster :: struct {
 	blend:   Composite_Operation_State,
 }
 
+// The command's drawable area on the run's target (its scissor applied).
 @(private = "file")
-sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cmd: Command, target: Sw_Target) {
+sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 	r := Raster {
-		target  = target,
+		target  = run.target,
 		blend   = cmd.composite_operation,
-		ox      = b.origin.x,
-		oy      = b.origin.y,
-		x0      = b.origin.x,
-		y0      = b.origin.y,
-		x1      = b.origin.x + i32(target.width),
-		y1      = b.origin.y + i32(target.height),
+		ox      = run.origin.x,
+		oy      = run.origin.y,
+		x0      = run.origin.x,
+		y0      = run.origin.y,
+		x1      = run.origin.x + i32(run.target.width),
+		y1      = run.origin.y + i32(run.target.height),
 	}
 	if sr, ok := cmd.scissor_rect.?; ok {
 		r.x0 = max(r.x0, i32(math.floor(sr.x)))
@@ -213,63 +424,83 @@ sw_run_command :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame,
 		r.x1 = min(r.x1, i32(math.ceil(sr.x + sr.w)))
 		r.y1 = min(r.y1, i32(math.ceil(sr.y + sr.h)))
 	}
+	return r
+}
+
+// A command's draws in one band, rows [top, bottom); `scratch` holds a
+// group's band before its tint.
+@(private = "file")
+sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bottom: i32, scratch: [][4]f32) {
+	r := sw_raster(run, cmd)
+	r.y0 = max(r.y0, top)
+	r.y1 = min(r.y1, bottom)
+	if r.y0 >= r.y1 {
+		return
+	}
+	frame := run.frame
 	#partial switch c in cmd.type {
 	case Cmd_Clear_Rect:
 		sw_clear_rect(&r, c)
 	case Cmd_Draw_Shapes:
 		if c.group != 0 && frame.shapes[c.instances.start].marker != .None {
-			raster_markers(b, &r, images, frame, cmd, c)
+			raster_markers(run, &r, cmd, c, items, scratch)
 			return
 		} else if c.group != 0 {
-			raster_group(b, &r, images, frame, cmd, c)
+			raster_group(run, &r, cmd, c, items, scratch)
 			return
 		}
 		frag: Frag
 		row := max(u32)
-		for inst in frame.shapes[c.instances.start:][:c.instances.count] {
+		for it in items {
+			inst := frame.shapes[it.inst]
 			if inst.paint != row {
-				frag = make_frag(images, cmd, frame.paints[inst.paint])
+				frag = make_frag(run.images, cmd, frame.paints[inst.paint])
 				row = inst.paint
 			}
 			r.frag = &frag
-			raster_shape(&r, inst, frame.shape_words)
+			raster_shape(&r, inst, run.b.bounds[it.inst], frame.shape_words)
 		}
 	}
 }
 
-// A group, as the shape shader draws it: each pixel the instances
-// source-over in order (each as `raster_shape` shades it), then times the
-// tint, blended once.
+// The area a group's or markers' draws in a band cover, clipped to the
+// raster.
 @(private = "file")
-raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
-	instances := frame.shapes[c.instances.start:][:c.instances.count]
+sw_items_area :: proc(run: ^Sw_Run, r: ^Raster, items: []Sw_Binned) -> (x0, y0, x1, y1: i32) {
 	area := EMPTY_BOUNDS
-	for inst in instances {
-		ib := instance_bounds(inst, frame.shape_words)
+	for it in items {
+		ib := run.b.bounds[it.inst]
 		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
 	}
-	x0 := max(r.x0, i32(math.floor(area.minx)))
-	y0 := max(r.y0, i32(math.floor(area.miny)))
-	x1 := min(r.x1, i32(math.ceil(area.maxx)))
-	y1 := min(r.y1, i32(math.ceil(area.maxy)))
+	x0 = max(r.x0, i32(math.floor(area.minx)))
+	y0 = max(r.y0, i32(math.floor(area.miny)))
+	x1 = min(r.x1, i32(math.ceil(area.maxx)))
+	y1 = min(r.y1, i32(math.ceil(area.maxy)))
+	return
+}
+
+// A group, as the shape shader draws it: each pixel the instances
+// source-over in order (each as `raster_shape` shades it), then times the
+// tint, blended once. `scratch` holds the band's pixels before the tint.
+@(private = "file")
+raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32) {
+	frame := run.frame
+	x0, y0, x1, y1 := sw_items_area(run, r, items)
 	if x0 >= x1 || y0 >= y1 {
 		return
 	}
 	w, h := int(x1 - x0), int(y1 - y0)
-	if len(b.group) < w * h {
-		delete(b.group, b.allocator)
-		b.group = make([][4]f32, w * h, b.allocator)
-	}
-	acc := b.group[:w * h]
+	acc := scratch[:w * h]
 	mem.zero_slice(acc)
 	frag: Frag
 	row := max(u32)
-	for inst in instances {
+	for it in items {
+		inst := frame.shapes[it.inst]
 		if inst.paint != row {
-			frag = make_frag(images, cmd, frame.paints[inst.paint])
+			frag = make_frag(run.images, cmd, frame.paints[inst.paint])
 			row = inst.paint
 		}
-		ib := instance_bounds(inst, frame.shape_words)
+		ib := run.b.bounds[it.inst]
 		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
 		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
 		inv := transform_inverse(inst.transform)
@@ -292,7 +523,7 @@ raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, fra
 			}
 		}
 	}
-	tint := make_frag(images, cmd, frame.paints[c.group - 1])
+	tint := make_frag(run.images, cmd, frame.paints[c.group - 1])
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
@@ -315,33 +546,24 @@ raster_group :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, fra
 // A group of markers (draw_markers), as their shader draws it: each pixel
 // the union of the markers' fills and of their outlines, a pixel stopping
 // once both are whole (or absent), then the fill's paint at the first and
-// the outlines' (the tint) at the second over it, blended once.
+// the outlines' (the tint) at the second over it, blended once. The fill,
+// its paint and the outline width are the command's first marker's.
 @(private = "file")
-raster_markers :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, frame: Frame, cmd: Command, c: Cmd_Draw_Shapes) {
-	instances := frame.shapes[c.instances.start:][:c.instances.count]
-	area := EMPTY_BOUNDS
-	for inst in instances {
-		ib := instance_bounds(inst, frame.shape_words)
-		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
-	}
-	x0 := max(r.x0, i32(math.floor(area.minx)))
-	y0 := max(r.y0, i32(math.floor(area.miny)))
-	x1 := min(r.x1, i32(math.ceil(area.maxx)))
-	y1 := min(r.y1, i32(math.ceil(area.maxy)))
+raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32) {
+	frame := run.frame
+	x0, y0, x1, y1 := sw_items_area(run, r, items)
 	if x0 >= x1 || y0 >= y1 {
 		return
 	}
 	w, h := int(x1 - x0), int(y1 - y0)
-	if len(b.group) < w * h {
-		delete(b.group, b.allocator)
-		b.group = make([][4]f32, w * h, b.allocator)
-	}
 	// Per pixel: the fills' union, the outlines'.
-	acc := b.group[:w * h]
+	acc := scratch[:w * h]
 	mem.zero_slice(acc)
-	filled, outline := instances[0].marker_fill, instances[0].hairline
-	for inst in instances {
-		ib := instance_bounds(inst, frame.shape_words)
+	first := frame.shapes[c.instances.start]
+	filled, outline := first.marker_fill, first.hairline
+	for it in items {
+		inst := frame.shapes[it.inst]
+		ib := run.b.bounds[it.inst]
 		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
 		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
 		inv := transform_inverse(inst.transform)
@@ -366,8 +588,8 @@ raster_markers :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, f
 			}
 		}
 	}
-	fill := make_frag(images, cmd, frame.paints[instances[0].paint])
-	tint := make_frag(images, cmd, frame.paints[c.group - 1])
+	fill := make_frag(run.images, cmd, frame.paints[first.paint])
+	tint := make_frag(run.images, cmd, frame.paints[c.group - 1])
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
@@ -394,15 +616,14 @@ raster_markers :: proc(b: ^Software_Backend, r: ^Raster, images: ^Image_Store, f
 	}
 }
 
-// Every pixel center of the instance's bounds: its coverage (shape.odin)
-// as the paint's edge coverage, as the shader does.
+// Every pixel center of the instance's bounds `ib` (instance_bounds): its
+// coverage (shape.odin) as the paint's edge coverage, as the shader does.
 @(private = "file")
-raster_shape :: proc(r: ^Raster, inst: Shape_Instance, frame_words: []u32) {
-	b := instance_bounds(inst, frame_words)
-	x0 := max(r.x0, i32(math.floor(b.minx)))
-	y0 := max(r.y0, i32(math.floor(b.miny)))
-	x1 := min(r.x1, i32(math.ceil(b.maxx)))
-	y1 := min(r.y1, i32(math.ceil(b.maxy)))
+raster_shape :: proc(r: ^Raster, inst: Shape_Instance, ib: Bounds, frame_words: []u32) {
+	x0 := max(r.x0, i32(math.floor(ib.minx)))
+	y0 := max(r.y0, i32(math.floor(ib.miny)))
+	x1 := min(r.x1, i32(math.ceil(ib.maxx)))
+	y1 := min(r.y1, i32(math.ceil(ib.maxy)))
 	inv := transform_inverse(inst.transform)
 	u, v := instance_footprint(inst)
 	words := instance_words(inst, frame_words)
@@ -482,7 +703,7 @@ lookup_texture :: proc(images: ^Image_Store, id: Image_Id) -> (Sw_Texture, bool)
 		return {}, false
 	}
 	entry := image_store_get(images, id)
-	if entry == nil {
+	if entry == nil || entry.image.pixels == nil {
 		return {}, false
 	}
 	return {entry.image.pixels, entry.info.width, entry.info.height, entry.info.format, entry.info.flags}, true
@@ -746,12 +967,13 @@ apply_blend :: proc "contextless" (s: Composite_Operation_State, src, dst: [4]f3
 // Runs one image filter (see `Image_Filter`). Inputs are read as a GPU
 // sampler returns them and converted to premultiplied color by their
 // `tex_type`, as the shader does; every pixel is computed before it is
-// written, so the target may alias an input.
+// written, so the target may alias an input. Each pass is a sweep of row
+// bands (sw_bands); a two-pass filter's second reads the whole first.
 @(private = "file")
 sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Image_Id, filter: Image_Filter) {
 	src, src_ok := lookup_texture(images, cmd.image)
 	dst_entry := image_store_get(images, target)
-	if !src_ok || dst_entry == nil {
+	if !src_ok || dst_entry == nil || dst_entry.image.pixels == nil {
 		return
 	}
 	dst := Sw_Target{dst_entry.image.pixels, dst_entry.info.width, dst_entry.info.height, dst_entry.info.format}
@@ -766,66 +988,113 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		return
 	}
 	src_tt := tex_type_for({src.flags, src.width, src.height, src.format})
+	job := Sw_Filter{src = src, src_tt = src_tt, dst = dst, filter = filter}
+	rows := int(dst.height)
 
 	if sx, sy, edge, is_blur := blur_params(filter); is_blur {
-		if len(b.blur_tmp) < len(src.pixels) {
-			delete(b.blur_tmp, b.allocator)
-			b.blur_tmp = make([]u8, len(src.pixels), b.allocator)
-		}
-		tmp := b.blur_tmp[:len(src.pixels)]
-		mid := Sw_Target{tmp, src.width, src.height, src.format}
-		blur_pass(src, mid, {1, 0}, sx, src_tt, edge)
-		mid_tex := Sw_Texture{tmp, src.width, src.height, src.format, src.flags}
+		tmp := sw_blur_tmp(b, len(src.pixels))
+		job.edge = edge
+		job.dst = {tmp, src.width, src.height, src.format}
+		job.dir, job.sigma, job.tex_type = {1, 0}, sx, src_tt
+		sw_bands(b, rows, &job, sw_blur_band)
 		// The intermediate already holds premultiplied color.
-		blur_pass(mid_tex, dst, {0, 1}, sy, 2 if src.format == .Gray8 else 0, edge)
+		job.src = {tmp, src.width, src.height, src.format, src.flags}
+		job.dst = dst
+		job.dir, job.sigma, job.tex_type = {0, 1}, sy, 2 if src.format == .Gray8 else 0
+		sw_bands(b, rows, &job, sw_blur_band)
 		return
 	}
 
 	if m, is_morph := filter.(Morphology); is_morph {
-		if len(b.blur_tmp) < len(src.pixels) {
-			delete(b.blur_tmp, b.allocator)
-			b.blur_tmp = make([]u8, len(src.pixels), b.allocator)
-		}
-		tmp := b.blur_tmp[:len(src.pixels)]
-		morphology_pass(src, {tmp, src.width, src.height, src.format}, m, 0, src_tt)
-		mid_tex := Sw_Texture{tmp, src.width, src.height, src.format, src.flags}
-		morphology_pass(mid_tex, dst, m, 1, 2 if src.format == .Gray8 else 0)
+		tmp := sw_blur_tmp(b, len(src.pixels))
+		job.morph = m
+		job.dst = {tmp, src.width, src.height, src.format}
+		job.axis, job.tex_type = 0, src_tt
+		sw_bands(b, rows, &job, sw_morphology_band)
+		job.src = {tmp, src.width, src.height, src.format, src.flags}
+		job.dst = dst
+		job.axis, job.tex_type = 1, 2 if src.format == .Gray8 else 0
+		sw_bands(b, rows, &job, sw_morphology_band)
 		return
 	}
 
-	back: Sw_Texture
-	back_tt: f32
 	if id := filter_backdrop(filter); image_id_valid(id) {
 		ok: bool
-		back, ok = lookup_texture(images, id)
+		job.back, ok = lookup_texture(images, id)
 		_, is_lut := filter.(Component_Transfer)
-		if !ok || (!is_lut && (back.width != src.width || back.height != src.height)) {
+		if !ok || (!is_lut && (job.back.width != src.width || job.back.height != src.height)) {
 			return
 		}
-		back_tt = tex_type_for({back.flags, back.width, back.height, back.format})
+		job.back_tt = tex_type_for({job.back.flags, job.back.width, job.back.height, job.back.format})
 	}
 	#partial switch v in filter {
 	case Lighting, Tile, Displacement_Map, Convolve_Matrix:
 		// Neighbourhood filters: the target may alias the source.
-		out := dst
-		if raw_data(dst.pixels) == raw_data(src.pixels) || raw_data(dst.pixels) == raw_data(back.pixels) {
-			if len(b.blur_tmp) < len(dst.pixels) {
-				delete(b.blur_tmp, b.allocator)
-				b.blur_tmp = make([]u8, len(dst.pixels), b.allocator)
-			}
-			out.pixels = b.blur_tmp[:len(dst.pixels)]
+		if raw_data(dst.pixels) == raw_data(src.pixels) || raw_data(dst.pixels) == raw_data(job.back.pixels) {
+			job.dst.pixels = sw_blur_tmp(b, len(dst.pixels))
 		}
-		neighbourhood_filter(src, src_tt, back, back_tt, out, filter)
-		if raw_data(out.pixels) != raw_data(dst.pixels) {
-			copy(dst.pixels, out.pixels)
+		sw_bands(b, rows, &job, proc(data: rawptr, y0, y1: int) {
+			j := (^Sw_Filter)(data)
+			neighbourhood_filter(j.src, j.src_tt, j.back, j.back_tt, j.dst, j.filter, y0, y1)
+		})
+		if raw_data(job.dst.pixels) != raw_data(dst.pixels) {
+			copy(dst.pixels, job.dst.pixels)
 		}
 		return
 	}
-	for y in 0 ..< dst.height {
+	sw_bands(b, rows, &job, sw_pixel_filter_band)
+}
+
+// One filter pass's inputs and output, shared by its bands.
+@(private = "file")
+Sw_Filter :: struct {
+	src:      Sw_Texture,
+	src_tt:   f32,
+	back:     Sw_Texture,
+	back_tt:  f32,
+	dst:      Sw_Target,
+	filter:   Image_Filter,
+	// A blur or morphology pass.
+	tex_type: f32,
+	dir:      [2]i32,
+	sigma:    f32,
+	edge:     Blur_Edge,
+	morph:    Morphology,
+	axis:     int,
+}
+
+// The scratch between a two-pass filter's passes, `n` bytes.
+@(private = "file")
+sw_blur_tmp :: proc(b: ^Software_Backend, n: int) -> []u8 {
+	if len(b.blur_tmp) < n {
+		delete(b.blur_tmp, b.allocator)
+		b.blur_tmp = make([]u8, n, b.allocator)
+	}
+	return b.blur_tmp[:n]
+}
+
+@(private = "file")
+sw_blur_band :: proc(data: rawptr, y0, y1: int) {
+	j := (^Sw_Filter)(data)
+	blur_pass(j.src, j.dst, j.dir, j.sigma, j.tex_type, j.edge, y0, y1)
+}
+
+@(private = "file")
+sw_morphology_band :: proc(data: rawptr, y0, y1: int) {
+	j := (^Sw_Filter)(data)
+	morphology_pass(j.src, j.dst, j.morph, j.axis, j.tex_type, y0, y1)
+}
+
+// The filters that read only the pixel under them (and the backdrop's).
+@(private = "file")
+sw_pixel_filter_band :: proc(data: rawptr, y0, y1: int) {
+	j := (^Sw_Filter)(data)
+	src, src_tt, back, back_tt, dst := j.src, j.src_tt, j.back, j.back_tt, j.dst
+	for y in u32(y0) ..< u32(y1) {
 		for x in 0 ..< dst.width {
 			s := apply_tex_type(fetch(src, x, y), src_tt)
 			out: [4]f32
-			#partial switch v in filter {
+			#partial switch v in j.filter {
 			case Color_Matrix:
 				out = color_matrix_pixel(v.m, s)
 			case Color_Space_Convert:
@@ -871,94 +1140,30 @@ SW_BAND_ROWS :: 16
 
 @(private = "file")
 Sw_Bands :: struct {
-	data:    rawptr,
-	band:    proc(data: rawptr, y0, y1: int),
-	rows:    int,
-	// The next band to take, shared by the takers.
-	next:    int,
-	// Pool tasks not finished.
-	pending: sync.Futex,
+	data: rawptr,
+	band: proc(data: rawptr, y0, y1: int),
+	rows: int,
 }
 
-// Runs `band` over `rows` rows in bands of SW_BAND_ROWS: on this thread and,
-// with `b.pool`, on its threads too. While waiting this thread runs any
-// waiting pool task, so it may itself be a pool task.
+// Runs `band` over `rows` rows in bands of SW_BAND_ROWS, a range of bands
+// at a time on the caller's pool (`b.pool`; nil: all on this thread). Bands
+// write disjoint rows; a band never starts another sweep.
 @(private = "file")
 sw_bands :: proc(b: ^Software_Backend, rows: int, data: rawptr, band: proc(data: rawptr, y0, y1: int)) {
-	job := Sw_Bands{data = data, band = band, rows = rows}
-	helpers := 0
-	if b.pool != nil {
-		sync.mutex_lock(&b.pool.mutex)
-		helpers = min(len(b.pool.threads), (rows - 1) / SW_BAND_ROWS)
-		sync.mutex_unlock(&b.pool.mutex)
-	}
-	job.pending = sync.Futex(max(helpers, 0))
-	for i in 0 ..< helpers {
-		thread.pool_add_task(b.pool, context.allocator, sw_band_task, &job, i)
-	}
-	sw_take_bands(&job)
-	if helpers <= 0 {
+	job := Sw_Bands{data, band, rows}
+	count := (rows + SW_BAND_ROWS - 1) / SW_BAND_ROWS
+	if b.pool == nil {
+		sw_band_range(&job, 0, count)
 		return
 	}
-	for {
-		left := sync.atomic_load(&job.pending)
-		if left == 0 {
-			break
-		}
-		if task, ok := thread.pool_pop_waiting(b.pool); ok {
-			thread.pool_do_work(b.pool, task)
-			continue
-		}
-		sync.futex_wait(&job.pending, u32(left))
-	}
-	// Forget this job's finished tasks (the pool keeps a record of each until
-	// popped); the host's own records stay for it to pop. A worker appends
-	// its record after the task returns, so `pending` can reach 0 first:
-	// wait for all `helpers` of them (each task gets exactly one), then
-	// remove them in one pass.
-	mine :: #force_inline proc(t: thread.Task, job: ^Sw_Bands) -> bool {
-		return t.procedure == sw_band_task && t.data == rawptr(job)
-	}
-	for {
-		sync.mutex_lock(&b.pool.mutex)
-		found := 0
-		for t in b.pool.tasks_done {
-			found += int(mine(t, &job))
-		}
-		if found == helpers {
-			kept := 0
-			for t in b.pool.tasks_done {
-				if !mine(t, &job) {
-					b.pool.tasks_done[kept] = t
-					kept += 1
-				}
-			}
-			resize(&b.pool.tasks_done, kept)
-			sync.atomic_sub(&b.pool.num_done, found)
-			sync.mutex_unlock(&b.pool.mutex)
-			break
-		}
-		sync.mutex_unlock(&b.pool.mutex)
-		thread.yield()
-	}
+	b.pool.run(b.pool, count, sw_band_range, &job)
 }
 
 @(private = "file")
-sw_band_task :: proc(t: thread.Task) {
-	job := (^Sw_Bands)(t.data)
-	sw_take_bands(job)
-	if sync.atomic_sub(&job.pending, 1) == 1 {
-		sync.futex_broadcast(&job.pending)
-	}
-}
-
-@(private = "file")
-sw_take_bands :: proc(job: ^Sw_Bands) {
-	for {
-		y := sync.atomic_add(&job.next, 1) * SW_BAND_ROWS
-		if y >= job.rows {
-			return
-		}
+sw_band_range :: proc(data: rawptr, first, end: int) {
+	job := (^Sw_Bands)(data)
+	for k in first ..< end {
+		y := k * SW_BAND_ROWS
 		job.band(job.data, y, min(y + SW_BAND_ROWS, job.rows))
 	}
 }
@@ -966,7 +1171,7 @@ sw_take_bands :: proc(job: ^Sw_Bands) {
 // One direction (`axis` 0 = x) of a morphology box: min or max over the
 // taps inside the valid rectangle.
 @(private = "file")
-morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: int, tex_type: f32) {
+morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: int, tex_type: f32, y0, y1: int) {
 	rf := clamp(m.radius[axis], 0, MORPHOLOGY_MAX_RADIUS)
 	r := i32(rf)
 	frac := rf - f32(r)
@@ -974,7 +1179,7 @@ morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: in
 		return {max(a.r, b.r), max(a.g, b.g), max(a.b, b.b), max(a.a, b.a)} if dilate else {min(a.r, b.r), min(a.g, b.g), min(a.b, b.b), min(a.a, b.a)}
 	}
 	lo, hi := i32(m.valid[axis]), i32(m.valid[axis + 2]) - 1
-	for y in 0 ..< dst.height {
+	for y in u32(y0) ..< u32(y1) {
 		for x in 0 ..< dst.width {
 			p := [2]i32{i32(x), i32(y)}
 			c := p[axis]
@@ -1005,14 +1210,14 @@ morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: in
 // Lighting, tiling, displacement and convolution, pixel by pixel as the
 // shader's `render_neighbourhood` does.
 @(private = "file")
-neighbourhood_filter :: proc(src: Sw_Texture, src_tt: f32, back: Sw_Texture, back_tt: f32, dst: Sw_Target, filter: Image_Filter) {
+neighbourhood_filter :: proc(src: Sw_Texture, src_tt: f32, back: Sw_Texture, back_tt: f32, dst: Sw_Target, filter: Image_Filter, y0, y1: int) {
 	texel :: #force_inline proc(t: Sw_Texture, tt: f32, x, y: i32) -> [4]f32 {
 		if x < 0 || y < 0 || x >= i32(t.width) || y >= i32(t.height) {
 			return {}
 		}
 		return apply_tex_type(fetch(t, u32(x), u32(y)), tt)
 	}
-	for y in 0 ..< i32(dst.height) {
+	for y in i32(y0) ..< i32(y1) {
 		for x in 0 ..< i32(dst.width) {
 			out: [4]f32
 			#partial switch v in filter {
@@ -1090,7 +1295,7 @@ convolve_pixel :: proc(v: Convolve_Matrix, src: Sw_Texture, src_tt: f32, x, y: i
 // coefficients and tap count. Transparent edges count the missing taps as
 // black (keeping their weight).
 @(private = "file")
-blur_pass :: proc(src: Sw_Texture, dst: Sw_Target, dir: [2]i32, sigma: f32, tex_type: f32, edge: Blur_Edge) {
+blur_pass :: proc(src: Sw_Texture, dst: Sw_Target, dir: [2]i32, sigma: f32, tex_type: f32, edge: Blur_Edge, y0, y1: int) {
 	coeff, taps := blur_pass_coefficients(sigma)
 	w, h := i32(src.width), i32(src.height)
 	tap :: #force_inline proc(src: Sw_Texture, x, y, w, h: i32, edge: Blur_Edge) -> [4]f32 {
@@ -1102,7 +1307,7 @@ blur_pass :: proc(src: Sw_Texture, dst: Sw_Target, dir: [2]i32, sigma: f32, tex_
 		}
 		return fetch(src, u32(x), u32(y))
 	}
-	for y in 0 ..< dst.height {
+	for y in u32(y0) ..< u32(y1) {
 		for x in 0 ..< dst.width {
 			g := coeff
 			sum := fetch(src, x, y) * g[0]
@@ -1166,7 +1371,7 @@ sw_program_sample :: proc(data: rawptr, channel: int, uv: [2]f32, lod: f32) -> [
 sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	p := (^Sw_Program)(cmd.program.user)
 	entry := image_store_get(images, cmd.target)
-	if p == nil || entry == nil || (entry.info.format != .RGBA8 && entry.info.format != .RGBA16F) {
+	if p == nil || entry == nil || entry.image.pixels == nil || (entry.info.format != .RGBA8 && entry.info.format != .RGBA16F) {
 		return
 	}
 	channels: Sw_Channels

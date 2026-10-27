@@ -2,10 +2,11 @@ package svg
 
 import "base:runtime"
 import "core:mem"
+import "core:slice"
 import "core:strings"
 import "core:testing"
-import "core:thread"
 
+import common "deps:odecs/common"
 import vg ".."
 import cv "../curves"
 
@@ -536,33 +537,28 @@ test_svg_clip_text_fill_none :: proc(t: ^testing.T) {
 	testing.expectf(t, blue > 100, "clipped area: %d blue pixels", blue)
 }
 
-// Filters on a lent thread pool leave the host's finished tasks for the
-// host to pop (feTurbulence runs in bands on the pool).
+// Bands on the caller's pool (odecs' Work_Pool) draw what one thread draws:
+// a frame's runs, a group, a two-pass blur and feTurbulence.
 @(test)
-test_sw_lent_pool_keeps_host_tasks :: proc(t: ^testing.T) {
-	pool: thread.Pool
-	thread.pool_init(&pool, context.allocator, 2)
-	thread.pool_start(&pool)
-	defer thread.pool_destroy(&pool)
-	defer thread.pool_join(&pool)
+test_sw_pool_bands_match :: proc(t: ^testing.T) {
+	pool: common.Static_Pool
+	common.init_static_pool(&pool, 2)
+	defer common.destroy_static_pool(&pool)
 	s: Fx
 	defer fx_close(&s)
 	err := fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="128">
 		<filter id="f"><feTurbulence baseFrequency="0.05" numOctaves="2"/></filter>
-		<rect width="64" height="128" filter="url(#f)"/></svg>`)
+		<filter id="b"><feGaussianBlur stdDeviation="3"/></filter>
+		<rect width="64" height="128" filter="url(#f)"/>
+		<g opacity="0.5"><circle cx="32" cy="40" r="20" fill="#08f" filter="url(#b)"/>
+		<rect x="8" y="70" width="48" height="40" rx="6" fill="#f80"/></g></svg>`)
 	testing.expect_value(t, err, Error.None)
-	s.backend.pool = &pool
-	thread.pool_add_task(&pool, context.allocator, proc(task: thread.Task) {}, nil, 7)
-	for thread.pool_num_done(&pool) < 1 {
-		thread.yield()
-	}
 	fx_draw(&s)
-	task, ok := thread.pool_pop_done(&pool)
-	testing.expect(t, ok && task.user_index == 7)
-	// And nothing of the filter's own tasks is left behind.
-	_, more := thread.pool_pop_done(&pool)
-	testing.expect(t, !more)
+	alone := slice.clone(s.backend.pixels, context.temp_allocator)
+	s.backend.pool = &pool.work_pool
+	fx_draw(&s)
 	s.backend.pool = nil
+	testing.expect(t, slice.equal(alone, s.backend.pixels))
 }
 
 @(test)

@@ -58,7 +58,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.7), `deps:odecs/image` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.7), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -248,8 +248,8 @@ levels), each released after the last primitive reading it; an sRGB
 filter's are RGBA8. feTurbulence is the
 spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
 seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
-row bands as resvg on the software backend (on `Software_Backend.pool`
-when the caller lends one). The transfer tables are computed on the CPU and
+row bands as resvg on the software backend (on the caller's
+`Software_Backend.pool`, as all its drawing). The transfer tables are computed on the CPU and
 uploaded; the other primitives are filter passes. `Filter.region`
 (`Filter_Region{units, x, y, w, h, bbox}`, `.User_Space_On_Use` or
 `.Object_Bounding_Box` with the caller's bounding box;
@@ -748,6 +748,25 @@ every part follows:
   and diffs them; on an RX 9070 XT (Vulkan, RADV) all 35 checks match, with
   a mean difference under 0.1 / 255 in each: most pixels within one or two
   8-bit steps, a few edge pixels of text, emoji and filters further apart.
+- **The software backend draws a frame in row bands** of 16 rows: the
+  clears and shape draws between target switches, filters, programs and
+  externals are a run, each instance is binned once into the bands it
+  reaches (counted, summed, filled), and each band draws its own in order,
+  so every pixel gets the same draws in the same order on any number of
+  threads. Bands run on the caller's `Software_Backend.pool` (odecs'
+  `Work_Pool`; nil draws them all on the calling thread), as do blurs and
+  morphology (two banded passes) and the other filters. Images flagged
+  `.Transient`, which the layer stack's layers, tiles and offscreen images
+  are (cleared as they become targets, holding nothing between frames), get
+  their pixels for one render from one block the backend keeps at its
+  largest render, so players sharing a backend hold one render's layers
+  between them, not a set each. onimite's software renders at 24 threads,
+  its frame builders recording for one player where each of 23 drew on a
+  backend of its own, peak at 266 MB for the whole otfx video (4,833 MB
+  before) and 201 MB for its burn scene (2,584 MB). On one thread, 30
+  frames of the burn take 100.4 -> 101.2 s, and a full-HD frame of 72
+  lines of 14 px text (half of them translucent groups) and 3,000 small
+  rects draws 1 to 3% slower (145 -> 148-150 ms a flush at p50).
 - **Layers cover what is drawn into them** (`layers.odin`, Skia's
   saveLayer: group opacity, blur, SVG filters, clip paths, masks, blend
   modes). Drawing between `layer_push` and `layer_pop` is recorded against a

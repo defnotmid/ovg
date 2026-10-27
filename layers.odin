@@ -22,7 +22,10 @@ import "core:math"
 // The stack keeps a pool of layer images, sized in steps (see
 // `layer_bucket`) and reused across frames; images unused for a while are
 // freed. Commands run in order at flush, so a layer released mid-frame can
-// be reused by later commands of the same frame.
+// be reused by later commands of the same frame. Layers, tiles and offscreen
+// images are cleared as they become targets and hold nothing from one frame
+// to the next, so they are `.Transient`; uploads (filled before the frame's
+// commands run) and turbulence lattices (kept across frames) are not.
 
 Layer_Params :: struct {
 	// The layer's group opacity, 0 meaning 1. The global alpha is not a
@@ -239,7 +242,7 @@ layer_stack_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // Tiles sample nearest-neighbour (as resvg's pattern shader), so tile edges
 // stay sharp. Tiles are pooled with the layers.
 layer_pattern_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32) -> Image_Id {
-	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest})
+	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest, .Transient})
 }
 
 layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
@@ -251,7 +254,7 @@ layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // (commands run in order, so later commands of the frame can sample it, as
 // a shader child). Pooled like the layers; nests.
 layer_image_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32) -> Image_Id {
-	return layer_offscreen_begin(ls, c, &ls.images, w, h, {.Premultiplied})
+	return layer_offscreen_begin(ls, c, &ls.images, w, h, {.Premultiplied, .Transient})
 }
 
 layer_image_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
@@ -826,7 +829,7 @@ layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := ma
 			return l.id
 		}
 	}
-	id, _ := create_image_empty(c, w, h, format, {.Premultiplied})
+	id, _ := create_image_empty(c, w, h, format, {.Premultiplied, .Transient})
 	append(&ls.pool, Pooled_Layer{id, w, h, format, true, ls.frame, 0})
 	return id
 }
