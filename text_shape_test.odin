@@ -7,7 +7,6 @@ import "core:mem"
 import "core:slice"
 import "core:testing"
 import "core:thread"
-import "core:unicode/utf8"
 
 import ft "deps:oglyph/font"
 
@@ -245,49 +244,6 @@ test_text_layout_advances :: proc(t: ^testing.T) {
 		testing.expect(t, abs(l.advances[0] - (f32(adv) * l.runs[0].em + 3)) < 0.001)
 		testing.expect_value(t, l.advances[1], 0)
 		testing.expect(t, abs(g[2].x - (g[0].x + l.advances[0])) < 0.001)
-	}
-}
-
-// Bidi levels in a left-to-right paragraph, without fonts: Arabic letters
-// take their script from the test, as kb's itemization gives them.
-@(test)
-test_bidi_levels :: proc(t: ^testing.T) {
-	levels :: proc(text: string) -> string {
-		runes := utf8.string_to_runes(text, context.temp_allocator)
-		cls := make([]Bidi_Class, len(runes), context.temp_allocator)
-		lv := make([]u8, len(runes), context.temp_allocator)
-		for r, i in runes {
-			cls[i] = bidi_class(r, .Arabic if r >= 0x600 && r < 0x700 else .Latin)
-		}
-		bidi_resolve(cls, lv)
-		out := make([]u8, len(lv), context.temp_allocator)
-		for l, i in lv {
-			out[i] = '0' + l
-		}
-		return string(out)
-	}
-	cases := [?]struct {
-		text, want: string,
-	} {
-		{"abc", "000"},
-		// Trailing neutrals after R take the paragraph's direction.
-		{"ab سلم!", "0001110"},
-		// Neutrals between R take R; a space before L text does not.
-		{"ab سلم سلم cd", "0001111111000"},
-		// Numbers after R: level 2, with the separator joining them.
-		{"سلم 12.5", "11112222"},
-		{"سلم-12", "111122"},
-		// Arabic-Indic digits are AN, after R or L.
-		{"ab ١٢", "00022"},
-		// Numbers after L text are L, with their terminator.
-		{"ab 12%", "000000"},
-		// Brackets around R text inside L text keep the paragraph's direction.
-		{"a (سلم) b", "000111000"},
-		// An emoji after R text at the end of the line goes right.
-		{"سلم 👍", "11100"},
-	}
-	for c in cases {
-		testing.expectf(t, levels(c.text) == c.want, "%q: got %s, want %s", c.text, levels(c.text), c.want)
 	}
 }
 

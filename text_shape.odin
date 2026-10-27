@@ -38,8 +38,8 @@ Shape_Char :: struct {
 	piece:  i32,
 	face:   Face_Id, // after fallback
 	script: sh.Script,
-	level:  u8, // bidi level (text_bidi.odin)
-	bidi:   Bidi_Class, // scratch
+	level:  u8, // bidi level (oglyph's bidi_levels)
+	bidi:   sh.Bidi_Class, // scratch
 }
 
 // A piece of the text: its first codepoint, size and feature settings
@@ -148,7 +148,7 @@ collection_allocator :: proc(fonts: ^Font_Collection) -> runtime.Allocator {
 }
 
 // Script and bidi level of each codepoint of the line [a, b) (script runs,
-// levels for a left-to-right paragraph: text_bidi.odin).
+// levels for a left-to-right paragraph: oglyph's bidi_levels).
 @(private)
 shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 	// Fast path: Latin with common punctuation, symbols and digits is one
@@ -169,9 +169,9 @@ shaper_itemize :: proc(s: ^Text_Shaper, a, b: i32) {
 	}
 	sh.script_runs(s.chars.char[a:b], s.chars.script[a:b])
 	for i in a ..< b {
-		s.chars[i].bidi = bidi_class(s.chars[i].char, s.chars[i].script)
+		s.chars[i].bidi = sh.char_bidi_class(s.chars[i].char)
 	}
-	bidi_resolve(s.chars.bidi[a:b], s.chars.level[a:b])
+	sh.bidi_levels(s.chars.bidi[a:b], s.chars.level[a:b])
 }
 
 // Shapes one segment, appending its glyphs to the shaper's line glyphs.

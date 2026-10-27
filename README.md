@@ -58,7 +58,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.7), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.9), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -66,7 +66,7 @@ dependencies are Odin's own `vendor` packages:
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.7 https://github.com/defnotmid/oglyph
+git clone -b v0.0.9 https://github.com/defnotmid/oglyph
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -857,9 +857,10 @@ every part follows:
   segments of one font (per-glyph fallback picks the first face covering a
   codepoint), size, script and bidi level (each character's Unicode script,
   characters of every script taking the script around them; levels
-  from UAX #9's weak and neutral rules for a left-to-right paragraph,
-  `text_bidi.odin`: spaces, punctuation and emoji between right-to-left
-  text join it, others keep the paragraph's direction), each segment is
+  from oglyph's `bidi_levels`, UAX #9's weak and neutral rules for a
+  left-to-right paragraph over the Unicode database's bidi classes:
+  spaces, punctuation and emoji between right-to-left text join it,
+  others keep the paragraph's direction), each segment is
   shaped (GSUB: ligatures, contextual alternates, Arabic joining, Indic
   reordering; GPOS: pair / class kerning, mark positioning) and the
   segments are placed in
