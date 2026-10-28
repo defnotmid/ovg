@@ -146,8 +146,8 @@ scratch_size_soa :: #force_inline proc(a: ^#soa[dynamic]$T, n: int) {
 
 @(private)
 collection_allocator :: proc(fonts: ^Font_Collection) -> runtime.Allocator {
-	if fonts.faces.allocator.procedure != nil {
-		return fonts.faces.allocator
+	if fonts.rows.allocator.procedure != nil {
+		return fonts.rows.allocator
 	}
 	return runtime.heap_allocator()
 }

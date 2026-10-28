@@ -10,9 +10,9 @@ import fc "deps:oglyph/collection"
 // fallback), with what drawing makes of each face and the layouts'
 // scratch. Face data is borrowed and must outlive the collection.
 
-// A face of a Font_Collection (oglyph's Face_Id): keep a face by its id,
-// not by the pointers font_collection_face and font_collection_font give,
-// which are for immediate use.
+// A face of a Font_Collection (oglyph's Face_Id). Its face and font never
+// move: the pointers font_collection_face and font_collection_font give
+// hold until the face is removed, while other threads add faces.
 Face_Id :: fc.Face_Id
 
 // A face as shaping and matching read it (oglyph's): its ft.Face at its
@@ -32,8 +32,8 @@ Font_Collection :: struct {
 	using collection: fc.Collection,
 	// Per face id (Face_Id.index), the face as drawing reads it: its glyphs'
 	// shapes and its COLR paint, made with the face; a removed face's is
-	// zero.
-	fonts:            [dynamic]Font,
+	// zero. Rows never move, as the faces' don't.
+	fonts:            fc.Rows(Font),
 	// Guards the shaper pool, so layouts may run concurrently on one
 	// collection.
 	shape_lock:       sync.Mutex,
@@ -48,7 +48,7 @@ Font_Collection :: struct {
 font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator, files: ^Font_Files = nil) {
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
 	fc.collection_init(&c.collection, data, allocator, files, outlines_only = true)
-	c.fonts = make([dynamic]Font, allocator)
+	fc.rows_init(&c.fonts, allocator)
 	collection_fonts(c)
 }
 
@@ -57,10 +57,10 @@ font_collection_destroy :: proc(c: ^Font_Collection) {
 		shaper_destroy(s)
 	}
 	delete(c.shapers)
-	for &f in c.fonts {
-		font_destroy(&f)
+	for i in 0 ..< c.fonts.len {
+		font_destroy(fc.rows_at(&c.fonts, i))
 	}
-	delete(c.fonts)
+	fc.rows_destroy(&c.fonts)
 	fc.collection_destroy(&c.collection)
 	c^ = {}
 }
@@ -76,15 +76,12 @@ EMOJI_FONT_DATA :: #load("assets/Noto-COLRv1.ttf")
 // emoji presentation sequences (U+FE0F); a face it replaces is gone. The
 // data is borrowed. Not while layouts run on the collection.
 font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
-	old: Maybe(Face_Id)
-	if e, ok := c.emoji.?; ok {
-		old = e.id
-	}
+	old := c.emoji.id if c.emoji != nil else {}
 	if _, ok := fc.collection_set_emoji(&c.collection, data); !ok {
 		return false
 	}
-	if id, ok := old.?; ok {
-		font_destroy(&c.fonts[id.index])
+	if old != {} {
+		font_destroy(fc.rows_at(&c.fonts, int(old.index)))
 	}
 	collection_fonts(c)
 	return true
@@ -96,8 +93,10 @@ font_collection_set_emoji :: proc(c: ^Font_Collection, data: []u8) -> bool {
 // weight from a wght setting and the style from ital or slnt when given.
 // Faces of data added before (to this collection or one sharing its
 // files) share its file's tables and plans: another instance costs about
-// its glyphs. Returns the number of faces added. Not while layouts run on
-// the collection (faces move; their ids stay).
+// its glyphs. Returns the number of faces added. Other threads may draw
+// with faces they hold the ids of meanwhile (no face or font moves:
+// font_collection_face, font_collection_font, text_layout_font), but not
+// lay text out on the collection.
 font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int), variations: []Font_Variation = nil) -> int {
 	added := fc.collection_add(&c.collection, data, before, variations)
 	collection_fonts(c)
@@ -110,13 +109,14 @@ font_collection_add :: proc(c: ^Font_Collection, data: []u8, before := max(int),
 font_collection_remove :: proc(c: ^Font_Collection, i: int) {
 	id := c.faces[i].id
 	fc.collection_remove(&c.collection, i)
-	font_destroy(&c.fonts[id.index])
-	c.fonts[id.index] = {}
+	f := fc.rows_at(&c.fonts, int(id.index))
+	font_destroy(f)
+	f^ = {}
 }
 
-// Face `id`, for immediate use (adding faces moves it); nil once the face
-// is removed (or, for an emoji face, replaced), for Face_Id{}, for an id
-// of another collection and without a collection.
+// Face `id`, where it stays until it is removed; nil once the face is
+// removed (or, for an emoji face, replaced), for Face_Id{}, for an id of
+// another collection and without a collection.
 font_collection_face :: proc(c: ^Font_Collection, id: Face_Id) -> ^Font_Face {
 	if c == nil {
 		return nil
@@ -124,13 +124,13 @@ font_collection_face :: proc(c: ^Font_Collection, id: Face_Id) -> ^Font_Face {
 	return fc.collection_face(&c.collection, id)
 }
 
-// The font of face `id`, to draw with, for immediate use (adding faces
-// moves it); nil where font_collection_face is.
+// The font of face `id`, to draw with, where it stays until the face is
+// removed; nil where font_collection_face is.
 font_collection_font :: proc(c: ^Font_Collection, id: Face_Id) -> ^Font {
 	if font_collection_face(c, id) == nil {
 		return nil
 	}
-	return &c.fonts[id.index]
+	return fc.rows_at(&c.fonts, int(id.index))
 }
 
 // Family name (typographic family, else family), OS/2 weight class and
@@ -169,11 +169,11 @@ font_collection_emoji_glyph :: proc(c: ^Font_Collection, r: rune) -> (Face_Id, G
 collection_fonts :: proc(c: ^Font_Collection) {
 	allocator := fc.collection_allocator(&c.collection)
 	c.fonts.allocator = allocator
-	for i := len(c.fonts); i < len(c.places); i += 1 {
+	for i := c.fonts.len; i < c.rows.len; i += 1 {
 		f: Font
 		if face := fc.collection_face(&c.collection, {c.serial, u32(i)}); face != nil {
 			f = font_from_face(face, allocator)
 		}
-		append(&c.fonts, f)
+		fc.rows_append(&c.fonts, f)
 	}
 }

@@ -60,7 +60,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.4), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.11), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.4), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -68,7 +68,7 @@ dependencies are Odin's own `vendor` packages:
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.10 https://github.com/defnotmid/oglyph
+git clone -b v0.0.11 https://github.com/defnotmid/oglyph
 git clone -b v0.0.4 https://github.com/defnotmid/ocurves
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
@@ -876,7 +876,9 @@ every part follows:
   `fallback`, `emoji`, `default_family` read through) with what drawing
   makes of each face, a `Font` per `Face_Id` (its glyphs' shapes and COLR
   paint), and the layouts' scratch; it tells oglyph that a glyph a face
-  has only as a bitmap counts as missing, ovg drawing outlines.
+  has only as a bitmap counts as missing, ovg drawing outlines. Faces and
+  fonts never move (oglyph's `Rows`), so other threads may draw with fonts
+  they hold the ids of while `font_collection_add` adds faces.
 - **Text layout** (`text_layout` over a `Font_Collection`, used by SVG text
   and onimite) picks each piece's face by family, weight and style (text
   that names no family uses `Font_Collection.default_family` when set;

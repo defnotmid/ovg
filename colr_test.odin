@@ -136,16 +136,16 @@ test_colr_emoji_fallback :: proc(t: ^testing.T) {
 	// sequence and a flag shape into one glyph each.
 	text_layout(&fonts, {{text = "a\U0001F525 \U0001F469‍\U0001F4BB\U0001F1EF\U0001F1F5", style = {size = 100}}}, {x = 10, y = 100}, &l)
 	testing.expect_value(t, len(l.runs), 4) // a, fire, space, the rest
-	testing.expect(t, l.runs[0].face == fonts.fallback.id && l.runs[1].face == fonts.emoji.?.id)
+	testing.expect(t, l.runs[0].face == fonts.fallback.id && l.runs[1].face == fonts.emoji.id)
 	testing.expect_value(t, len(l.glyphs), 5) // a, fire, space, technologist, flag
 	for g in l.glyphs[1:] {
-		testing.expect(t, g.glyph == l.glyphs[2].glyph || font_glyph_is_colour(font_collection_font(&fonts, fonts.emoji.?.id), g.glyph))
+		testing.expect(t, g.glyph == l.glyphs[2].glyph || font_glyph_is_colour(font_collection_font(&fonts, fonts.emoji.id), g.glyph))
 	}
 	// A keycap: Vera has "1", but U+FE0F asks for the emoji face (and,
 	// missing from it, leaves no glyph).
 	text_layout(&fonts, {{text = "1️⃣", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 1)
-	testing.expect(t, l.runs[0].face == fonts.emoji.?.id)
+	testing.expect(t, l.runs[0].face == fonts.emoji.id)
 
 	// Drawn: the fire is orange, not the text colour.
 	sw: Software_Backend
@@ -187,11 +187,11 @@ test_colr_emoji_reset :: proc(t: ^testing.T) {
 	emoji := EMOJI_FONT_DATA
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
 	text_layout(&fonts, {{text = "a\U0001F525", style = {size = 100}}}, {}, &l)
-	file := fonts.emoji.?.file
+	file := fonts.emoji.file
 	plans := file.plans
 	testing.expect(t, plans != nil)
 	testing.expect(t, font_collection_set_emoji(&fonts, emoji))
-	testing.expect(t, fonts.emoji.?.file == file)
+	testing.expect(t, fonts.emoji.file == file)
 	testing.expect_value(t, len(fonts.files.rows), 2)
 	text_layout(&fonts, {{text = "a\U0001F600\U0001F44D\U0001F3FD", style = {size = 100}}}, {}, &l)
 	testing.expect_value(t, len(l.glyphs), 3)

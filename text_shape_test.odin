@@ -5,6 +5,7 @@ import "core:log"
 import "core:os"
 import "core:mem"
 import "core:slice"
+import "core:sync"
 import "core:testing"
 import "core:thread"
 
@@ -488,10 +489,10 @@ test_font_collection_face_ids :: proc(t: ^testing.T) {
 
 	testing.expect(t, fonts.emoji == nil)
 	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
-	first := fonts.emoji.?.id
-	testing.expect(t, font_collection_font(&fonts, first) == font_collection_font(&fonts, fonts.emoji.?.id))
+	first := fonts.emoji.id
+	testing.expect(t, font_collection_font(&fonts, first) == font_collection_font(&fonts, fonts.emoji.id))
 	testing.expect(t, font_collection_set_emoji(&fonts, EMOJI_FONT_DATA))
-	testing.expect(t, font_collection_font(&fonts, first) == nil && fonts.emoji.?.id != first)
+	testing.expect(t, font_collection_font(&fonts, first) == nil && fonts.emoji.id != first)
 }
 
 // Paths, flattened paths, layouts and morphs made with an init allocate
@@ -824,4 +825,52 @@ test_font_files :: proc(t: ^testing.T) {
 		}
 	}
 	testing.expect_value(t, len(shared.rows), 2)
+}
+
+// Drawing with a collection's fonts on one thread while another adds faces
+// to it: a font and its face, resolved by an id handed over before (through
+// a lock, as a caller's would), stay where they are and read the same.
+@(test)
+test_font_collection_add_while_drawing :: proc(t: ^testing.T) {
+	fonts: Font_Collection
+	font_collection_init(&fonts)
+	defer font_collection_destroy(&fonts)
+	testing.expect(t, font_collection_add(&fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	Shared :: struct {
+		fonts: ^Font_Collection,
+		ids:   [2]Face_Id,
+		want:  [2]^Font,
+		lock:  sync.Mutex,
+		done:  bool,
+		bad:   int,
+	}
+	s := Shared{fonts = &fonts}
+	sync.mutex_lock(&s.lock)
+	s.ids = {fonts.fallback.id, fonts.faces[0].id}
+	s.want = {font_collection_font(&fonts, s.ids[0]), font_collection_font(&fonts, s.ids[1])}
+	sync.mutex_unlock(&s.lock)
+	ascent := font_v_metrics(s.want[1]).ascent
+	reader := thread.create_and_start_with_data(&s, proc(data: rawptr) {
+		s := (^Shared)(data)
+		sync.mutex_lock(&s.lock)
+		ids, want := s.ids, s.want
+		sync.mutex_unlock(&s.lock)
+		for !sync.atomic_load(&s.done) {
+			for id, k in ids {
+				f := font_collection_font(s.fonts, id)
+				if f != want[k] || font_collection_face(s.fonts, id).id != id || font_v_metrics(f).ascent == 0 {
+					sync.atomic_add(&s.bad, 1)
+				}
+			}
+		}
+	})
+	for _ in 0 ..< 100 {
+		font_collection_add(&fonts, #load("demo/media/BebasNeue-Regular.ttf"))
+	}
+	sync.atomic_store(&s.done, true)
+	thread.join(reader)
+	thread.destroy(reader)
+	testing.expect_value(t, s.bad, 0)
+	testing.expect_value(t, len(fonts.faces), 101)
+	testing.expect(t, font_collection_font(&fonts, s.ids[1]) == s.want[1] && font_v_metrics(s.want[1]).ascent == ascent)
 }
