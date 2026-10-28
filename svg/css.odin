@@ -1,6 +1,7 @@
 package svg
 
 import "core:encoding/xml"
+import "core:mem"
 import "core:strings"
 
 import vg ".."
@@ -89,13 +90,15 @@ prop_from_name :: proc(name: string) -> (Prop, bool) {
 	return {}, false
 }
 
-// Applies `prop: value; ...` declarations (a style attribute) to `d`.
+// Applies `prop: value; ...` declarations (a style attribute) to `d`; a
+// copy without its comments, which the values point into, comes from
+// `scratch` (the parse's).
 @(private)
-apply_style_attr :: proc(d: ^Decls, style: string) {
+apply_style_attr :: proc(d: ^Decls, style: string, scratch: mem.Allocator) {
 	rest := style
 	if strings.contains(style, "/*") {
 		// Strip comments.
-		b := make([]u8, len(style), context.temp_allocator)
+		b := make([]u8, len(style), scratch)
 		n := 0
 		for i := 0; i < len(style); {
 			if strings.has_prefix(style[i:], "/*") {

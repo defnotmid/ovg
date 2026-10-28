@@ -605,3 +605,28 @@ test_shape_from_stroke :: proc(t: ^testing.T) {
 	testing.expect(t, inside(&s, 30, 10) && inside(&s, 30, 11.5) && inside(&s, 11, 9))
 	testing.expect(t, !inside(&s, 30, 12.5) && !inside(&s, 8, 10) && !inside(&s, 52, 10))
 }
+
+// Building shapes one by one, without a scratch, leaves nothing on the temp
+// allocator (a caller's load that never frees it builds tens of thousands):
+// the build's own scratch is the heap's, freed after it.
+@(test)
+test_shape_without_scratch_leaves_no_temp :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.temp_allocator = mem.tracking_allocator(&track)
+	p: Path
+	defer path_destroy(&p)
+	for i in 0 ..< 50 {
+		path_reset(&p)
+		path_circle(&p, 50, 50, 10 + f32(i))
+		path_rect(&p, 0, 0, 20, 30)
+		s, ok := shape_from_path(&p)
+		testing.expect(t, ok)
+		shape_destroy(&s)
+		k, kok, _ := shape_from_stroke(&p, {line_width = 3, line_join = .Round, line_cap_start = .Round, line_cap_end = .Round, miter_limit = 4})
+		testing.expect(t, kok)
+		shape_destroy(&k)
+	}
+	testing.expect_value(t, track.total_memory_allocated, 0)
+}

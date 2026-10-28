@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:fmt"
 import "core:mem"
 import "core:strings"
@@ -150,6 +151,9 @@ budget_over :: #force_inline proc "contextless" (b: ^Budget, l: Limit, v: int) -
 
 // Appends one warning per limit hit, its strings from `allocator`.
 budget_warn :: proc(b: ^Budget, warnings: ^[dynamic]string, allocator: mem.Allocator) {
+	// What this puts on the temp allocator goes when it returns (unless the
+	// warnings are the temp allocator's).
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD(ignore = allocator == context.temp_allocator)
 	info := LIMIT_INFO
 	for l in b.hit {
 		append(warnings, strings.clone(fmt.tprintf("limit reached: %s (%d); the rest is skipped", info[l].name, b.limits[l]), allocator))

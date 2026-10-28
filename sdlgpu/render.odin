@@ -1,5 +1,6 @@
 package ovg_sdlgpu
 
+import "base:runtime"
 import "core:math"
 import sdl "vendor:sdl3"
 
@@ -90,6 +91,8 @@ Stream :: struct {
 
 @(private)
 sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store, frame: vg.Frame) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	b := (^SDL_Backend)(data)
 	o := (^Output)(uintptr(out))
 	b.frame += 1

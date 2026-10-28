@@ -1,5 +1,6 @@
 package lottie
 
+import "base:runtime"
 import "core:encoding/base64"
 import "core:encoding/json"
 import "core:fmt"
@@ -719,6 +720,8 @@ Parser :: struct {
 
 @(private)
 warn :: proc(p: ^Parser, format: string, args: ..any) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	msg := fmt.tprintf(format, ..args)
 	if msg in p.warned {
 		return
@@ -1264,6 +1267,8 @@ parse_effects :: proc(p: ^Parser, arr: json.Array) -> vg.Range {
 
 // A font style name ("Bold Italic", "SemiBold", ...) as a weight and italic.
 font_style :: proc(style: string) -> (weight: int, italic: bool) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	s := strings.to_lower(style, context.temp_allocator)
 	italic = strings.contains(s, "italic") || strings.contains(s, "oblique")
 	weight = 400

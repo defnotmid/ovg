@@ -6,6 +6,7 @@
 // `frames_in_flight` of them stay running when it returns.
 package ovg_sdlgpu
 
+import "base:runtime"
 import "core:mem"
 import sdl "vendor:sdl3"
 
@@ -509,6 +510,8 @@ texture_format :: proc "contextless" (f: vg.Pixel_Format) -> sdl.GPUTextureForma
 
 @(private = "file")
 sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image, vg.Error) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	b := (^SDL_Backend)(data)
 	format := texture_format(info.format)
 	usage: sdl.GPUTextureUsageFlags = {.SAMPLER}
@@ -553,6 +556,8 @@ sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image,
 
 @(private = "file")
 sdl_update_image :: proc(data: rawptr, image: ^vg.Backend_Image, info: vg.Image_Info, src: vg.Image_Source, x, y: u32) -> vg.Error {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	b := (^SDL_Backend)(data)
 	img := (^Image)(image.user)
 	bpp := vg.bytes_per_pixel(info.format)

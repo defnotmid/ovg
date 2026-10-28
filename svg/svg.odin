@@ -1,5 +1,6 @@
 package svg
 
+import "base:runtime"
 import "core:encoding/base64"
 import "core:encoding/xml"
 import "core:fmt"
@@ -861,6 +862,8 @@ initial_style :: proc() -> Computed {
 
 @(private)
 warn :: proc(p: ^Parser, format: string, args: ..any) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	msg := fmt.tprintf(format, ..args)
 	if msg in p.warned {
 		return
@@ -1083,7 +1086,7 @@ collect_decls :: proc(p: ^Parser, el: u32, d: ^Decls) {
 		}
 	}
 	if style != "" {
-		apply_style_attr(d, style)
+		apply_style_attr(d, style, p.tmp)
 	}
 	if important {
 		// !important rules beat the style attribute.

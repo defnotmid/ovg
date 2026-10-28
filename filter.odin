@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 
 // SVG filter effects on a layer (`Layer_Params.filter`): a list of filter
@@ -221,6 +222,8 @@ filter_rect_device :: proc "contextless" (r: Rect, xform: Transform2D) -> (b: Bo
 // `xform` is the canvas transform the lengths are measured in.
 @(private)
 apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id, xform: Transform2D) -> Image_Id {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if len(f.primitives) == 0 {
 		return source
 	}

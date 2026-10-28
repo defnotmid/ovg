@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 import "core:strings"
 
@@ -194,6 +195,8 @@ css_scan_number :: proc "contextless" (sc: ^Css_Scanner) -> (v: f32, ok: bool) {
 // or percentages), `hsl()` / `hsla()`, `transparent` and the CSS named
 // colors. `currentColor` is not a color here (the caller resolves it).
 css_color_parse :: proc(str: string) -> (col: Color, ok: bool) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	s := strings.trim_space(str)
 	if len(s) == 0 {
 		return BLACK, false

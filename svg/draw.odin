@@ -1,5 +1,6 @@
 package svg
 
+import "base:runtime"
 import "core:math"
 import "core:slice"
 
@@ -49,6 +50,8 @@ Renderer :: struct {
 // Makes the canvas images of `doc`'s bitmaps for drawing it on `c`,
 // releasing those of the document bound before.
 renderer_bind :: proc(r: ^Renderer, c: ^vg.Canvas, doc: ^Document) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	renderer_unbind(r, c)
 	resize(&r.images, len(doc.bitmaps))
 	pixelated := make([]bool, len(doc.bitmaps), context.temp_allocator)
@@ -295,6 +298,8 @@ path_rule :: proc(w: ^Path_Walk, rule: vg.Fill_Rule) {
 // layer stack begun for the frame (`layer_stack_begin`, with a root layer
 // when `doc.uses_blend` and the target is the screen).
 draw :: proc(c: ^vg.Canvas, ls: ^vg.Layer_Stack, r: ^Renderer, doc: ^Document, text: ^Layout, transform := vg.TRANSFORM_IDENTITY, overrides: []Override = nil) {
+	// What this puts on the temp allocator goes when it returns.
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if len(doc.nodes) == 0 {
 		return
 	}

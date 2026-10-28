@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:mem"
 import "core:sync"
 
@@ -130,7 +131,9 @@ shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search :=
 }
 
 // What building shapes needs, kept by a caller that builds many (it only
-// grows); without one a build takes it from the context's temp allocator.
+// grows, and a warm one allocates nothing); without one a build makes its
+// own on the heap and frees it after, so building shapes one by one, with
+// any temp allocator, leaves nothing behind.
 Shape_Scratch :: struct {
 	builder: Shape_Builder,
 	// Strokes: the outline's segments, the dashed path (and the measure of
@@ -175,8 +178,11 @@ shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true
 	temp: Shape_Scratch
 	sc := scratch
 	if sc == nil {
-		shape_scratch_init(&temp, context.temp_allocator)
+		shape_scratch_init(&temp, runtime.heap_allocator())
 		sc = &temp
+	}
+	defer if scratch == nil {
+		shape_scratch_destroy(&temp)
 	}
 	shape_builder_reset(&sc.builder)
 	sc.builder.tol = tol
@@ -194,8 +200,11 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 	temp: Shape_Scratch
 	sc := scratch
 	if sc == nil {
-		shape_scratch_init(&temp, context.temp_allocator)
+		shape_scratch_init(&temp, runtime.heap_allocator())
 		sc = &temp
+	}
+	defer if scratch == nil {
+		shape_scratch_destroy(&temp)
 	}
 	shape_builder_reset(&sc.builder)
 	sc.builder.tol = 0
@@ -214,14 +223,17 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 
 // Builds a glyph's shape (font units, y down, the pen at the origin);
 // false for glyphs without an outline. `builder` is kept by a caller that
-// builds many; without one a build takes it from the context's temp
-// allocator.
+// builds many; without one a build makes its own on the heap and frees it
+// after.
 shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator, builder: ^Shape_Builder = nil) -> (Shape, bool) {
 	temp: Shape_Builder
 	b := builder
 	if b == nil {
-		temp.curves.allocator = context.temp_allocator
+		temp.curves.allocator = runtime.heap_allocator()
 		b = &temp
+	}
+	defer if builder == nil {
+		shape_builder_destroy(&temp)
 	}
 	shape_builder_reset(b)
 	if !shape_add_glyph(b, f, g, o) {
