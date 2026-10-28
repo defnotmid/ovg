@@ -107,7 +107,7 @@ void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kern
 }
 
 
-#line 504 "curves.slang"
+#line 504 "../../ocurves/curves.slang"
 float curves_projected_box_0(float x_0, float a_0, float b_0)
 {
 

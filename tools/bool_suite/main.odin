@@ -21,7 +21,7 @@ import "core:strconv"
 import "core:strings"
 
 import vg "deps:ovg"
-import cv "deps:ovg/curves"
+import cv "deps:ocurves"
 
 main :: proc() {
 	seed, cases := u64(1), 500

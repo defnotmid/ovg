@@ -2,7 +2,7 @@ package ovg
 
 import "core:math"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // Dashes `src` into `dst` (SVG stroke-dasharray / stroke-dashoffset /
 // pathLength: when `total_length` > 0, dash lengths are fractions of it).

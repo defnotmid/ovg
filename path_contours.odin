@@ -1,6 +1,6 @@
 package ovg
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // Paths to contour tables and back: what reads and writes cv.Contours
 // (the boolean) takes a Path in and gives one out.

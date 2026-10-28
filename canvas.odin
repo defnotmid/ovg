@@ -3,7 +3,7 @@ package ovg
 import "core:math"
 import "core:mem"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // The 2D drawing context. Records draw commands for a frame; `flush` hands
 // them to the backend. Port of femtovg's `Canvas`.

@@ -8,7 +8,7 @@ import "core:testing"
 
 import common "deps:odecs/common"
 import vg ".."
-import cv "../curves"
+import cv "deps:ocurves"
 
 // SVG import: parsing into the document tables, then drawing on the
 // software backend and reading pixels back.

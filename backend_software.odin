@@ -4,8 +4,7 @@ import "base:runtime"
 import "core:math"
 import "core:mem"
 import common "deps:odecs/common"
-
-import cv "curves"
+import cv "deps:ocurves"
 
 // CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
 // as the GPU fragment shader (shaders/ovg.slang) and the same shape

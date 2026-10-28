@@ -10,7 +10,7 @@ import "core:slice"
 import "core:strings"
 
 import vg ".."
-import cv "../curves"
+import cv "deps:ocurves"
 
 // SVG import: `parse` turns SVG markup into a `Document`, a
 // render-ready, data-oriented copy (like usvg's tree): a `<use>` draws

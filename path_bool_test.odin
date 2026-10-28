@@ -4,7 +4,7 @@ import "core:math"
 import "core:mem"
 import "core:testing"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // The winding of a path about q (open contours closed), with `on` set when
 // q lies within `near` of an outline.

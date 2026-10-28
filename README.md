@@ -50,15 +50,17 @@ Added in ovg:
 
 Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
 Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Fonts are
-read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), images
-decoded and PNGs written by [odecs](https://github.com/defnotmid/odecs) (both
-Odin, MIT), read through the `deps` collection: clone them next to ovg and
-build with `-collection:deps=..` (the directory holding all three). The other
+read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), shapes'
+coverage and path booleans computed by
+[ocurves](https://github.com/defnotmid/ocurves), images decoded and PNGs
+written by [odecs](https://github.com/defnotmid/odecs) (all Odin, MIT), read
+through the `deps` collection: clone them next to ovg and build with
+`-collection:deps=..` (the directory holding all four). The other
 dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.1), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -67,11 +69,12 @@ dependencies are Odin's own `vendor` packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.10 https://github.com/defnotmid/oglyph
+git clone -b v0.0.1 https://github.com/defnotmid/ocurves
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
 ```odin
-import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph and odecs)
+import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph, ocurves and odecs)
 import image "deps:odecs/image"
 
 sw: vg.Software_Backend
@@ -173,7 +176,10 @@ runtime, as in femtovg. Bindings follow SDL_GPU's convention (vertex uniforms
 set 1, fragment samplers set 2, fragment uniforms set 3).
 `shaders/build.sh` compiles it with `slangc` to the committed `.spv`
 (Vulkan) and `.msl` (Metal) blobs, which the backend `#load`s. Only shader
-edits need slangc.
+edits need slangc. It includes ocurves' `curves.slang` from the checkout
+beside ovg and records that ocurves' `curves.FORMAT` in
+`sdlgpu/curves_format.odin`, and the backend `#assert`s it is the one it
+builds with.
 
 ### Recording on other threads
 
@@ -281,7 +287,7 @@ either fill rule fills the result alike. On an error (non-finite input,
 the `.Boolean_Steps` work limit, or an arrangement that doesn't hold
 together) `out` is unchanged.
 
-- **How** (curves/bool.odin, curves/bool_kernel.odin): one arrangement of
+- **How** (ocurves' bool.odin and bool_kernel.odin): one arrangement of
   every operand's pieces, monotone in x and y, in f64. Pieces are cut
   wherever two come within eps = 8 f32 ulps of the largest coordinate (a
   near-set search that drops a pair only when it has proved them farther
@@ -299,7 +305,7 @@ together) `out` is unchanged.
   `contours_append_path` / `path_append_contours` convert Paths, the six
   rules of how fill reads a path written once in `path_events`), and every
   cubic evaluation, sub-range, extremum, bound and area comes from
-  curves/cubic.odin, as fills, strokes, dashes and flattening do.
+  ocurves' cubic.odin, as fills, strokes, dashes and flattening do.
 - **Checked** by `tools/bool_suite` (random polygons, self-crossing ones
   included, cubic blobs, circles and grid-aligned rects with shared edges
   and corners, tangent circles; every op under both rules, each result's
@@ -813,8 +819,9 @@ every part follows:
   used as an image paint without `Flip_Y`.
 - **Paints are plain values.** Multi-stop gradients borrow their stop slice;
   it only has to live for the draw call.
-- **Shapes** (`shape.odin`, over the core-only `ovg/curves` package and its
-  GPU twin `shaders/curves.slang`, which other renderers can use alone: the
+- **Shapes** (`shape.odin`, over the core-only
+  [ocurves](https://github.com/defnotmid/ocurves) and its GPU twin
+  `curves.slang`, which other renderers use alone: the
   word layout, `coverage` of a box footprint, `coverage_affine` of any
   parallelogram (`coverage_jacobian` from a 3D footprint's Jacobian),
   `winding` at a point for sample masks, a mean coverage to `fade` to when
@@ -1013,12 +1020,11 @@ every part follows:
 ## Test
 
 ```sh
-# with oglyph and odecs cloned next to ovg (see Use); every build takes -collection:deps=..
-# (fonts and shaping are tested in oglyph: odin test font / shape there)
+# with oglyph, ocurves and odecs cloned next to ovg (see Use); every build takes -collection:deps=..
+# (fonts and shaping are tested in oglyph: odin test font / shape there; shapes' words and booleans in ocurves)
 odin test . -collection:deps=.. -vet -strict-style    # core + software backend
 odin test svg -collection:deps=.. -vet -strict-style  # SVG import: parsing, drawing, hostile files
 odin test lottie -collection:deps=.. -vet -strict-style # Lottie import: parsing, drawing, hostile files
-odin test curves -vet -strict-style                   # the curves package alone (core only)
 ./tools/svg_suite/run.sh                              # SVG import vs resvg reference PNGs
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
 odin run tools/bench -collection:deps=.. -o:speed     # CPU time and allocations per warm frame, generated workloads
@@ -1026,7 +1032,7 @@ odin check sdlgpu -collection:deps=.. -no-entry-point -vet -strict-style  # SDL_
 odin run tools/sdlgpu_parity -collection:deps=.. -- out_dir # SDL_GPU vs software, headless
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64    # macOS / Windows compile
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:windows_amd64
-./shaders/build.sh                                    # after editing ovg.slang
+./shaders/build.sh                                    # after editing ovg.slang, or for another ocurves curves.slang (from ../ocurves)
 ./tools/scenes/build_program.sh                       # after editing the parity scene's program.slang
 ```
 

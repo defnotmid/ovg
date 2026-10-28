@@ -3,7 +3,7 @@ package ovg
 import "core:slice"
 import "core:testing"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 @(private = "file")
 to_contours :: proc(p: ^Path, c: ^cv.Contours, verbs: ^[dynamic]u32 = nil) {

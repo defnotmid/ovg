@@ -3,7 +3,7 @@ package lottie
 import "core:math"
 
 import vg ".."
-import cv "../curves"
+import cv "deps:ocurves"
 
 // Evaluating and drawing a `Document` (lottie.odin). Properties are
 // interpolated at the frame each draw (no cached state), shape geometry is

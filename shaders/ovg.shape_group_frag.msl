@@ -107,7 +107,7 @@ void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kern
 }
 
 
-#line 11 "curves.slang"
+#line 11 "../../ocurves/curves.slang"
 float curves_f_0(uint device* words_0, uint i_1)
 {
 

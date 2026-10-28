@@ -1,8 +1,8 @@
 package ovg
 
-import cv "curves"
+import cv "deps:ocurves"
 
-// Booleans of filled paths that keep their curves (curves/bool.odin): the
+// Booleans of filled paths that keep their curves (ocurves' bool.odin): the
 // pieces of the result follow the operands' own lines and cubics, cut where
 // they meet.
 

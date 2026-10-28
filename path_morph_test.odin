@@ -3,7 +3,7 @@ package ovg
 import "core:mem"
 import "core:testing"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // Path morphs and text as a path.
 

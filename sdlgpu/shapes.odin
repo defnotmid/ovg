@@ -4,7 +4,9 @@ import "core:math"
 import sdl "vendor:sdl3"
 
 import vg ".."
-import cv "../curves"
+import cv "deps:ocurves"
+
+#assert(cv.FORMAT == SHADERS_CURVES_FORMAT, "ovg's shape shaders read another ocurves curves.FORMAT: use the ocurves this ovg's tag names, or rerun shaders/build.sh against this one")
 
 // The backend's copies of the shapes it draws, in one storage buffer the
 // shape shader reads, found by shape id: a shape is uploaded the first time

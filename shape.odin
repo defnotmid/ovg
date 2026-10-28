@@ -3,12 +3,12 @@ package ovg
 import "core:mem"
 import "core:sync"
 
-import cv "curves"
+import cv "deps:ocurves"
 import ft "deps:oglyph/font"
 
-// Shapes drawn by per-pixel coverage: ovg's handle on the curves package
-// (curves/curves.odin: the word layout, the coverage and winding
-// functions; shaders/curves.slang is its GPU twin). A `Shape` owns its
+// Shapes drawn by per-pixel coverage: ovg's handle on ocurves' curves
+// package (its curves.odin: the word layout, the coverage and winding
+// functions; its curves.slang is their GPU twin). A `Shape` owns its
 // words; it is built once (from a path, a stroke or a glyph) by whatever
 // owns it and drawn under any transform with `fill_shape`.
 

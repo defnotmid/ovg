@@ -5,7 +5,7 @@ import "core:mem"
 import "core:slice"
 import "core:testing"
 
-import cv "curves"
+import cv "deps:ocurves"
 import ft "deps:oglyph/font"
 
 @(private = "file")

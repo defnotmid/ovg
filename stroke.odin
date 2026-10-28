@@ -2,7 +2,7 @@ package ovg
 
 import "core:math"
 
-import cv "curves"
+import cv "deps:ocurves"
 
 // Strokes as fills: a path's stroke becomes contours whose non-zero fill is
 // the stroked area (each contour's outline: one side's offset forward, a

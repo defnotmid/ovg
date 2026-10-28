@@ -15,12 +15,12 @@ env:
   # The Odin nightly ovg is developed against (same pin as onimite).
   ODIN_VERSION: dev-2026-10
 
-# ovg reads oglyph (fonts and shaping) and odecs (image decoding and PNG
-# writing) through `-collection:deps=..`, so the job checks them out side by
-# side:
-#   $GITHUB_WORKSPACE/{ovg,oglyph,odecs}
-# Both are pinned to the tags onimite builds with. The core package with the
-# software backend, curves, svg and lottie are tested; the SDL_GPU backend
+# ovg reads oglyph (fonts and shaping), ocurves (shapes' coverage and path
+# booleans) and odecs (image decoding and PNG writing) through
+# `-collection:deps=..`, so the job checks them out side by side:
+#   $GITHUB_WORKSPACE/{ovg,oglyph,ocurves,odecs}
+# All are pinned to the tags onimite builds with. The core package with the
+# software backend, svg and lottie are tested; the SDL_GPU backend
 # (sdlgpu/) is type-checked only, since hosted runners have no GPU and
 # `odin check` needs no SDL3 library.
 
@@ -44,6 +44,11 @@ jobs:
           repository: defnotmid/oglyph
           ref: v0.0.10
           path: oglyph
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/ocurves
+          ref: v0.0.1
+          path: ocurves
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/odecs
@@ -86,7 +91,6 @@ jobs:
         run: |
           mkdir -p build
           odin test . -collection:deps=.. -vet -strict-style -out:build/ovg_test
-          odin test curves -vet -strict-style -out:build/curves_test
           odin test svg -collection:deps=.. -vet -strict-style -out:build/svg_test
           odin test lottie -collection:deps=.. -vet -strict-style -out:build/lottie_test
 
