@@ -57,7 +57,7 @@ path_boolean_many :: proc(out: ^Path, operands: []Bool_Operand, op: Bool_Op, s: 
 	for o in operands {
 		first := u32(len(s.input.contours))
 		contours_append_path(&s.input, o.path, verbs = &s.verbs)
-		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule == .Even_Odd})
+		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule})
 	}
 	budget := max_steps
 	cv.bool_run(&s.core, &s.input, s.inputs[:], op, &budget) or_return
@@ -78,7 +78,7 @@ path_divide :: proc(out: ^Path, faces: ^[dynamic]Range, operands: []Bool_Operand
 	for o in operands {
 		first := u32(len(s.input.contours))
 		contours_append_path(&s.input, o.path, verbs = &s.verbs)
-		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule == .Even_Odd})
+		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule})
 	}
 	budget := max_steps
 	cv.bool_divide(&s.core, &s.input, s.inputs[:], &budget) or_return

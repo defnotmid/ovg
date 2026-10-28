@@ -848,7 +848,7 @@ filled :: proc(p: ^vg.Path, x, y: f32, rule: vg.Fill_Rule) -> bool {
 	}
 	defer vg.shape_destroy(&s)
 	w := cv.winding(s.data, (vg.Vec2{x, y} - s.origin) / s.extent)
-	return w & 1 != 0 if rule == .Even_Odd else w != 0
+	return cv.fill_inside(w, rule)
 }
 
 // Total |area| of the polylines of `p` and its contour count.

@@ -331,7 +331,7 @@ contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool
 	cv.contours_clear(h)
 	contours_append_path(h, p, state(c).transform)
 	w, _ := cv.contours_winding(h, 0, len(h.contours), {f64(x), f64(y)}, &c.scratch.stack)
-	return cv.fill_inside(w, rule == .Even_Odd)
+	return cv.fill_inside(w, rule)
 }
 
 // Bounds of the path under the current transform.
@@ -418,7 +418,7 @@ fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
 @(private)
 paint_instance :: proc "contextless" (paint: Paint, t: Transform2D) -> Shape_Instance {
 	inst := Shape_Instance {
-		even_odd = paint.fill_rule == .Even_Odd,
+		rule = paint.fill_rule,
 		aliased  = !paint.anti_alias,
 	}
 	if paint.feather > 0 {
@@ -645,12 +645,12 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 
 // `fill_shape` with a paint row from `shape_paint`.
 @(private)
-push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, even_odd: bool, group: u32 = 0) {
+push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, row: u32, rule: Fill_Rule, group: u32 = 0) {
 	t := transform_multiply(shape_local(s), transform_multiply(local, state(c).transform))
 	if outside_target(c, shape_device_bounds(s, t)) {
 		return
 	}
-	push_shape(c, cmd, {shape = s, transform = t, paint = row, even_odd = even_odd}, group)
+	push_shape(c, cmd, {shape = s, transform = t, paint = row, rule = rule}, group)
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),

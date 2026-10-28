@@ -274,7 +274,7 @@ fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, sc
 				continue
 			}
 			if s := font_glyph_shape(f, g.glyph); s != nil {
-				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, false, group)
+				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, .Non_Zero, group)
 			}
 		}
 		if f.colr != nil {

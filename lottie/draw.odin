@@ -851,7 +851,7 @@ merge :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, t: f32) {
 					}
 					cv.contours_end(&r.merge_in, ct.closed, false)
 				}
-				append(&r.merge_inputs, cv.Bool_Input{first, u32(len(r.merge_in.contours)) - first, false})
+				append(&r.merge_inputs, cv.Bool_Input{first, u32(len(r.merge_in.contours)) - first, .Non_Zero})
 				r.geometry[i] = {}
 			}
 		}

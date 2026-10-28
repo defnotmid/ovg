@@ -2,6 +2,8 @@ package ovg
 
 import "core:math"
 
+import cv "deps:ocurves"
+
 // Cubic bezier handle length (relative to radius) for a 90 degree arc.
 KAPPA90 :: 0.5522848
 
@@ -86,10 +88,8 @@ path_bezier_to :: proc(p: ^Path, c1x, c1y, c2x, c2y, x, y: f32) {
 }
 
 path_quad_to :: proc(p: ^Path, cx, cy, x, y: f32) {
-	p0 := p.last_pos
-	cp := Vec2{cx, cy}
-	end := Vec2{x, y}
-	path_append(p, {.Bezier_To}, {p0 + (cp - p0) * (2.0 / 3.0), end + (cp - end) * (2.0 / 3.0), end})
+	q := cv.cubic_from_quad(p.last_pos, Vec2{cx, cy}, Vec2{x, y})
+	path_append(p, {.Bezier_To}, {q[1], q[2], q[3]})
 }
 
 path_close :: proc(p: ^Path) {

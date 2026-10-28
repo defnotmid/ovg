@@ -2,6 +2,8 @@ package ovg
 
 import "core:mem"
 
+import cv "deps:ocurves"
+
 // Renderer contract and the types that cross the canvas -> backend boundary.
 //
 // A backend is a `Backend` value: a data pointer plus procedures. The canvas
@@ -125,10 +127,7 @@ Render_Target :: union {
 	Image_Id,
 }
 
-Fill_Rule :: enum u8 {
-	Non_Zero,
-	Even_Odd,
-}
+Fill_Rule :: cv.Fill_Rule
 
 Line_Cap :: enum u8 {
 	Butt,
@@ -250,7 +249,7 @@ Shape_Instance :: struct {
 	words:       Range,
 	transform:   Transform2D,
 	paint:       u32,
-	even_odd:    bool,
+	rule:        Fill_Rule,
 	aliased:     bool,
 	marker:      Marker_Kind,
 	marker_fill: bool,

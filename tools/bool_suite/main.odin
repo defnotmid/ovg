@@ -5,7 +5,9 @@
 // at the scale the boolean resolves), every op under both fill rules,
 // checked by membership on a grid away from the outlines (the result fills
 // a point exactly when the op of the operands' fills does, with winding
-// at most 1 so no output contours overlap).
+// at most 1 so no output contours overlap), and its regions
+// (core.faces): they tile its contours, each its one Solid contour then
+// its holes, and a point inside the result lies in exactly one.
 //
 // path_divide is checked too: a point inside the union lies in exactly one
 // face, which says it lies inside the operands that hold the point; any
@@ -38,7 +40,7 @@ main :: proc() {
 		}
 	}
 	s: vg.Bool_Scratch
-	errors, wrong, overlapping, checked, divided := 0, 0, 0, 0, 0
+	errors, wrong, overlapping, regions, checked, divided := 0, 0, 0, 0, 0, 0
 	for n in 0 ..< cases {
 		case_seed := seed * 1_000_003 + u64(n)
 		gen := rand.create(case_seed)
@@ -62,11 +64,13 @@ main :: proc() {
 					continue
 				}
 				w, o := check(&a, &b, &out, op, rule)
+				g := check_regions(&s.core)
 				checked += 1
 				wrong += int(w > 0)
 				overlapping += int(o > 0)
-				if (w > 0 || o > 0) && verbose {
-					fmt.printfln("seed %d kind %d %v %v: %d wrong, %d overlapping samples", case_seed, kind, op, rule, w, o)
+				regions += int(g > 0)
+				if (w > 0 || o > 0 || g > 0) && verbose {
+					fmt.printfln("seed %d kind %d %v %v: %d wrong, %d overlapping samples, %d region faults", case_seed, kind, op, rule, w, o, g)
 				}
 			}
 		}
@@ -92,8 +96,8 @@ main :: proc() {
 			}
 		}
 	}
-	fmt.printfln("%d cases, %d results and %d divides checked: %d errors, %d wrong, %d overlapping", cases, checked, divided, errors, wrong, overlapping)
-	if errors + wrong + overlapping > 0 {
+	fmt.printfln("%d cases, %d results and %d divides checked: %d errors, %d wrong, %d overlapping, %d with bad regions", cases, checked, divided, errors, wrong, overlapping, regions)
+	if errors + wrong + overlapping + regions > 0 {
 		os.exit(1)
 	}
 }
@@ -191,8 +195,7 @@ check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong
 			if ona || onb || onr {
 				continue
 			}
-			eo := rule == .Even_Odd
-			ia, ib := cv.fill_inside(wa, eo), cv.fill_inside(wb, eo)
+			ia, ib := cv.fill_inside(wa, rule), cv.fill_inside(wb, rule)
 			want: bool
 			switch op {
 			case .Union:
@@ -206,6 +209,44 @@ check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong
 			}
 			wrong += int((wr != 0) != want)
 			overlapping += int(abs(wr) > 1)
+		}
+	}
+	return
+}
+
+// Faults in a result's regions (s.faces): ranges that don't tile its
+// contours, a region whose first contour isn't its one Solid contour, and
+// samples where the count of regions holding the point isn't 1 inside the
+// result and 0 outside it.
+check_regions :: proc(s: ^cv.Bool_Scratch) -> (faults: int) {
+	c := &s.out
+	at := u32(0)
+	for r in s.faces {
+		faults += int(r.x != at || r.y == 0)
+		at = r.x + r.y
+		for i in 0 ..< r.y {
+			faults += int((cv.contours_area(c, int(r.x + i)) > 0) != (i == 0))
+		}
+	}
+	faults += int(at != u32(len(c.contours)))
+	stack: [dynamic][2]f64
+	defer delete(stack)
+	N :: 40
+	near := 0.15
+	for i in 0 ..< N {
+		for j in 0 ..< N {
+			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
+			wr, onr := winding(c, q, near, &stack)
+			if onr {
+				continue
+			}
+			holding := 0
+			for r in s.faces {
+				if w, _ := cv.contours_winding(c, int(r.x), int(r.y), q, &stack); w != 0 {
+					holding += 1
+				}
+			}
+			faults += int(holding != (1 if wr != 0 else 0))
 		}
 	}
 	return

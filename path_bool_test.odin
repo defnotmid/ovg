@@ -102,7 +102,7 @@ check_ops :: proc(t: ^testing.T, name: string, a, b: ^Path, rule_a, rule_b: Fill
 				if ona || onb || onr {
 					continue
 				}
-				ins := [2]bool{cv.fill_inside(wa, rule_a == .Even_Odd), cv.fill_inside(wb, rule_b == .Even_Odd)}
+				ins := [2]bool{cv.fill_inside(wa, rule_a), cv.fill_inside(wb, rule_b)}
 				want := op_inside(op, ins[:])
 				if (wr != 0) != want || abs(wr) > 1 {
 					bad += 1
@@ -196,7 +196,7 @@ test_path_simplify :: proc(t: ^testing.T) {
 				if onp || onr {
 					continue
 				}
-				testing.expectf(t, (wr != 0) == cv.fill_inside(wp, rule == .Even_Odd) && abs(wr) <= 1, "%v at %v: %d vs %d", rule, q, wr, wp)
+				testing.expectf(t, (wr != 0) == cv.fill_inside(wp, rule) && abs(wr) <= 1, "%v at %v: %d vs %d", rule, q, wr, wp)
 			}
 		}
 	}

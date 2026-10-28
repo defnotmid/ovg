@@ -9,10 +9,10 @@ import cv "deps:ocurves"
 import ft "deps:oglyph/font"
 
 @(private = "file")
-coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, even_odd := false) -> f32 {
+coverage_at :: proc(s: ^Shape, t: Transform2D, x, y: f32, rule := Fill_Rule.Non_Zero) -> f32 {
 	full := transform_multiply(shape_local(s), t)
 	u, v := shape_footprint(full)
-	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), u, v, even_odd)
+	return shape_coverage(s.data, transform_point(transform_inverse(full), x, y), u, v, rule)
 }
 
 // Area of the pixel at (x, y) the shape covers, from 32x32 winding samples.
@@ -64,8 +64,8 @@ test_shape_fill_rules :: proc(t: ^testing.T) {
 	defer shape_destroy(&s)
 	id := TRANSFORM_IDENTITY
 	testing.expect(t, abs(coverage_at(&s, id, 15.5, 15.5) - 1) < 1e-3)
-	testing.expect(t, coverage_at(&s, id, 15.5, 15.5, true) < 1e-3)
-	testing.expect(t, abs(coverage_at(&s, id, 5.5, 15.5, true) - 1) < 1e-3)
+	testing.expect(t, coverage_at(&s, id, 15.5, 15.5, .Even_Odd) < 1e-3)
+	testing.expect(t, abs(coverage_at(&s, id, 5.5, 15.5, .Even_Odd) - 1) < 1e-3)
 }
 
 @(test)
@@ -578,7 +578,7 @@ test_winding_matches_coverage :: proc(t: ^testing.T) {
 			for gx in 0 ..< 97 {
 				p := Vec2{(f32(gx) + 0.5) / 97 * x1, (f32(gy) + 0.5) / 97 * y1}
 				inside := cv.winding(s.data, p) != 0
-				crisp := cv.coverage(s.data, p, {1e-6, 1e-6}, false) > 0.5
+				crisp := cv.coverage(s.data, p, {1e-6, 1e-6}, .Non_Zero) > 0.5
 				disagree += int(inside != crisp)
 			}
 		}

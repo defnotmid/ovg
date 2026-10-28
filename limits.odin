@@ -4,6 +4,8 @@ import "core:fmt"
 import "core:mem"
 import "core:strings"
 
+import cv "deps:ocurves"
+
 // Limits on the work one file can cause: SVG and Lottie input may come from
 // anyone, and a few hundred bytes can ask for billions of nodes, dashes or
 // copies. Each limit is a row of one table: what it counts, whether it caps
@@ -86,7 +88,7 @@ DEFAULT_LIMITS :: Limits {
 	.Dash_Segments      = 100_000,
 	.Colr_Paints        = 65_536,
 	.Image_Pixels       = 1 << 26,
-	.Boolean_Steps      = 4_000_000,
+	.Boolean_Steps      = cv.DEFAULT_BUDGET,
 }
 
 Budget :: struct {

@@ -197,7 +197,7 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, c
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
-	flags: u32 = (1 if inst.even_odd else 0) | (2 if inst.aliased else 0)
+	flags: u32 = (1 if inst.rule == .Even_Odd else 0) | (2 if inst.aliased else 0)
 	if inst.hairline > 0 {
 		flags = transmute(u32)inst.hairline
 	}
