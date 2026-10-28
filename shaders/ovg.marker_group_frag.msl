@@ -107,99 +107,99 @@ void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kern
 }
 
 
-#line 504 "../../ocurves/curves.slang"
+#line 515 "../../ocurves/curves.slang"
 float curves_projected_box_0(float x_0, float a_0, float b_0)
 {
 
-#line 505
+#line 516
     float s1_0 = 0.5f * (a_0 + b_0);
     float s2_0 = 0.5f * (a_0 - b_0);
     float y_0 = clamp(x_0, - s1_0, s1_0);
     float _S5 = max(y_0 + s1_0, 0.0f);
 
-#line 508
+#line 519
     float _S6 = max(y_0 + s2_0, 0.0f);
 
-#line 508
+#line 519
     float _S7 = max(y_0 - s2_0, 0.0f);
 
-#line 508
+#line 519
     float _S8 = max(y_0 - s1_0, 0.0f);
     return (_S5 * _S5 - _S6 * _S6 - _S7 * _S7 + _S8 * _S8) / (2.0f * a_0 * b_0);
 }
 
 
-#line 578
+#line 589
 float curves_marker_0(bool circle_0, float2 rc_1, float2 u_0, float2 v_0, float outline_0)
 {
 
-#line 579
+#line 590
     float _S9 = u_0.x;
 
-#line 579
+#line 590
     float _S10 = v_0.y;
 
-#line 579
+#line 590
     float _S11 = u_0.y;
 
-#line 579
+#line 590
     float _S12 = v_0.x;
 
-#line 579
+#line 590
     float det_0 = _S9 * _S10 - _S11 * _S12;
     if(det_0 == 0.0f)
     {
 
-#line 580
+#line 591
         return 0.0f;
     }
 
-#line 581
+#line 592
     float _S13 = rc_1.x;
 
-#line 581
+#line 592
     float _S14 = rc_1.y;
 
-#line 581
+#line 592
     float2 d_0 = float2(_S10 * _S13 - _S12 * _S14, _S9 * _S14 - _S11 * _S13) / float2(det_0) ;
     float r_0 = sqrt(_S10 * _S10 + _S11 * _S11) / abs(det_0);
     float h_0 = 0.5f * outline_0;
     if(circle_0)
     {
 
-#line 585
+#line 596
         float dist_0 = sqrt(dot(d_0, d_0));
 
-#line 585
+#line 596
         float2 n_0;
         if(dist_0 > 9.99999997475242708e-07f)
         {
 
-#line 586
+#line 597
             n_0 = d_0 / float2(dist_0) ;
 
-#line 586
+#line 597
         }
         else
         {
 
-#line 586
+#line 597
             n_0 = float2(1.0f, 0.0f);
 
-#line 586
+#line 597
         }
         float _S15 = abs(n_0.x);
 
-#line 587
+#line 598
         float _S16 = abs(n_0.y);
 
-#line 587
+#line 598
         float _S17 = max(_S15, _S16);
         float _S18 = max(min(_S15, _S16), 0.00100000004749745f);
         if(outline_0 > 0.0f)
         {
 
-#line 590
+#line 601
             return clamp(curves_projected_box_0(r_0 + h_0 - dist_0, _S17, _S18) - curves_projected_box_0(r_0 - h_0 - dist_0, _S17, _S18), 0.0f, 1.0f);
         }
         return curves_projected_box_0(r_0 - dist_0, _S17, _S18);
@@ -207,31 +207,31 @@ float curves_marker_0(bool circle_0, float2 rc_1, float2 u_0, float2 v_0, float 
     float _S19 = r_0 + h_0;
     float _S20 = d_0.x;
 
-#line 595
+#line 606
     float _S21 = _S20 + 0.5f;
 
-#line 595
+#line 606
     float _S22 = _S20 - 0.5f;
 
-#line 595
+#line 606
     float _S23 = - _S19;
 
-#line 595
+#line 606
     float ox_0 = clamp(min(_S21, _S19) - max(_S22, _S23), 0.0f, 1.0f);
     float _S24 = d_0.y;
 
-#line 596
+#line 607
     float _S25 = _S24 + 0.5f;
 
-#line 596
+#line 607
     float _S26 = _S24 - 0.5f;
 
-#line 596
+#line 607
     float oy_0 = clamp(min(_S25, _S19) - max(_S26, _S23), 0.0f, 1.0f);
     if(outline_0 > 0.0f)
     {
 
-#line 598
+#line 609
         float _S27 = max(r_0 - h_0, 0.0f);
         float _S28 = - _S27;
 
@@ -879,61 +879,61 @@ struct pixelInput_0
 };
 
 
-#line 868
+#line 873
 [[fragment]] pixelOutput_0 fs_marker_group(pixelInput_0 _S97 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 868
+#line 873
     thread KernelContext_0 kernelContext_24;
 
-#line 868
+#line 873
     (&kernelContext_24)->members_0 = members_1;
 
-#line 868
+#line 873
     (&kernelContext_24)->shapes_0 = shapes_1;
 
-#line 868
+#line 873
     (&kernelContext_24)->paints_0 = paints_1;
 
-#line 868
+#line 873
     (&kernelContext_24)->tex_texture_0 = tex_texture_1;
 
-#line 868
+#line 873
     (&kernelContext_24)->tex_sampler_0 = tex_sampler_1;
 
-#line 868
+#line 873
     thread VS_Shape_Out_0 _S98;
 
-#line 868
+#line 873
     (&_S98)->position_0 = position_1;
 
-#line 868
+#line 873
     (&_S98)->rc_0 = _S97.rc_2;
 
-#line 868
+#line 873
     (&_S98)->fpos_0 = _S97.fpos_4;
 
-#line 868
+#line 873
     (&_S98)->uv_0 = _S97.uv_2;
 
-#line 868
+#line 873
     (&_S98)->data_0 = _S97.data_3;
 
-#line 868
+#line 873
     shape_clip_0(&_S98, &kernelContext_24);
 
     uint _S99 = _S97.data_3.x;
 
-#line 870
+#line 875
     uint dims_0 = (&kernelContext_24)->shapes_0[_S99];
     uint nx_0 = dims_0 & 65535U;
     uint _S100 = dims_0 >> 16U;
 
-#line 872
+#line 877
     uint2 cell_0 = min(uint2(max(_S97.rc_2, float2(0.0f) )), uint2(nx_0, _S100) - uint2(1U) );
     uint _S101 = _S99 + 1U;
 
-#line 873
+#line 878
     uint at_0 = _S101 + cell_0.y * nx_0 + cell_0.x;
     uint _S102 = _S101 + nx_0 * _S100 + 1U;
 
@@ -941,132 +941,132 @@ struct pixelInput_0
 
     uint _S103 = (&kernelContext_24)->shapes_0[at_0];
 
-#line 878
+#line 883
     uint fill_row_0 = 0U;
 
-#line 878
+#line 883
     uint k_0 = _S103;
 
-#line 878
+#line 883
     float cf_0 = 0.0f;
 
-#line 878
+#line 883
     float co_0 = 0.0f;
 
-#line 878
+#line 883
     for(;;)
     {
 
-#line 878
+#line 883
         if(k_0 < ((&kernelContext_24)->shapes_0)[at_0 + 1U])
         {
         }
         else
         {
 
-#line 878
+#line 883
             break;
         }
 
-#line 879
+#line 884
         Shape_Instance_natural_0 s_1 = (&kernelContext_24)->members_0[_S97.data_3.z + (&kernelContext_24)->shapes_0[_S102 + k_0]];
 
-#line 879
+#line 884
         float4 _S104 = float4(s_1.t_0) ;
         float2 d_2 = _S97.fpos_4 - _S104.xy;
 
-#line 880
+#line 885
         float4 _S105 = float4(s_1.m_0) ;
         float _S106 = _S105.w;
 
-#line 881
+#line 886
         float _S107 = d_2.x;
 
-#line 881
+#line 886
         float _S108 = _S105.z;
 
-#line 881
+#line 886
         float _S109 = d_2.y;
 
-#line 881
+#line 886
         float _S110 = _S105.x;
 
-#line 881
+#line 886
         float _S111 = _S105.y;
 
-#line 881
+#line 886
         float2 rc_3 = float2(_S106 * _S107 - _S108 * _S109, _S110 * _S109 - _S111 * _S107) / float2((_S110 * _S106 - _S108 * _S111)) ;
         float2 epp_0 = _S104.zw;
 
-#line 882
+#line 887
         float4 _S112 = float4(s_1.bounds_0) ;
 
-#line 882
+#line 887
         bool _S113;
         if(any(rc_3 < (_S112.xy - epp_0)))
         {
 
-#line 883
+#line 888
             _S113 = true;
 
-#line 883
+#line 888
         }
         else
         {
 
-#line 883
+#line 888
             _S113 = any(rc_3 > (_S112.zw + epp_0));
 
-#line 883
+#line 888
         }
 
-#line 883
+#line 888
         if(_S113)
         {
 
-#line 884
+#line 889
             k_0 = k_0 + 1U;
 
-#line 878
+#line 883
             continue;
         }
 
-#line 878
+#line 883
         uint4 _S114 = uint4(s_1.data_1) ;
 
-#line 886
+#line 891
         uint _S115 = _S114.x;
 
-#line 886
+#line 891
         bool circle_1 = (_S115 & 15U) == 2U;
         bool filled_0 = (_S115 & 16U) != 0U;
         float outline_1 = (as_type<float>((_S114.z)));
         uint _S116 = _S114.y;
 
-#line 889
+#line 894
         float cf_1;
         if(filled_0)
         {
 
-#line 890
+#line 895
             float4 _S117 = float4(s_1.uv_1) ;
             float f_1 = curves_marker_0(circle_1, rc_3, _S117.xy, _S117.zw, 0.0f);
 
-#line 891
+#line 896
             cf_1 = cf_0 + (f_1 - cf_0 * f_1);
 
-#line 890
+#line 895
         }
         else
         {
 
-#line 890
+#line 895
             cf_1 = cf_0;
 
-#line 890
+#line 895
         }
 
-#line 890
+#line 895
         float co_1;
 
 
@@ -1074,25 +1074,25 @@ struct pixelInput_0
         if(outline_1 > 0.0f)
         {
 
-#line 894
+#line 899
             float4 _S118 = float4(s_1.uv_1) ;
             float o_0 = curves_marker_0(circle_1, rc_3, _S118.xy, _S118.zw, outline_1);
 
-#line 895
+#line 900
             co_1 = co_0 + (o_0 - co_0 * o_0);
 
-#line 894
+#line 899
         }
         else
         {
 
-#line 894
+#line 899
             co_1 = co_0;
 
-#line 894
+#line 899
         }
 
-#line 894
+#line 899
         bool _S119;
 
 
@@ -1100,121 +1100,121 @@ struct pixelInput_0
         if(!filled_0)
         {
 
-#line 898
+#line 903
             _S119 = true;
 
-#line 898
+#line 903
         }
         else
         {
 
-#line 898
+#line 903
             _S119 = cf_1 >= 1.0f;
 
-#line 898
+#line 903
         }
 
-#line 898
+#line 903
         bool _S120;
 
-#line 898
+#line 903
         if(_S119)
         {
 
-#line 898
+#line 903
             if(outline_1 <= 0.0f)
             {
 
-#line 898
+#line 903
                 _S120 = true;
 
-#line 898
+#line 903
             }
             else
             {
 
-#line 898
+#line 903
                 _S120 = co_1 >= 1.0f;
 
-#line 898
+#line 903
             }
 
-#line 898
+#line 903
         }
         else
         {
 
-#line 898
+#line 903
             _S120 = false;
 
-#line 898
+#line 903
         }
 
-#line 898
+#line 903
         if(_S120)
         {
 
-#line 898
+#line 903
             fill_row_0 = _S116;
 
-#line 898
+#line 903
             cf_0 = cf_1;
 
-#line 898
+#line 903
             co_0 = co_1;
             break;
         }
 
-#line 899
+#line 904
         fill_row_0 = _S116;
 
-#line 899
+#line 904
         cf_0 = cf_1;
 
-#line 899
+#line 904
         co_0 = co_1;
 
-#line 878
+#line 883
         k_0 = k_0 + 1U;
 
-#line 878
+#line 883
     }
 
-#line 902
+#line 907
     float4 _S121 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 902
+#line 907
     float4 result_0;
     if(cf_0 >= 0.00196078442968428f)
     {
 
-#line 904
+#line 909
         (&kernelContext_24)->paint_index_0 = fill_row_0;
 
-#line 904
+#line 909
         int _S122 = shader_type_0(&kernelContext_24);
 
-#line 904
+#line 909
         float4 _S123 = fill_color_0(_S122, _S97.fpos_4, &kernelContext_24);
 
-#line 904
+#line 909
         float _S124 = stroke_mask_0(float2(0.5f, cf_0), &kernelContext_24);
 
-#line 904
+#line 909
         float _S125 = scissor_mask_0(_S97.fpos_4, &kernelContext_24);
 
-#line 904
+#line 909
         result_0 = _S123 * float4((_S124 * _S125)) ;
 
-#line 903
+#line 908
     }
     else
     {
 
-#line 903
+#line 908
         result_0 = _S121;
 
-#line 903
+#line 908
     }
 
 
@@ -1222,39 +1222,39 @@ struct pixelInput_0
     if(co_0 >= 0.00196078442968428f)
     {
 
-#line 908
+#line 913
         (&kernelContext_24)->paint_index_0 = _S97.data_3.y;
 
-#line 908
+#line 913
         int _S126 = shader_type_0(&kernelContext_24);
 
-#line 908
+#line 913
         float4 _S127 = fill_color_0(_S126, _S97.fpos_4, &kernelContext_24);
 
-#line 908
+#line 913
         float _S128 = stroke_mask_0(float2(0.5f, co_0), &kernelContext_24);
 
-#line 908
+#line 913
         float _S129 = scissor_mask_0(_S97.fpos_4, &kernelContext_24);
         float4 o_1 = _S127 * float4((_S128 * _S129)) ;
 
-#line 909
+#line 914
         result_0 = o_1 + result_0 * float4((1.0f - o_1.w)) ;
 
-#line 907
+#line 912
     }
 
-#line 912
+#line 917
     if((result_0.w) < 0.00196078442968428f)
     {
 
-#line 913
+#line 918
         discard_fragment();
 
-#line 912
+#line 917
     }
 
-#line 912
+#line 917
     pixelOutput_0 _S130 = { result_0 };
 
 

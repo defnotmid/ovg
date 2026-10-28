@@ -254,108 +254,108 @@ float curves_solve_monotone_0(float a_0, float b_0, float c_1, float v_0)
 }
 
 
-#line 471
+#line 482
 int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
 {
 
-#line 471
+#line 482
     bool _S11;
     if((p_0.x) >= (curves_f_0(words_3, s_2 + 10U)))
     {
 
-#line 472
+#line 483
         _S11 = true;
 
-#line 472
+#line 483
     }
     else
     {
 
-#line 472
+#line 483
         _S11 = (p_0.y) < 0.0f;
 
-#line 472
+#line 483
     }
 
-#line 472
+#line 483
     if(_S11)
     {
 
-#line 472
+#line 483
         _S11 = true;
 
-#line 472
+#line 483
     }
     else
     {
 
-#line 472
+#line 483
         _S11 = (p_0.y) >= (curves_f_0(words_3, s_2 + 11U));
 
-#line 472
+#line 483
     }
 
-#line 472
+#line 483
     if(_S11)
     {
 
-#line 472
+#line 483
         return int(0);
     }
 
-#line 473
+#line 484
     Curves_Span_0 g_2 = curves_span_0(words_3, s_2, p_0, 0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 473
+#line 484
     thread Curves_Span_0 _S12 = g_2;
 
-#line 473
+#line 484
     uint _S13 = curves_cell_0(s_2, &_S12, g_2.i0_0, g_2.j0_0);
 
 
     int _S14 = int(words_3[_S13 + 2U]);
     uint _S15 = _S13 + 1U;
 
-#line 477
+#line 488
     uint _S16 = s_2 + words_3[_S13] + words_3[_S15];
     uint _S17 = words_3[_S13 + 3U];
 
-#line 478
+#line 489
     uint k_0 = 0U;
 
-#line 478
+#line 489
     int w_0 = _S14;
     for(;;)
     {
 
-#line 479
+#line 490
         if(k_0 < _S17)
         {
         }
         else
         {
 
-#line 479
+#line 490
             break;
         }
 
-#line 480
+#line 491
         uint _S18 = _S16 + 2U * k_0;
 
-#line 480
+#line 491
         if((curves_f_0(words_3, _S18)) <= (p_0.y))
         {
 
-#line 480
+#line 491
             w_0 = w_0 + int(words_3[_S18 + 1U]);
 
-#line 480
+#line 491
         }
 
-#line 479
+#line 490
         k_0 = k_0 + 1U;
 
-#line 479
+#line 490
     }
 
 
@@ -363,192 +363,206 @@ int curves_winding_0(uint device* words_3, uint s_2, float2 p_0)
     uint _S20 = s_2 + words_3[_S13];
     uint _S21 = words_3[_S15];
 
-#line 484
+#line 495
     k_0 = 0U;
     for(;;)
     {
 
-#line 485
+#line 496
         if(k_0 < _S21)
         {
         }
         else
         {
 
-#line 485
+#line 496
             break;
         }
 
-#line 486
+#line 497
         uint c_2 = _S19 + 6U * words_3[_S20 + k_0];
         float2 p1_0 = curves_point_0(words_3, c_2, p_0);
         float2 p2_0 = curves_point_0(words_3, c_2 + 2U, p_0);
         float2 p3_0 = curves_point_0(words_3, c_2 + 4U, p_0);
         float _S22 = p1_0.y;
 
-#line 490
+#line 501
         float _S23 = p3_0.y;
         float _S24 = max(_S22, _S23);
         if(0.0f < (min(_S22, _S23)))
         {
 
-#line 492
+#line 503
             _S11 = true;
 
-#line 492
+#line 503
         }
         else
         {
 
-#line 492
+#line 503
             _S11 = 0.0f >= _S24;
 
-#line 492
+#line 503
         }
 
-#line 492
+#line 503
         bool _S25;
 
-#line 492
+#line 503
         if(_S11)
         {
 
-#line 492
+#line 503
             _S25 = true;
 
-#line 492
+#line 503
         }
         else
         {
 
-#line 492
+#line 503
             _S25 = (max(p1_0.x, p3_0.x)) <= 0.0f;
 
-#line 492
+#line 503
         }
 
-#line 492
+#line 503
         if(_S25)
         {
 
-#line 492
+#line 503
             k_0 = k_0 + 1U;
 
-#line 485
+#line 496
             continue;
         }
 
-#line 493
+#line 504
         float _S26 = p2_0.y;
 
-#line 493
+#line 504
         float t_1 = curves_solve_monotone_0(_S22 - 2.0f * _S26 + _S23, 2.0f * (_S26 - _S22), _S22, 0.0f);
         float _S27 = p1_0.x;
 
-#line 494
+#line 505
         float _S28 = p2_0.x;
 
-#line 494
+#line 505
         int w_1;
 
-#line 494
+#line 505
         if((((_S27 - 2.0f * _S28 + p3_0.x) * t_1 + 2.0f * (_S28 - _S27)) * t_1 + _S27) > 0.0f)
         {
 
-#line 495
+#line 506
             if(_S23 > _S22)
             {
 
-#line 495
+#line 506
                 w_1 = int(1);
 
-#line 495
+#line 506
             }
             else
             {
 
-#line 495
+#line 506
                 w_1 = int(-1);
 
-#line 495
+#line 506
             }
 
-#line 495
+#line 506
             w_1 = w_0 + w_1;
 
-#line 494
+#line 505
         }
         else
         {
 
-#line 494
+#line 505
             w_1 = w_0;
 
-#line 494
+#line 505
         }
 
-#line 494
+#line 505
         w_0 = w_1;
 
-#line 485
+#line 496
         k_0 = k_0 + 1U;
 
-#line 485
+#line 496
     }
 
-#line 498
+#line 509
     return w_0;
 }
 
 
-#line 825 "ovg.slang"
+#line 822 "ovg.slang"
+int shape_rule_0(uint flags_0)
+{
+
+#line 823
+    return int(flags_0 & 1U);
+}
+
+
+#line 106 "../../ocurves/curves.slang"
+bool curves_fill_inside_0(int w_2, int rule_0)
+{
+
+#line 106
+    bool _S29;
+    if(rule_0 == int(1))
+    {
+
+#line 107
+        _S29 = (w_2 & int(1)) != int(0);
+
+#line 107
+    }
+    else
+    {
+
+#line 107
+        _S29 = w_2 != int(0);
+
+#line 107
+    }
+
+#line 107
+    return _S29;
+}
+
+
+#line 830 "ovg.slang"
 float shape_aliased_0(const VS_Shape_Out_0 thread* i_3, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 826
-    int w_2 = curves_winding_0(kernelContext_1->shapes_0, i_3->data_0.x, i_3->rc_0 + (i_3->uv_0.xy + i_3->uv_0.zw) / float2(64.0f) );
-
-#line 826
-    bool _S29;
-    if(((i_3->data_0.z) & 1U) != 0U)
-    {
-
-#line 827
-        _S29 = (w_2 & int(1)) != int(0);
-
-#line 827
-    }
-    else
-    {
-
-#line 827
-        _S29 = w_2 != int(0);
-
-#line 827
-    }
-
-#line 827
+#line 830
     float _S30;
 
-#line 827
-    if(_S29)
+    if(curves_fill_inside_0(curves_winding_0(kernelContext_1->shapes_0, i_3->data_0.x, i_3->rc_0 + (i_3->uv_0.xy + i_3->uv_0.zw) / float2(64.0f) ), shape_rule_0(i_3->data_0.z)))
     {
 
-#line 827
+#line 832
         _S30 = 1.0f;
 
-#line 827
+#line 832
     }
     else
     {
 
-#line 827
+#line 832
         _S30 = 0.0f;
 
-#line 827
+#line 832
     }
 
-#line 827
+#line 832
     return _S30;
 }
 
@@ -1263,7 +1277,7 @@ float4 curves_rows_0(uint device* words_4, uint s_4, const Curves_Span_0 thread*
 }
 
 
-#line 108
+#line 119
 struct Curves_Quadratic_0
 {
     float A_0;
@@ -1275,27 +1289,27 @@ struct Curves_Quadratic_0
 };
 
 
-#line 112
+#line 123
 Curves_Quadratic_0 curves_quadratic_0(float2 p1_1, float2 p2_1, float2 p3_1)
 {
 
-#line 113
+#line 124
     thread Curves_Quadratic_0 q_1;
     float _S106 = p1_1.x;
 
-#line 114
+#line 125
     float _S107 = p2_1.x;
 
-#line 114
+#line 125
     (&q_1)->A_0 = _S106 - 2.0f * _S107 + p3_1.x;
     (&q_1)->B_0 = 2.0f * (_S107 - _S106);
     (&q_1)->C_0 = _S106;
     float _S108 = p1_1.y;
 
-#line 117
+#line 128
     float _S109 = p2_1.y;
 
-#line 117
+#line 128
     (&q_1)->D_0 = _S108 - 2.0f * _S109 + p3_1.y;
     (&q_1)->E_0 = 2.0f * (_S109 - _S108);
     (&q_1)->F_0 = _S108;
@@ -1306,7 +1320,7 @@ Curves_Quadratic_0 curves_quadratic_0(float2 p1_1, float2 p2_1, float2 p3_1)
 Curves_Quadratic_0 curves_from_0(const Curves_Quadratic_0 thread* q_2, float t0_0)
 {
 
-#line 125
+#line 136
     thread Curves_Quadratic_0 r_1;
     (&r_1)->A_0 = q_2->A_0;
     (&r_1)->B_0 = 2.0f * q_2->A_0 * t0_0 + q_2->B_0;
@@ -1333,37 +1347,37 @@ float curves_area_term_0(float gp_0, float gq_0, float gr_0, float yd_0, float y
 }
 
 
-#line 137
+#line 148
 float curves_box_piece_0(const Curves_Quadratic_0 thread* q_3, float x0_1, float x1_1, float t0_2, float t1_2)
 {
 
-#line 138
+#line 149
     if(t1_2 <= t0_2)
     {
 
-#line 138
+#line 149
         return 0.0f;
     }
 
-#line 139
+#line 150
     float tm_0 = (t0_2 + t1_2) * 0.5f;
     float xm_0 = (q_3->A_0 * tm_0 + q_3->B_0) * tm_0 + q_3->C_0;
     if(xm_0 <= x0_1)
     {
 
-#line 141
+#line 152
         return 0.0f;
     }
 
-#line 142
+#line 153
     if(xm_0 >= x1_1)
     {
 
-#line 142
+#line 153
         return (x1_1 - x0_1) * ((q_3->D_0 * t1_2 + q_3->E_0) * t1_2 + q_3->F_0 - ((q_3->D_0 * t0_2 + q_3->E_0) * t0_2 + q_3->F_0));
     }
 
-#line 142
+#line 153
     Curves_Quadratic_0 _S110 = curves_from_0(q_3, t0_2);
 
     return curves_area_term_0(_S110.A_0, _S110.B_0, _S110.C_0 - x0_1, _S110.D_0, _S110.E_0, 0.0f, t1_2 - t0_2);
@@ -1373,7 +1387,7 @@ float curves_box_piece_0(const Curves_Quadratic_0 thread* q_3, float x0_1, float
 float curves_box_curve_0(uint device* words_5, uint c_4, float2 rc_3, float ca_0, float cb_0, float x0_2, float x1_2)
 {
 
-#line 149
+#line 160
     float2 p1_2 = curves_point_0(words_5, c_4, rc_3);
 
     float2 p3_2 = curves_point_0(words_5, c_4 + 4U, rc_3);
@@ -1389,135 +1403,135 @@ float curves_box_curve_0(uint device* words_5, uint c_4, float2 rc_3, float ca_0
     if(_S114 <= x0_2)
     {
 
-#line 161
+#line 172
         return 0.0f;
     }
 
-#line 161
+#line 172
     float s1_0;
     if(_S113 >= x1_2)
     {
 
-#line 162
+#line 173
         if((p3_2.y) > (p1_2.y))
         {
 
-#line 162
+#line 173
             s1_0 = x1_2 - x0_2;
 
-#line 162
+#line 173
         }
         else
         {
 
-#line 162
+#line 173
             s1_0 = x0_2 - x1_2;
 
-#line 162
+#line 173
         }
 
-#line 162
+#line 173
         return s1_0 * (cb_0 - ca_0);
     }
 
-#line 162
+#line 173
     bool _S115;
 
 
     if(x0_2 > _S113)
     {
 
-#line 165
+#line 176
         _S115 = x0_2 < _S114;
 
-#line 165
+#line 176
     }
     else
     {
 
-#line 165
+#line 176
         _S115 = false;
 
-#line 165
+#line 176
     }
 
-#line 165
+#line 176
     if(_S115)
     {
 
-#line 165
+#line 176
         s1_0 = clamp(curves_solve_monotone_0(q_4.A_0, q_4.B_0, q_4.C_0, x0_2), _S111, _S112);
 
-#line 165
+#line 176
     }
     else
     {
 
-#line 165
+#line 176
         s1_0 = _S112;
 
-#line 165
+#line 176
     }
     if(x1_2 > _S113)
     {
 
-#line 166
+#line 177
         _S115 = x1_2 < _S114;
 
-#line 166
+#line 177
     }
     else
     {
 
-#line 166
+#line 177
         _S115 = false;
 
-#line 166
+#line 177
     }
 
-#line 166
+#line 177
     float s2_0;
 
-#line 166
+#line 177
     if(_S115)
     {
 
-#line 166
+#line 177
         s2_0 = clamp(curves_solve_monotone_0(q_4.A_0, q_4.B_0, q_4.C_0, x1_2), _S111, _S112);
 
-#line 166
+#line 177
     }
     else
     {
 
-#line 166
+#line 177
         s2_0 = _S112;
 
-#line 166
+#line 177
     }
     float _S116 = min(s1_0, s2_0);
     float _S117 = max(s1_0, s2_0);
 
-#line 168
+#line 179
     thread Curves_Quadratic_0 _S118 = q_4;
 
-#line 168
+#line 179
     float _S119 = curves_box_piece_0(&_S118, x0_2, x1_2, _S111, _S116);
 
-#line 168
+#line 179
     thread Curves_Quadratic_0 _S120 = q_4;
 
-#line 168
+#line 179
     float _S121 = curves_box_piece_0(&_S120, x0_2, x1_2, _S116, _S117);
     float _S122 = _S119 + _S121;
 
-#line 169
+#line 180
     thread Curves_Quadratic_0 _S123 = q_4;
 
-#line 169
+#line 180
     float _S124 = curves_box_piece_0(&_S123, x0_2, x1_2, _S117, _S112);
 
-#line 169
+#line 180
     return _S122 + _S124;
 }
 
@@ -1612,65 +1626,65 @@ float curves_backdrop_box_0(uint device* words_6, uint s_5, uint cell_0, float r
 }
 
 
-#line 99
-float curves_fill_0(float area_2, bool even_odd_0)
+#line 110
+float curves_fill_0(float area_2, int rule_1)
 {
 
-#line 100
+#line 111
     float cov_0 = abs(area_2);
-    if(even_odd_0)
+    if(rule_1 == int(1))
     {
 
-#line 102
+#line 113
         float _S129 = cov_0 * 0.5f;
 
-#line 102
+#line 113
         return 1.0f - abs(1.0f - (_S129 - floor(_S129)) * 2.0f);
     }
     return min(cov_0, 1.0f);
 }
 
 
-#line 177
-float curves_coverage_0(uint device* words_7, uint s_6, float2 rc_4, float2 footprint_0, bool even_odd_1)
+#line 188
+float curves_coverage_0(uint device* words_7, uint s_6, float2 rc_4, float2 footprint_0, int rule_2)
 {
 
-#line 177
+#line 188
     int i_6;
 
-#line 177
+#line 188
     int _S130;
     float fx_0 = footprint_0.x;
     float fy_0 = footprint_0.y;
 
-#line 179
+#line 190
     bool _S131;
     if(fx_0 <= 0.0f)
     {
 
-#line 180
+#line 191
         _S131 = true;
 
-#line 180
+#line 191
     }
     else
     {
 
-#line 180
+#line 191
         _S131 = fy_0 <= 0.0f;
 
-#line 180
+#line 191
     }
 
-#line 180
+#line 191
     if(_S131)
     {
 
-#line 180
+#line 191
         return 0.0f;
     }
 
-#line 181
+#line 192
     float x0_3 = -0.5f * fx_0;
     float x1_3 = 0.5f * fx_0;
     Curves_Span_0 g_4 = curves_span_0(words_7, s_6, rc_4, x0_3, x1_3, -0.5f * fy_0, 0.5f * fy_0);
@@ -1680,138 +1694,138 @@ float curves_coverage_0(uint device* words_7, uint s_6, float2 rc_4, float2 foot
     thread uint2 kept_0 = uint2(0U, 0U);
     float2 _S133 = float2(0.0f, 0.0f);
 
-#line 188
+#line 199
     thread float2 kept_a_0 = _S133;
     thread float2 kept_b_0 = _S133;
 
-#line 189
+#line 200
     int j_2 = g_4.j0_0;
 
-#line 189
+#line 200
     float area_3 = 0.0f;
 
-#line 189
+#line 200
     int n_0 = int(0);
 
     for(;;)
     {
 
-#line 191
+#line 202
         if(j_2 <= (g_4.j1_0))
         {
         }
         else
         {
 
-#line 191
+#line 202
             break;
         }
 
-#line 192
+#line 203
         float _S134 = rc_4.y;
 
-#line 192
+#line 203
         thread Curves_Span_0 _S135 = g_4;
 
-#line 192
+#line 203
         float4 _S136 = curves_rows_0(words_7, s_6, &_S135, j_2, _S134);
         float _S137 = _S136.x;
 
-#line 193
+#line 204
         float _S138 = _S136.y;
 
-#line 193
+#line 204
         int n_1;
 
-#line 193
+#line 204
         float area_4;
 
-#line 193
+#line 204
         if(_S137 >= _S138)
         {
 
-#line 193
+#line 204
             area_4 = area_3;
 
-#line 193
+#line 204
             n_1 = n_0;
 
-#line 193
+#line 204
             j_2 = j_2 + int(1);
 
-#line 193
+#line 204
             area_3 = area_4;
 
-#line 193
+#line 204
             n_0 = n_1;
 
-#line 191
+#line 202
             continue;
         }
 
-#line 191
+#line 202
         i_6 = g_4.i0_0;
 
-#line 191
+#line 202
         float area_5 = area_3;
 
-#line 191
+#line 202
         int n_2 = n_0;
 
 
         for(;;)
         {
 
-#line 194
+#line 205
             _S130 = g_4.i1_0;
 
-#line 194
+#line 205
             if(i_6 <= (g_4.i1_0))
             {
             }
             else
             {
 
-#line 194
+#line 205
                 break;
             }
 
-#line 194
+#line 205
             thread Curves_Span_0 _S139 = g_4;
 
-#line 194
+#line 205
             uint _S140 = curves_cell_0(s_6, &_S139, i_6, j_2);
 
             uint _S141 = s_6 + words_7[_S140];
             uint _S142 = words_7[_S140 + 1U];
 
-#line 197
+#line 208
             uint k_2 = 0U;
 
-#line 197
+#line 208
             float area_6 = area_5;
 
-#line 197
+#line 208
             int n_3 = n_2;
             for(;;)
             {
 
-#line 198
+#line 209
                 if(k_2 < _S142)
                 {
                 }
                 else
                 {
 
-#line 198
+#line 209
                     break;
                 }
 
-#line 199
+#line 210
                 uint c_5 = _S132 + 6U * words_7[_S141 + k_2];
                 float _S143 = rc_4.x;
 
-#line 200
+#line 211
                 float x1c_0 = curves_f_0(words_7, c_5) - _S143;
                 float y1c_0 = curves_f_0(words_7, c_5 + 1U) - _S134;
                 float x3c_0 = curves_f_0(words_7, c_5 + 4U) - _S143;
@@ -1821,200 +1835,200 @@ float curves_coverage_0(uint device* words_7, uint s_6, float2 rc_4, float2 foot
                 if(_S144 >= _S145)
                 {
 
-#line 206
+#line 217
                     _S131 = true;
 
-#line 206
+#line 217
                 }
                 else
                 {
 
-#line 206
+#line 217
                     _S131 = (max(x1c_0, x3c_0)) <= x0_3;
 
-#line 206
+#line 217
                 }
 
-#line 206
+#line 217
                 if(_S131)
                 {
 
-#line 206
+#line 217
                     area_4 = area_6;
 
-#line 206
+#line 217
                     n_1 = n_3;
 
-#line 206
+#line 217
                     k_2 = k_2 + 1U;
 
-#line 206
+#line 217
                     area_6 = area_4;
 
-#line 206
+#line 217
                     n_3 = n_1;
 
-#line 198
+#line 209
                     continue;
                 }
 
-#line 207
+#line 218
                 if((min(x1c_0, x3c_0)) >= x1_3)
                 {
 
-#line 208
+#line 219
                     if(y3c_0 > y1c_0)
                     {
 
-#line 208
+#line 219
                         area_4 = fx_0;
 
-#line 208
+#line 219
                     }
                     else
                     {
 
-#line 208
+#line 219
                         area_4 = - fx_0;
 
-#line 208
+#line 219
                     }
 
-#line 208
+#line 219
                     area_4 = area_6 + area_4 * (_S145 - _S144);
 
-#line 208
+#line 219
                     n_1 = n_3;
 
-#line 207
+#line 218
                 }
                 else
                 {
 
-#line 209
+#line 220
                     if(n_3 < int(2))
                     {
 
-#line 210
+#line 221
                         kept_0[n_3] = c_5;
                         kept_a_0[n_3] = _S144;
                         kept_b_0[n_3] = _S145;
                         int _S146 = n_3 + int(1);
 
-#line 213
+#line 224
                         area_4 = area_6;
 
-#line 213
+#line 224
                         n_1 = _S146;
 
-#line 209
+#line 220
                     }
                     else
                     {
 
-#line 209
+#line 220
                         area_4 = area_6 + curves_box_curve_0(words_7, c_5, rc_4, _S144, _S145, x0_3, x1_3);
 
-#line 209
+#line 220
                         n_1 = n_3;
 
-#line 209
+#line 220
                     }
 
-#line 207
+#line 218
                 }
 
-#line 198
+#line 209
                 k_2 = k_2 + 1U;
 
-#line 198
+#line 209
                 area_6 = area_4;
 
-#line 198
+#line 209
                 n_3 = n_1;
 
-#line 198
+#line 209
             }
 
-#line 194
+#line 205
             i_6 = i_6 + int(1);
 
-#line 194
+#line 205
             area_5 = area_6;
 
-#line 194
+#line 205
             n_2 = n_3;
 
-#line 194
+#line 205
         }
 
-#line 194
+#line 205
         thread Curves_Span_0 _S147 = g_4;
 
-#line 194
+#line 205
         uint _S148 = curves_cell_0(s_6, &_S147, _S130, j_2);
 
-#line 194
+#line 205
         area_4 = area_5 + fx_0 * curves_backdrop_box_0(words_7, s_6, _S148, _S134, max(_S137, _S136.z), min(_S138, _S136.w));
 
-#line 194
+#line 205
         n_1 = n_2;
 
-#line 191
+#line 202
         j_2 = j_2 + int(1);
 
-#line 191
+#line 202
         area_3 = area_4;
 
-#line 191
+#line 202
         n_0 = n_1;
 
-#line 191
+#line 202
     }
 
-#line 191
+#line 202
     i_6 = int(0);
 
-#line 221
+#line 232
     for(;;)
     {
 
-#line 221
+#line 232
         if(i_6 < n_0)
         {
         }
         else
         {
 
-#line 221
+#line 232
             break;
         }
 
-#line 222
+#line 233
         float area_7 = area_3 + curves_box_curve_0(words_7, kept_0[i_6], rc_4, kept_a_0[i_6], kept_b_0[i_6], x0_3, x1_3);
 
-#line 221
+#line 232
         i_6 = i_6 + int(1);
 
-#line 221
+#line 232
         area_3 = area_7;
 
-#line 221
+#line 232
     }
 
 
-    return curves_fill_0(area_3 / (fx_0 * fy_0), even_odd_1);
+    return curves_fill_0(area_3 / (fx_0 * fy_0), rule_2);
 }
 
 
-#line 224
+#line 235
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 224
+#line 235
 struct pixelInput_0
 {
     float2 rc_5 [[user(TEXCOORD)]];
@@ -2024,129 +2038,129 @@ struct pixelInput_0
 };
 
 
-#line 833 "ovg.slang"
+#line 838 "ovg.slang"
 [[fragment]] pixelOutput_0 fs_shape_box(pixelInput_0 _S149 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 833
+#line 838
     thread KernelContext_0 kernelContext_26;
 
-#line 833
+#line 838
     (&kernelContext_26)->members_0 = members_1;
 
-#line 833
+#line 838
     (&kernelContext_26)->shapes_0 = shapes_1;
 
-#line 833
+#line 838
     (&kernelContext_26)->paints_0 = paints_1;
 
-#line 833
+#line 838
     (&kernelContext_26)->tex_texture_0 = tex_texture_1;
 
-#line 833
+#line 838
     (&kernelContext_26)->tex_sampler_0 = tex_sampler_1;
 
-#line 833
+#line 838
     thread VS_Shape_Out_0 _S150;
 
-#line 833
+#line 838
     (&_S150)->position_0 = position_1;
 
-#line 833
+#line 838
     (&_S150)->rc_0 = _S149.rc_5;
 
-#line 833
+#line 838
     (&_S150)->fpos_0 = _S149.fpos_4;
 
-#line 833
+#line 838
     (&_S150)->uv_0 = _S149.uv_2;
 
-#line 833
+#line 838
     (&_S150)->data_0 = _S149.data_3;
 
-#line 833
+#line 838
     shape_clip_0(&_S150, &kernelContext_26);
 
     (&kernelContext_26)->paint_index_0 = _S149.data_3.y;
     uint _S151 = _S149.data_3.z;
 
-#line 836
+#line 841
     if((_S151 & 2U) != 0U)
     {
 
-#line 836
+#line 841
         thread VS_Shape_Out_0 _S152;
 
-#line 836
+#line 841
         (&_S152)->position_0 = position_1;
 
-#line 836
+#line 841
         (&_S152)->rc_0 = _S149.rc_5;
 
-#line 836
+#line 841
         (&_S152)->fpos_0 = _S149.fpos_4;
 
-#line 836
+#line 841
         (&_S152)->uv_0 = _S149.uv_2;
 
-#line 836
+#line 841
         (&_S152)->data_0 = _S149.data_3;
 
-#line 836
+#line 841
         float _S153 = shape_aliased_0(&_S152, &kernelContext_26);
 
-#line 836
+#line 841
         thread VS_Shape_Out_0 _S154;
 
-#line 836
+#line 841
         (&_S154)->position_0 = position_1;
 
-#line 836
+#line 841
         (&_S154)->rc_0 = _S149.rc_5;
 
-#line 836
+#line 841
         (&_S154)->fpos_0 = _S149.fpos_4;
 
-#line 836
+#line 841
         (&_S154)->uv_0 = _S149.uv_2;
 
-#line 836
+#line 841
         (&_S154)->data_0 = _S149.data_3;
 
-#line 836
+#line 841
         float4 _S155 = shape_fill_0(&_S154, _S153, &kernelContext_26);
 
-#line 836
+#line 841
         pixelOutput_0 _S156 = { _S155 };
         return _S156;
     }
-    float _S157 = curves_coverage_0((&kernelContext_26)->shapes_0, _S149.data_3.x, _S149.rc_5, float2(abs(_S149.uv_2.x), abs(_S149.uv_2.w)), (_S151 & 1U) != 0U);
+    float _S157 = curves_coverage_0((&kernelContext_26)->shapes_0, _S149.data_3.x, _S149.rc_5, float2(abs(_S149.uv_2.x), abs(_S149.uv_2.w)), shape_rule_0(_S151));
 
-#line 839
+#line 844
     thread VS_Shape_Out_0 _S158;
 
-#line 839
+#line 844
     (&_S158)->position_0 = position_1;
 
-#line 839
+#line 844
     (&_S158)->rc_0 = _S149.rc_5;
 
-#line 839
+#line 844
     (&_S158)->fpos_0 = _S149.fpos_4;
 
-#line 839
+#line 844
     (&_S158)->uv_0 = _S149.uv_2;
 
-#line 839
+#line 844
     (&_S158)->data_0 = _S149.data_3;
 
-#line 839
+#line 844
     float4 _S159 = shape_fill_0(&_S158, _S157, &kernelContext_26);
 
-#line 839
+#line 844
     pixelOutput_0 _S160 = { _S159 };
 
-#line 839
+#line 844
     return _S160;
 }
 

@@ -818,13 +818,18 @@ float4 shape_fill(VS_Shape_Out i, float coverage) {
     return result * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
 }
 
+// An instance's fill rule: bit 0 of its flags.
+Curves_Fill_Rule shape_rule(uint flags) {
+    return (Curves_Fill_Rule)(flags & 1u);
+}
+
 // The winding a 64th of a pixel right of and below the pixel center, for
 // an aliased instance: an edge through the center itself (common when
 // pixel art is scaled by a fraction) then falls the same side in every
 // shape, whatever each one's rounding.
 float shape_aliased(VS_Shape_Out i) {
     int w = curves_winding(shapes, i.data.x, i.rc + (i.uv.xy + i.uv.zw) / 64.0);
-    return ((i.data.z & 1u) != 0u ? (w & 1) != 0 : w != 0) ? 1.0 : 0.0;
+    return curves_fill_inside(w, shape_rule(i.data.z)) ? 1.0 : 0.0;
 }
 
 // Instances without rotation or skew (the pixel's footprint a box): a
@@ -836,7 +841,7 @@ float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
     }
-    return shape_fill(i, curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), (i.data.z & 1u) != 0u));
+    return shape_fill(i, curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), shape_rule(i.data.z)));
 }
 
 [shader("fragment")]
@@ -846,7 +851,7 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
     }
-    return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, (i.data.z & 1u) != 0u));
+    return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, shape_rule(i.data.z)));
 }
 
 // A hairline (ovg hairline_shape): the shape's outline drawn asfloat(data.z)
@@ -939,15 +944,15 @@ float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
         if (any(rc < s.bounds.xy - epp) || any(rc > s.bounds.zw + epp)) {
             continue;
         }
-        bool even_odd = (s.data.z & 1u) != 0u;
+        Curves_Fill_Rule rule = shape_rule(s.data.z);
         float coverage;
         if ((s.data.z & 2u) != 0u) {
             int w = curves_winding(shapes, s.data.x, rc + (s.uv.xy + s.uv.zw) / 64.0);
-            coverage = (even_odd ? (w & 1) != 0 : w != 0) ? 1.0 : 0.0;
+            coverage = curves_fill_inside(w, rule) ? 1.0 : 0.0;
         } else if (s.m.y == 0.0 && s.m.z == 0.0) {
-            coverage = curves_coverage(shapes, s.data.x, rc, float2(abs(s.uv.x), abs(s.uv.w)), even_odd);
+            coverage = curves_coverage(shapes, s.data.x, rc, float2(abs(s.uv.x), abs(s.uv.w)), rule);
         } else {
-            coverage = curves_coverage_affine(shapes, s.data.x, rc, s.uv.xy, s.uv.zw, even_odd);
+            coverage = curves_coverage_affine(shapes, s.data.x, rc, s.uv.xy, s.uv.zw, rule);
         }
         if (coverage < 1.0 / 510.0) {
             continue;
