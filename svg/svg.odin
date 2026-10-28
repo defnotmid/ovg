@@ -513,6 +513,11 @@ parse :: proc(data: []u8, opts: Parse_Options = {}, allocator := context.allocat
 
 	finish(&p)
 	vg.budget_warn(&budget, &doc.warnings, p.sa)
+	// The geometry grew geometrically as its paths came; the document
+	// keeps just what it holds.
+	shrink(&doc.geometry.pts)
+	shrink(&doc.geometry.kinds)
+	shrink(&doc.geometry.contours)
 	return doc, .None
 }
 
