@@ -37,6 +37,16 @@ flat_area :: proc(p: ^Path) -> (area: f32, contours: int) {
 	return area, len(f.contours)
 }
 
+// A closed quadrilateral through a, b, c, d.
+@(private = "file")
+quad :: proc(p: ^Path, a, b, c, d: Vec2) {
+	path_move_to(p, a.x, a.y)
+	path_line_to(p, b.x, b.y)
+	path_line_to(p, c.x, c.y)
+	path_line_to(p, d.x, d.y)
+	path_close(p)
+}
+
 // A square with square holes (each `{x, y, size}`), the holes wound like
 // the outline unless `opposite`.
 @(private = "file")
@@ -44,7 +54,7 @@ square_with_holes :: proc(p: ^Path, x, y, size: f32, holes: [][3]f32, opposite :
 	path_rect(p, x, y, size, size)
 	for h in holes {
 		if opposite {
-			path_append(p, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{h.x, h.y}, {h.x + h.z, h.y}, {h.x + h.z, h.y + h.z}, {h.x, h.y + h.z}})
+			quad(p, {h.x, h.y}, {h.x + h.z, h.y}, {h.x + h.z, h.y + h.z}, {h.x, h.y + h.z})
 		} else {
 			path_rect(p, h.x, h.y, h.z, h.z)
 		}
@@ -78,7 +88,7 @@ test_path_morph_ends :: proc(t: ^testing.T) {
 		path_flatten(end, &f)
 		for q in f.points {
 			found := false
-			for c in out.coords {
+			for c in out.pts {
 				found ||= abs(c.x - q.x) < 1e-3 && abs(c.y - q.y) < 1e-3
 			}
 			testing.expect(t, found)
@@ -104,8 +114,8 @@ test_path_morph_holes :: proc(t: ^testing.T) {
 	square_with_holes(&a, 0, 0, 100, {{30, 30, 40}})
 	// b winds its outline the other way and its hole like the outline:
 	// drawn even-odd.
-	path_append(&b, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{200, 0}, {300, 0}, {300, 100}, {200, 100}})
-	path_append(&b, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{220, 20}, {280, 20}, {280, 80}, {220, 80}})
+	quad(&b, {200, 0}, {300, 0}, {300, 100}, {200, 100})
+	quad(&b, {220, 20}, {280, 20}, {280, 80}, {220, 80})
 	path_morph_prepare(&m, &a, &b, .Non_Zero, .Even_Odd)
 	testing.expect_value(t, len(m.contours), 2)
 	for k in 0 ..= 4 {
@@ -210,8 +220,8 @@ test_path_morph_no_twist :: proc(t: ^testing.T) {
 	defer path_destroy(&out)
 	m: Path_Morph
 	defer path_morph_destroy(&m)
-	path_append(&a, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{0, 0}, {100, 0}, {100, 100}, {0, 100}})
-	path_append(&b, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{100, 100}, {0, 100}, {0, 0}, {100, 0}})
+	quad(&a, {0, 0}, {100, 0}, {100, 100}, {0, 100})
+	quad(&b, {100, 100}, {0, 100}, {0, 0}, {100, 0})
 	path_morph_prepare(&m, &a, &b)
 	for k in 0 ..< len(m.from) {
 		testing.expect(t, mag2(m.from[k] - m.to[k]) < 1e-6)

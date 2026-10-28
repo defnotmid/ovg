@@ -10,46 +10,16 @@ import cv "deps:ocurves"
 // q lies within `near` of an outline.
 @(private = "file")
 path_winding_at :: proc(p: ^Path, q: [2]f64, near: f64) -> (w: i32, on: bool) {
-	c: cv.Contours
-	defer cv.contours_destroy(&c)
 	stack: [dynamic][2]f64
 	defer delete(stack)
-	contours_append_path(&c, p)
-	f :: proc(v: Vec2) -> [2]f64 {return {f64(v.x), f64(v.y)}}
-	seg :: proc(a, b, cc, d: Vec2, q: [2]f64, near: f64, stack: ^[dynamic][2]f64) -> (i32, bool) {
-		return cv.curve_winding({f(a), f(b), f(cc), f(d)}, q, near, stack)
-	}
-	for ct in c.contours {
-		pts := c.pts[ct.start:][:3 * ct.segs + 1]
-		for i in 0 ..< ct.segs {
-			cw, con := seg(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2], pts[3 * i + 3], q, near, &stack)
-			w += cw
-			on ||= con
-		}
-		if a, b := pts[len(pts) - 1], pts[0]; a != b {
-			cw, con := seg(a, a + (b - a) / 3, a + (b - a) * (2.0 / 3), b, q, near, &stack)
-			w += cw
-			on ||= con
-		}
-	}
-	return
+	return cv.contours_winding(p, 0, len(p.contours), q, &stack, near)
 }
 
 @(private = "file")
 path_area :: proc(p: ^Path) -> f64 {
-	c: cv.Contours
-	defer cv.contours_destroy(&c)
-	contours_append_path(&c, p)
 	a: f64
-	for ct in c.contours {
-		pts := c.pts[ct.start:][:3 * ct.segs + 1]
-		f :: proc(v: Vec2) -> [2]f64 {return {f64(v.x), f64(v.y)}}
-		for i in 0 ..< ct.segs {
-			a += cv.cubic_area([4][2]f64{f(pts[3 * i]), f(pts[3 * i + 1]), f(pts[3 * i + 2]), f(pts[3 * i + 3])})
-		}
-		if l, s := pts[len(pts) - 1], pts[0]; l != s {
-			a += (f64(s.x) - f64(l.x)) * (f64(l.y) + f64(s.y)) / 2
-		}
+	for _, i in p.contours {
+		a += cv.contours_area(p, i)
 	}
 	return a
 }
@@ -215,17 +185,17 @@ test_path_boolean_keeps_curves :: proc(t: ^testing.T) {
 	path_circle(&b, 60, 20, 10)
 	testing.expect_value(t, path_boolean(&out, {&a, .Non_Zero}, {&b, .Non_Zero}, .Union, &s), nil)
 	beziers := 0
-	for v in out.verbs {
-		beziers += int(v == .Bezier_To)
+	for k in out.kinds {
+		beziers += int(k == .Cubic)
 	}
 	testing.expect_value(t, beziers, 8)
 	// Every output point is one of the inputs' points.
-	for q in out.coords {
+	for q in out.pts {
 		found := false
-		for c in a.coords {
+		for c in a.pts {
 			found ||= c == q
 		}
-		for c in b.coords {
+		for c in b.pts {
 			found ||= c == q
 		}
 		testing.expectf(t, found, "point %v is not an input point", q)
@@ -299,7 +269,7 @@ test_path_divide :: proc(t: ^testing.T) {
 		sum: f64
 		for f in faces {
 			path_reset(face)
-			path_append(face, out.verbs[f.start:][:f.count], face_coords(out, f))
+			path_append_contours(face, out, int(f.start), int(f.count))
 			fa := path_area(face)
 			testing.expectf(t, fa > 0, "face %v area %v not Solid", f, fa)
 			sum += fa
@@ -317,19 +287,4 @@ test_path_divide :: proc(t: ^testing.T) {
 	path_solidity(&a, .Hole)
 	path_circle(&b, 30, 30, 8)
 	check(t, &s, &a, &b, &out, &face, &union_, &faces, {1, 1, 0})
-}
-
-// The coordinates of verbs [f.start, f.start + f.count) of p.
-@(private = "file")
-face_coords :: proc(p: ^Path, f: Range) -> []Vec2 {
-	at, n := 0, 0
-	for v, i in p.verbs {
-		c := verb_num_coords(v)
-		if u32(i) < f.start {
-			at += c
-		} else if u32(i) < f.start + f.count {
-			n += c
-		}
-	}
-	return p.coords[at:][:n]
 }

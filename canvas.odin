@@ -325,49 +325,18 @@ filter_image :: proc(c: ^Canvas, target: Image_Id, filter: Image_Filter, source:
 
 // Whether drawing coordinates (x, y) are inside `p` (under the current
 // transform) by `rule`: the winding of the point about the path's exact
-// curves, Solid / Hole winding its contours as fill does.
+// curves.
 contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool {
 	h := &c.scratch.hit
-	cv.contours_clear(h)
-	contours_append_path(h, p, state(c).transform)
+	path_reset(h)
+	path_append(h, p, state(c).transform)
 	w, _ := cv.contours_winding(h, 0, len(h.contours), {f64(x), f64(y)}, &c.scratch.stack)
 	return cv.fill_inside(w, rule)
 }
 
 // Bounds of the path under the current transform.
 path_bounds :: proc(c: ^Canvas, p: ^Path) -> Bounds {
-	return path_device_bounds(c, p, state(c).transform)
-}
-
-// The exact bounds of what `p` draws under `t`: each segment's ends and
-// turning points (a lone Move_To and zero-length segments draw nothing).
-path_device_bounds :: proc(c: ^Canvas, p: ^Path, t: Transform2D) -> Bounds {
-	b := EMPTY_BOUNDS
-	add :: proc(b: ^Bounds, lo, hi: Vec2) {
-		b^ = {min(b.minx, lo.x), min(b.miny, lo.y), max(b.maxx, hi.x), max(b.maxy, hi.y)}
-	}
-	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
-		return transform_point(t, p.x, p.y)
-	}
-	it := path_events(p)
-	for e in path_events_next(&it) {
-		switch e.kind {
-		case .Line, .Close:
-			if e.p[0] == e.p[1] {
-				continue
-			}
-			a, z := at(t, e.p[0]), at(t, e.p[1])
-			add(&b, {min(a.x, z.x), min(a.y, z.y)}, {max(a.x, z.x), max(a.y, z.y)})
-		case .Cubic:
-			if e.p[0] == e.p[1] && e.p[1] == e.p[2] && e.p[2] == e.p[3] {
-				continue
-			}
-			lo, hi := cv.cubic_bounds([4]Vec2{at(t, e.p[0]), at(t, e.p[1]), at(t, e.p[2]), at(t, e.p[3])})
-			add(&b, lo, hi)
-		case .Begin, .Solid, .Hole:
-		}
-	}
-	return b
+	return path_contours_bounds(p, 0, len(p.contours), state(c).transform)
 }
 
 @(private)

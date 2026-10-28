@@ -110,13 +110,16 @@ test_path_shapes :: proc(t: ^testing.T) {
 	p: Path
 	defer path_destroy(&p)
 	path_rect(&p, 1, 2, 10, 20)
-	testing.expect_value(t, len(p.verbs), 5)
-	testing.expect_value(t, p.coords[2], Vec2{11, 22})
+	// Four sides, the last the close's line back to the start.
+	testing.expect(t, len(p.contours) == 1 && p.contours[0].closed && p.contours[0].segs == 4)
+	testing.expect_value(t, p.pts[2], Vec2{11, 22})
+	testing.expect_value(t, path_pen(&p), Vec2{1, 2})
 
 	path_reset(&p)
 	path_circle(&p, 0, 0, 10)
-	testing.expect_value(t, len(p.verbs), 6)
-	testing.expect_value(t, len(p.coords), 13)
+	// Four cubics, ending where they start, so no closing line.
+	testing.expect(t, len(p.contours) == 1 && p.contours[0].closed && p.contours[0].segs == 4)
+	testing.expect_value(t, len(p.pts), 13)
 }
 
 @(test)

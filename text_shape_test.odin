@@ -526,7 +526,7 @@ test_inits_use_their_allocator :: proc(t: ^testing.T) {
 		path_morph_prepare(&m, &a, &b)
 		path_morph_eval(&m, 0.5, &out)
 		testing.expect_value(t, other.total_allocation_count, 0)
-		testing.expect(t, len(l.missing) == 1 && len(out.verbs) > 0)
+		testing.expect(t, len(l.missing) == 1 && !path_is_empty(&out))
 		path_destroy(&a)
 		path_destroy(&b)
 		path_destroy(&out)

@@ -9,28 +9,30 @@ test_svg_path :: proc(t: ^testing.T) {
 	p: Path
 	defer path_destroy(&p)
 	testing.expect(t, path_svg(&p, "M10,10 h20 v20 H10 z m 5 5 l1-1 1e1,2.5"))
-	testing.expect_value(t, p.verbs[0], Verb.Move_To)
-	testing.expect_value(t, p.coords[1], Vec2{30, 10})
-	testing.expect_value(t, p.coords[2], Vec2{30, 30})
+	// A line keeps only its end, so line i of the first contour ends at
+	// point i + 1.
+	testing.expect_value(t, len(p.contours), 2)
+	testing.expect(t, p.contours[0].closed && p.contours[0].segs == 4)
+	testing.expect_value(t, p.pts[1], Vec2{30, 10})
+	testing.expect_value(t, p.pts[2], Vec2{30, 30})
 	// After `z` the relative move starts from the subpath start.
-	testing.expect_value(t, p.coords[4], Vec2{15, 15})
-	testing.expect_value(t, p.coords[6], Vec2{26, 16.5})
+	testing.expect_value(t, p.pts[p.contours[1].start], Vec2{15, 15})
+	testing.expect_value(t, path_pen(&p), Vec2{26, 16.5})
 
 	path_reset(&p)
 	testing.expect(t, path_svg(&p, "M0 0 A10 10 0 0 1 20 0"))
-	end := p.coords[len(p.coords) - 1]
-	testing.expect_value(t, end, Vec2{20, 0})
+	testing.expect_value(t, path_pen(&p), Vec2{20, 0})
 	// A half circle of radius 10 sweeping clockwise bulges up (negative y).
-	mid := p.coords[3]
+	mid := p.pts[3]
 	testing.expect(t, abs(mid.x - 10) < 0.01 && abs(mid.y + 10) < 0.01)
 
 	// A drawing command after `z` opens a new subpath at the start point.
 	path_reset(&p)
 	testing.expect(t, path_svg(&p, "M10 10 H50 V50 Z L90 10"))
-	testing.expect_value(t, p.verbs[3], Verb.Close)
-	testing.expect_value(t, p.verbs[4], Verb.Move_To)
-	testing.expect_value(t, p.coords[3], Vec2{10, 10})
-	testing.expect_value(t, p.verbs[5], Verb.Line_To)
+	testing.expect_value(t, len(p.contours), 2)
+	testing.expect(t, p.contours[0].closed && !p.contours[1].closed)
+	testing.expect_value(t, p.pts[p.contours[1].start], Vec2{10, 10})
+	testing.expect_value(t, p.contours[1].segs, 1)
 
 	path_reset(&p)
 	testing.expect(t, path_svg(&p, "M0 0 a5 5 0 1010 0"))

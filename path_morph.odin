@@ -21,7 +21,7 @@ import "core:slice"
 // The output keeps every point of both flattened paths: at t = 0 it is `a`
 // as polylines (`path_flatten`'s segments of about 1.5 units) and at t = 1
 // it is `b`, with extra points on the edges. Solids wind as `.Solid`, holes
-// as `.Hole` (marked with those verbs), so the blend fills the same under
+// as `.Hole` (path_solidity), so the blend fills the same under
 // the non-zero and the even-odd rule. Contours are morphed as filled
 // shapes: open contours are closed, and contours of fewer than three points
 // are dropped. `t` outside [0, 1] extrapolates (overshooting easings).
@@ -129,28 +129,24 @@ path_morph_prepare :: proc(m: ^Path_Morph, a, b: ^Path, rule_a: Fill_Rule = .Non
 }
 
 // Appends the morph at `t` to `out`: one closed polyline per contour,
-// marked `.Solid` or `.Hole`. No allocation once `out` has the capacity.
+// wound `.Solid` or `.Hole`. No allocation once `out` has the capacity.
 path_morph_eval :: proc(m: ^Path_Morph, t: f32, out: ^Path) {
 	for ct in m.contours {
 		if (ct.kind == .Grow && t <= 0) || (ct.kind == .Shrink && t >= 1) {
 			continue
 		}
-		n := int(ct.count)
-		v0, c0 := len(out.verbs), len(out.coords)
-		resize(&out.verbs, v0 + n + 2)
-		resize(&out.coords, c0 + n)
-		verbs := out.verbs[v0:]
-		coords := out.coords[c0:]
-		from := m.from[ct.first:][:n]
-		to := m.to[ct.first:][:n]
-		for k in 0 ..< n {
-			verbs[k] = .Line_To
-			coords[k] = from[k] + (to[k] - from[k]) * t
+		from := m.from[ct.first:][:ct.count]
+		to := m.to[ct.first:][:ct.count]
+		for k in 0 ..< len(from) {
+			q := from[k] + (to[k] - from[k]) * t
+			if k == 0 {
+				path_move_to(out, q.x, q.y)
+			} else {
+				path_line_to(out, q.x, q.y)
+			}
 		}
-		verbs[0] = .Move_To
-		verbs[n] = .Close
-		verbs[n + 1] = .Hole if ct.hole else .Solid
-		out.last_pos = coords[n - 1]
+		path_close(out)
+		path_solidity(out, .Hole if ct.hole else .Solid)
 	}
 }
 

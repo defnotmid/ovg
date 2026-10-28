@@ -175,13 +175,6 @@ operand :: proc(p: ^vg.Path, kind: int, r: rand.Generator) {
 
 // Wrong and overlapping samples of `out` against `a op b`.
 check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong, overlapping: int) {
-	ca, cb, co: cv.Contours
-	defer cv.contours_destroy(&ca)
-	defer cv.contours_destroy(&cb)
-	defer cv.contours_destroy(&co)
-	vg.contours_append_path(&ca, a)
-	vg.contours_append_path(&cb, b)
-	vg.contours_append_path(&co, out)
 	stack: [dynamic][2]f64
 	defer delete(stack)
 	N :: 40
@@ -189,9 +182,9 @@ check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
-			wa, ona := winding(&ca, q, near, &stack)
-			wb, onb := winding(&cb, q, near, &stack)
-			wr, onr := winding(&co, q, near, &stack)
+			wa, ona := winding(a, q, near, &stack)
+			wb, onb := winding(b, q, near, &stack)
+			wr, onr := winding(out, q, near, &stack)
 			if ona || onb || onr {
 				continue
 			}
@@ -255,30 +248,6 @@ check_regions :: proc(s: ^cv.Bool_Scratch) -> (faults: int) {
 // Samples of a divide where the count of faces holding the point isn't 1
 // inside the union and 0 outside it.
 check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> (wrong: int) {
-	ca, cb, co: cv.Contours
-	defer cv.contours_destroy(&ca)
-	defer cv.contours_destroy(&cb)
-	defer cv.contours_destroy(&co)
-	vg.contours_append_path(&ca, a)
-	vg.contours_append_path(&cb, b)
-	// Each face's contours: the contours its verbs hold, in order.
-	firsts := make([dynamic][2]int)
-	defer delete(firsts)
-	for f in faces {
-		face: vg.Path
-		defer vg.path_destroy(&face)
-		at := 0
-		for v, i in out.verbs {
-			n := vg.verb_num_coords(v)
-			if u32(i) >= f.start && u32(i) < f.start + f.count {
-				vg.path_append(&face, {v}, out.coords[at:][:n])
-			}
-			at += n
-		}
-		first := len(co.contours)
-		vg.contours_append_path(&co, &face)
-		append(&firsts, [2]int{first, len(co.contours) - first})
-	}
 	stack: [dynamic][2]f64
 	defer delete(stack)
 	N :: 40
@@ -286,17 +255,17 @@ check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> 
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
-			wa, ona := winding(&ca, q, near, &stack)
-			wb, onb := winding(&cb, q, near, &stack)
-			_, ono := winding(&co, q, near, &stack)
+			wa, ona := winding(a, q, near, &stack)
+			wb, onb := winding(b, q, near, &stack)
+			_, ono := winding(out, q, near, &stack)
 			if ona || onb || ono {
 				continue
 			}
-			// In exactly one face when inside either operand, and that face
-			// says which.
+			// In exactly one face (a range of out's contours) when inside
+			// either operand, and that face says which.
 			holding := 0
-			for fr, fi in firsts {
-				if w, _ := cv.contours_winding(&co, fr[0], fr[1], q, &stack); w != 0 {
+			for f, fi in faces {
+				if w, _ := cv.contours_winding(out, int(f.start), int(f.count), q, &stack); w != 0 {
 					holding += 1
 					wrong += int(inside[2 * fi] != (wa != 0) || inside[2 * fi + 1] != (wb != 0))
 				}
@@ -311,32 +280,5 @@ check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> 
 // The winding about q, with `on` when q lies within `near` of an outline:
 // a sample that close is skipped (the result may round or merge there).
 winding :: proc(c: ^cv.Contours, q: [2]f64, near: f64, stack: ^[dynamic][2]f64) -> (w: i32, on: bool) {
-	f :: proc(v: [2]f32) -> [2]f64 {return {f64(v.x), f64(v.y)}}
-	for ct in c.contours {
-		pts := c.pts[ct.start:][:3 * ct.segs + 1]
-		// Its segments, then the line closing it when it is open.
-		l, s := pts[len(pts) - 1], pts[0]
-		for i in 0 ..= ct.segs {
-			g: [4][2]f64
-			if i < ct.segs {
-				g = {f(pts[3 * i]), f(pts[3 * i + 1]), f(pts[3 * i + 2]), f(pts[3 * i + 3])}
-			} else if l != s {
-				g = {f(l), f(l + (s - l) / 3), f(l + (s - l) * (2.0 / 3)), f(s)}
-			} else {
-				break
-			}
-			lo, hi := cv.box_of(g)
-			if q.x < lo.x - near || q.x > hi.x + near || q.y < lo.y - near || q.y > hi.y + near {
-				cw, _ := cv.curve_winding(g, q, 0, stack)
-				w += cw
-				continue
-			}
-			// Close to its box: on when a cell of it no wider than near
-			// still holds q.
-			cw, con := cv.curve_winding(g, q, near, stack)
-			w += cw
-			on ||= con
-		}
-	}
-	return
+	return cv.contours_winding(c, 0, len(c.contours), q, stack, near)
 }

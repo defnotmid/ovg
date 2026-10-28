@@ -7,109 +7,144 @@ import cv "deps:ocurves"
 // Cubic bezier handle length (relative to radius) for a 90 degree arc.
 KAPPA90 :: 0.5522848
 
+// Points closer than this merge in `path_arc_to`.
 DEFAULT_DIST_TOL :: 0.01
 
-Verb :: enum u8 {
-	Move_To,
-	Line_To,
-	Bezier_To,
-	Solid,
-	Hole,
-	Close,
-}
-
-verb_num_coords :: proc "contextless" (v: Verb) -> int {
-	switch v {
-	case .Move_To, .Line_To:
-		return 1
-	case .Bezier_To:
-		return 3
-	case .Solid, .Hole, .Close:
-		return 0
-	}
-	return 0
-}
-
-// A vector path: verbs plus their coordinates, read-only while drawn (one
-// path can be drawn by several canvases at once). Reuse a `Path` across
-// frames (`path_reset`) to keep its buffers. Uses the context allocator
-// current at the first append.
-Path :: struct {
-	verbs:    [dynamic]Verb,
-	coords:   [dynamic]Vec2,
-	last_pos: Vec2,
-	// Tolerance for merging points in `path_arc_to`; 0 means the default.
-	dist_tol: f32,
-}
+// A vector path: its contours of lines and cubics in one table, ocurves'
+// Contours (every contour's points, each segment's kind, a row per
+// contour), so the booleans, hit tests, shapes and strokes read it as it
+// is. The path_* calls keep it the way a fill reads it: drawing before the
+// first move goes nowhere; a move starts a contour (one left without
+// segments draws nothing, or a stroke's caps when closed); a quadratic is
+// the cubic it is; a close draws the line back to the start when the pen
+// isn't there and ends the contour; drawing after a close starts a contour
+// where the closed one started; `path_solidity` winds the current contour
+// as it stands. The pen is the last point. Read-only while drawn (one path
+// can be drawn by several canvases at once). Reuse a `Path` across frames
+// (`path_reset`) to keep its buffers. Uses the context allocator current
+// at the first append.
+Path :: cv.Contours
 
 // A path allocating from `allocator`.
 path_init :: proc(p: ^Path, allocator := context.allocator) {
-	p^ = {}
-	p.verbs.allocator, p.coords.allocator = allocator, allocator
+	cv.contours_init(p, allocator)
 }
 
 path_destroy :: proc(p: ^Path) {
-	delete(p.verbs)
-	delete(p.coords)
-	p^ = {}
+	cv.contours_destroy(p)
 }
 
 // Clears the path but keeps its allocations.
 path_reset :: proc(p: ^Path) {
-	clear(&p.verbs)
-	clear(&p.coords)
-	p.last_pos = {}
+	cv.contours_clear(p)
 }
 
 path_is_empty :: proc "contextless" (p: ^Path) -> bool {
-	return len(p.verbs) == 0
+	return len(p.contours) == 0
 }
 
-// Appends verbs and their coordinates (`verb_num_coords` each), e.g. path
-// data parsed once and drawn many times.
-path_append :: proc(p: ^Path, verbs: []Verb, coords: []Vec2) {
-	if len(coords) != 0 {
-		p.last_pos = coords[len(coords) - 1]
+// Where the next segment starts: the last point (the origin before any).
+path_pen :: proc "contextless" (p: ^Path) -> Vec2 {
+	return p.pts[len(p.pts) - 1] if len(p.pts) > 0 else {}
+}
+
+// Appends `src` under `t`.
+path_append :: proc(p: ^Path, src: ^Path, t := TRANSFORM_IDENTITY) {
+	path_append_contours(p, src, 0, len(src.contours), t)
+}
+
+// Appends contours [first, first + count) of `c` (a path's, or any contour
+// table's) under `t`.
+path_append_contours :: proc(p: ^Path, c: ^cv.Contours, first, count: int, t := TRANSFORM_IDENTITY) {
+	at := len(p.pts)
+	cv.contours_append(p, c, first, count)
+	if t != TRANSFORM_IDENTITY {
+		for &q in p.pts[at:] {
+			q = transform_point(t, q.x, q.y)
+		}
 	}
-	append(&p.verbs, ..verbs)
-	append(&p.coords, ..coords)
+}
+
+// Keeps the first `n` contours.
+path_truncate :: proc(p: ^Path, n: int) {
+	if n >= len(p.contours) {
+		return
+	}
+	ct := p.contours[n]
+	resize(&p.pts, int(ct.start))
+	resize(&p.kinds, int(ct.seg))
+	resize(&p.contours, n)
 }
 
 path_move_to :: proc(p: ^Path, x, y: f32) {
-	path_append(p, {.Move_To}, {{x, y}})
+	cv.contours_begin(p, {x, y})
+}
+
+// Whether a segment can be drawn: the current contour takes it, or after a
+// close a new one where the closed one started; not before the first move.
+@(private = "file")
+pen_down :: proc(p: ^Path) -> bool {
+	n := len(p.contours)
+	if n == 0 {
+		return false
+	}
+	if ct := p.contours[n - 1]; ct.closed {
+		cv.contours_begin(p, p.pts[ct.start])
+	}
+	return true
 }
 
 path_line_to :: proc(p: ^Path, x, y: f32) {
-	path_append(p, {.Line_To}, {{x, y}})
+	if pen_down(p) {
+		cv.contours_line(p, {x, y})
+	}
 }
 
 path_bezier_to :: proc(p: ^Path, c1x, c1y, c2x, c2y, x, y: f32) {
-	path_append(p, {.Bezier_To}, {{c1x, c1y}, {c2x, c2y}, {x, y}})
+	if pen_down(p) {
+		cv.contours_cubic(p, {c1x, c1y}, {c2x, c2y}, {x, y})
+	}
 }
 
 path_quad_to :: proc(p: ^Path, cx, cy, x, y: f32) {
-	q := cv.cubic_from_quad(p.last_pos, Vec2{cx, cy}, Vec2{x, y})
-	path_append(p, {.Bezier_To}, {q[1], q[2], q[3]})
+	if pen_down(p) {
+		cv.contours_quad(p, {cx, cy}, {x, y})
+	}
 }
 
+// Ends the current contour closed, with the line back to its start when
+// the pen isn't there.
 path_close :: proc(p: ^Path) {
-	path_append(p, {.Close}, {})
+	n := len(p.contours)
+	if n == 0 || p.contours[n - 1].closed {
+		return
+	}
+	if s := p.pts[p.contours[n - 1].start]; path_pen(p) != s {
+		cv.contours_line(p, s)
+	}
+	cv.contours_end(p, true, false)
 }
 
-// Forces the winding of the current contour: `.Solid` contours fill, `.Hole`
-// contours cut out of solid ones under the non-zero rule.
+// Winds the current contour: `.Solid` contours fill, `.Hole` contours cut
+// out of solid ones under the non-zero rule. It is reversed when its area
+// (closed by a line) has the other sign; an open one goes on from its new
+// end.
 path_solidity :: proc(p: ^Path, s: Solidity) {
-	switch s {
-	case .Solid:
-		path_append(p, {.Solid}, {})
-	case .Hole:
-		path_append(p, {.Hole}, {})
-	case .None:
+	n := len(p.contours)
+	if n == 0 || s == .None {
+		return
+	}
+	if a := cv.contours_area(p, n - 1); (s == .Solid && a < 0) || (s == .Hole && a > 0) {
+		cv.contours_reverse(p, n - 1)
 	}
 }
 
 path_rect :: proc(p: ^Path, x, y, w, h: f32) {
-	path_append(p, {.Move_To, .Line_To, .Line_To, .Line_To, .Close}, {{x, y}, {x, y + h}, {x + w, y + h}, {x + w, y}})
+	path_move_to(p, x, y)
+	path_line_to(p, x, y + h)
+	path_line_to(p, x + w, y + h)
+	path_line_to(p, x + w, y)
+	path_close(p)
 }
 
 path_rounded_rect :: proc(p: ^Path, x, y, w, h, r: f32) {
@@ -130,29 +165,16 @@ path_rounded_rect_varying :: proc(p: ^Path, x, y, w, h, rad_tl, rad_tr, rad_br, 
 	rx_tr, ry_tr := min(rad_tr, halfw) * sw, min(rad_tr, halfh) * sh
 	rx_tl, ry_tl := min(rad_tl, halfw) * sw, min(rad_tl, halfh) * sh
 	K :: 1 - KAPPA90
-	path_append(
-		p,
-		{.Move_To, .Line_To, .Bezier_To, .Line_To, .Bezier_To, .Line_To, .Bezier_To, .Line_To, .Bezier_To, .Close},
-		{
-			{x, y + ry_tl},
-			{x, y + h - ry_bl},
-			{x, y + h - ry_bl * K},
-			{x + rx_bl * K, y + h},
-			{x + rx_bl, y + h},
-			{x + w - rx_br, y + h},
-			{x + w - rx_br * K, y + h},
-			{x + w, y + h - ry_br * K},
-			{x + w, y + h - ry_br},
-			{x + w, y + ry_tr},
-			{x + w, y + ry_tr * K},
-			{x + w - rx_tr * K, y},
-			{x + w - rx_tr, y},
-			{x + rx_tl, y},
-			{x + rx_tl * K, y},
-			{x, y + ry_tl * K},
-			{x, y + ry_tl},
-		},
-	)
+	path_move_to(p, x, y + ry_tl)
+	path_line_to(p, x, y + h - ry_bl)
+	path_bezier_to(p, x, y + h - ry_bl * K, x + rx_bl * K, y + h, x + rx_bl, y + h)
+	path_line_to(p, x + w - rx_br, y + h)
+	path_bezier_to(p, x + w - rx_br * K, y + h, x + w, y + h - ry_br * K, x + w, y + h - ry_br)
+	path_line_to(p, x + w, y + ry_tr)
+	path_bezier_to(p, x + w, y + ry_tr * K, x + w - rx_tr * K, y, x + w - rx_tr, y)
+	path_line_to(p, x + rx_tl, y)
+	path_bezier_to(p, x + rx_tl * K, y, x, y + ry_tl * K, x, y + ry_tl)
+	path_close(p)
 }
 
 path_ellipse :: proc(p: ^Path, cx, cy, rx, ry: f32) {
@@ -160,25 +182,26 @@ path_ellipse :: proc(p: ^Path, cx, cy, rx, ry: f32) {
 	h := Vec2{rx, 0}
 	v := Vec2{0, ry}
 	K :: KAPPA90
-	path_append(
-		p,
-		{.Move_To, .Bezier_To, .Bezier_To, .Bezier_To, .Bezier_To, .Close},
-		{
-			c - h,
-			c - h + v * K,
-			c - h * K + v,
-			c + v,
-			c + h * K + v,
-			c + h + v * K,
-			c + h,
-			c + h - v * K,
-			c + h * K - v,
-			c - v,
-			c - h * K - v,
-			c - h - v * K,
-			c - h,
-		},
-	)
+	q := [13]Vec2 {
+		c - h,
+		c - h + v * K,
+		c - h * K + v,
+		c + v,
+		c + h * K + v,
+		c + h + v * K,
+		c + h,
+		c + h - v * K,
+		c + h * K - v,
+		c - v,
+		c - h * K - v,
+		c - h - v * K,
+		c - h,
+	}
+	path_move_to(p, q[0].x, q[0].y)
+	for i := 1; i < 13; i += 3 {
+		path_bezier_to(p, q[i].x, q[i].y, q[i + 1].x, q[i + 1].y, q[i + 2].x, q[i + 2].y)
+	}
+	path_close(p)
 }
 
 path_circle :: proc(p: ^Path, cx, cy, r: f32) {
@@ -214,9 +237,6 @@ path_arc :: proc(p: ^Path, cx, cy, r, a0, a1: f32, dir: Solidity) {
 		kappa = -kappa
 	}
 
-	verbs: [6]Verb
-	coords: [16]Vec2
-	nv, nc := 0, 0
 	ppos, ptan: Vec2
 	for i in 0 ..= ndivs {
 		a := a0 + da * (f32(i) / f32(ndivs))
@@ -224,31 +244,27 @@ path_arc :: proc(p: ^Path, cx, cy, r, a0, a1: f32, dir: Solidity) {
 		pos := c + dpos * r
 		tan := -orthogonal(dpos) * (r * kappa)
 		if i == 0 {
-			verbs[nv] = .Move_To if len(p.verbs) == 0 else .Line_To
-			coords[nc] = pos
-			nv += 1
-			nc += 1
+			if path_is_empty(p) {
+				path_move_to(p, pos.x, pos.y)
+			} else {
+				path_line_to(p, pos.x, pos.y)
+			}
 		} else {
-			verbs[nv] = .Bezier_To
-			coords[nc] = ppos + ptan
-			coords[nc + 1] = pos - tan
-			coords[nc + 2] = pos
-			nv += 1
-			nc += 3
+			c1, c2 := ppos + ptan, pos - tan
+			path_bezier_to(p, c1.x, c1.y, c2.x, c2.y, pos.x, pos.y)
 		}
 		ppos = pos
 		ptan = tan
 	}
-	path_append(p, verbs[:nv], coords[:nc])
 }
 
 // Arc tangent to the lines (last point -> (x1, y1)) and ((x1, y1) -> (x2, y2)).
 path_arc_to :: proc(p: ^Path, x1, y1, x2, y2, radius: f32) {
-	if len(p.verbs) == 0 {
+	if path_is_empty(p) {
 		return
 	}
-	tol := p.dist_tol if p.dist_tol > 0 else DEFAULT_DIST_TOL
-	pos0 := p.last_pos
+	tol :: DEFAULT_DIST_TOL
+	pos0 := path_pen(p)
 	pos1 := Vec2{x1, y1}
 	pos2 := Vec2{x2, y2}
 	if points_equal(pos0, pos1, tol) ||
@@ -287,85 +303,28 @@ path_arc_to :: proc(p: ^Path, x1, y1, x2, y2, radius: f32) {
 	path_arc(p, c.x, c.y, radius, a0 + math.PI / 2, a1 + math.PI / 2, dir)
 }
 
-
-// A path's drawing as events, normalized the way fill reads it: drawing
-// before the first Move_To is skipped; Move_To begins a contour; a line or
-// cubic carries the pen as p[0]; Close draws the closing line from the pen
-// to the contour's start (of zero length too) and ends the contour; a
-// drawing verb after Close begins a new contour at that start first; Solid
-// and Hole come in verb order. Line and Close run from p[0] to p[1].
-Path_Event_Kind :: enum u8 {
-	Begin,
-	Line,
-	Cubic,
-	Close,
-	Solid,
-	Hole,
-}
-
-Path_Event :: struct {
-	kind: Path_Event_Kind,
-	p:    [4]Vec2,
-	verb: u32, // the verb it comes from
-}
-
-Path_Events :: struct {
-	verbs:       []Verb,
-	coords:      []Vec2,
-	verb, coord: int,
-	pen, start:  Vec2,
-	moved, open: bool,
-}
-
-// The path must not grow while its events are read.
-path_events :: proc "contextless" (p: ^Path) -> Path_Events {
-	return {verbs = p.verbs[:], coords = p.coords[:]}
-}
-
-// `path_events` of path data held as verbs and coordinates.
-path_events_of :: proc "contextless" (verbs: []Verb, coords: []Vec2) -> Path_Events {
-	return {verbs = verbs, coords = coords}
-}
-
-path_events_next :: proc "contextless" (it: ^Path_Events) -> (e: Path_Event, ok: bool) {
-	for it.verb < len(it.verbs) {
-		v := it.verbs[it.verb]
-		c := it.coords[it.coord:][:verb_num_coords(v)]
-		e.verb = u32(it.verb)
-		if (v == .Line_To || v == .Bezier_To) && !it.open {
-			if !it.moved {
-				it.verb, it.coord = it.verb + 1, it.coord + len(c)
-				continue
+// The exact bounds of what contours [first, first + count) of `p` draw
+// under `t`: each segment's ends and turning points (a contour without
+// segments draws nothing); EMPTY_BOUNDS when nothing does.
+path_contours_bounds :: proc(p: ^Path, first, count: int, t := TRANSFORM_IDENTITY) -> Bounds {
+	b := Bounds{max(f32), max(f32), -max(f32), -max(f32)}
+	for ci in first ..< first + count {
+		it := cv.contour_segments(p, ci)
+		for sg in cv.segments_next(&it) {
+			s := sg.p
+			lo, hi: Vec2
+			if sg.kind == .Line {
+				a, z := transform_point(t, s[0].x, s[0].y), transform_point(t, s[3].x, s[3].y)
+				lo, hi = {min(a.x, z.x), min(a.y, z.y)}, {max(a.x, z.x), max(a.y, z.y)}
+			} else {
+				q: [4]Vec2
+				for k in 0 ..< 4 {
+					q[k] = transform_point(t, s[k].x, s[k].y)
+				}
+				lo, hi = cv.cubic_bounds(q)
 			}
-			// Drawing after Close: a new contour from the last start (the
-			// verb is read again next call).
-			it.open, it.pen = true, it.start
-			e.kind, e.p[0] = .Begin, it.start
-			return e, true
+			b = {min(b.minx, lo.x), min(b.miny, lo.y), max(b.maxx, hi.x), max(b.maxy, hi.y)}
 		}
-		it.verb, it.coord = it.verb + 1, it.coord + len(c)
-		switch v {
-		case .Move_To:
-			it.pen, it.start, it.moved, it.open = c[0], c[0], true, true
-			e.kind, e.p[0] = .Begin, c[0]
-		case .Line_To:
-			e.kind, e.p[0], e.p[1] = .Line, it.pen, c[0]
-			it.pen = c[0]
-		case .Bezier_To:
-			e.kind, e.p = .Cubic, {it.pen, c[0], c[1], c[2]}
-			it.pen = c[2]
-		case .Close:
-			if !it.open {
-				continue
-			}
-			e.kind, e.p[0], e.p[1] = .Close, it.pen, it.start
-			it.pen, it.open = it.start, false
-		case .Solid:
-			e.kind = .Solid
-		case .Hole:
-			e.kind = .Hole
-		}
-		return e, true
 	}
-	return
+	return b if b.minx <= b.maxx else EMPTY_BOUNDS
 }

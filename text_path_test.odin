@@ -83,7 +83,7 @@ test_text_on_path :: proc(t: ^testing.T) {
 	path_init(&out)
 	defer path_destroy(&out)
 	text_layout_path(&l, &out)
-	box := path_device_bounds(nil, &out, TRANSFORM_IDENTITY)
+	box := path_contours_bounds(&out, 0, len(out.contours))
 	testing.expect(t, box.miny >= 50 - 1e-3 && box.maxy > 60)
 }
 

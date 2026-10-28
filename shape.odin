@@ -69,36 +69,27 @@ shape_solidity :: proc(b: ^Shape_Builder, s: Solidity) {
 
 // Adds a path's contours under `t`. Every contour is closed, as filling
 // does (with `b.outline`, one the path leaves open stays open in the
-// outline); segments before the first move go nowhere, and a segment after
-// a close starts a contour where the closed one started.
+// outline).
 shape_add_path :: proc(b: ^Shape_Builder, p: ^Path, t := TRANSFORM_IDENTITY) {
 	at :: proc(t: Transform2D, p: Vec2) -> Vec2 {
 		return transform_point(t, p.x, p.y)
 	}
-	it := path_events(p)
-	for e in path_events_next(&it) {
-		switch e.kind {
-		case .Begin:
-			if b.outline {
-				cv.end_open(b)
+	for ct, ci in p.contours {
+		shape_move_to(b, at(t, p.pts[ct.start]))
+		it := cv.contour_segments(p, ci)
+		for s in cv.segments_next(&it) {
+			if s.kind == .Line {
+				shape_line_to(b, at(t, s.p[3]))
+			} else {
+				shape_cubic_to(b, at(t, s.p[1]), at(t, s.p[2]), at(t, s.p[3]))
 			}
-			shape_move_to(b, at(t, e.p[0]))
-		case .Line:
-			shape_line_to(b, at(t, e.p[1]))
-		case .Cubic:
-			shape_cubic_to(b, at(t, e.p[1]), at(t, e.p[2]), at(t, e.p[3]))
-		case .Close:
+		}
+		if ct.closed || !b.outline {
 			shape_close(b)
-		case .Solid:
-			shape_solidity(b, .Solid)
-		case .Hole:
-			shape_solidity(b, .Hole)
+		} else {
+			cv.end_open(b)
 		}
 	}
-	if b.outline {
-		cv.end_open(b)
-	}
-	shape_close(b)
 }
 
 // Adds a glyph's outline in font units, y down (the pen at the origin),
@@ -148,8 +139,8 @@ Shape_Scratch :: struct {
 	dashed:  Path,
 	flat:    Flat_Path,
 	dots:    Path,
-	// Hit tests: the path as contours, and the winding's cells.
-	hit:     cv.Contours,
+	// Hit tests: the path under the transform, and the winding's cells.
+	hit:     Path,
 	stack:   [dynamic][2]f64,
 }
 
@@ -209,7 +200,7 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 	shape_builder_reset(&sc.builder)
 	sc.builder.tol = 0
 	lo, hi := Vec2{max(f32), max(f32)}, Vec2{min(f32), min(f32)}
-	for q in p.coords {
+	for q in p.pts {
 		lo, hi = {min(lo.x, q.x), min(lo.y, q.y)}, {max(hi.x, q.x), max(hi.y, q.y)}
 	}
 	tol := tol

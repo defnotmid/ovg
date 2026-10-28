@@ -323,8 +323,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 		}
 		clip := &ls.clips[depth]
 		path_reset(clip)
-		append(&clip.verbs, ..params.clip_path.verbs[:])
-		append(&clip.coords, ..params.clip_path.coords[:])
+		path_append(clip, params.clip_path)
 		f.has_clip = true
 		f.clip_rule = params.clip_rule
 		f.clip_xform = t
@@ -499,7 +498,7 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	}
 	if f.has_clip {
 		// Plus the clip's antialiased edge.
-		clip := path_device_bounds(c, &ls.clips[depth], f.clip_xform)
+		clip := path_contours_bounds(&ls.clips[depth], 0, len(ls.clips[depth].contours), f.clip_xform)
 		area = bounds_intersect(area, bounds_grow(clip, reach + 2))
 	}
 	if f.masked && !f.mask_invert {
@@ -764,7 +763,7 @@ layer_backdrop_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Path, sigma: f32) 
 	s := sigma * transform_average_scale(t)
 	// The target's pixels the blur reads: the path's, grown by its reach.
 	reach := blur_reach({s, s}, LAYER_MAX_EXACT_SIGMA)
-	b := path_device_bounds(c, p, t)
+	b := path_contours_bounds(p, 0, len(p.contours), t)
 	ox, oy := f32(top.origin.x), f32(top.origin.y)
 	x0 := max(math.floor(b.minx - reach.x), ox)
 	y0 := max(math.floor(b.miny - reach.y), oy)
@@ -790,10 +789,7 @@ layer_backdrop_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Path, sigma: f32) 
 	save(c)
 	reset_transform(c)
 	path_reset(&ls.scratch)
-	append(&ls.scratch.verbs, ..p.verbs[:])
-	for q in p.coords {
-		append(&ls.scratch.coords, transform_point(t, q.x, q.y))
-	}
+	path_append(&ls.scratch, p, t)
 	fill_path(c, &ls.scratch, paint_image(blurred, x0, y0, f32(w), f32(h), 0, 1))
 	restore(c)
 	layer_release(ls, blurred)

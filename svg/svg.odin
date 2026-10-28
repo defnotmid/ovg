@@ -10,7 +10,6 @@ import "core:slice"
 import "core:strings"
 
 import vg ".."
-import cv "deps:ocurves"
 
 // SVG import: `parse` turns SVG markup into a `Document`, a
 // render-ready, data-oriented copy (like usvg's tree): a `<use>` draws
@@ -125,9 +124,8 @@ Style :: struct {
 }
 
 Shape :: struct {
-	// Into `Document.verbs` / `coords`.
-	verbs:       vg.Range,
-	coords:      vg.Range,
+	// Into `Document.geometry`: its contours.
+	contours:    vg.Range,
 	style:       Style,
 	// SVG pathLength (dash units), 0 for none.
 	path_length: f32,
@@ -177,9 +175,10 @@ Text_Chunk :: struct {
 	path_start: bool,
 }
 
-// A textPath's path, in the text's user space (into `verbs` and `coords`).
+// A textPath's path, in the text's user space (its contours in
+// `geometry`).
 Text_Path :: struct {
-	verbs, coords: vg.Range,
+	contours:      vg.Range,
 	start:         f32,
 	side:          vg.Text_Path_Side,
 }
@@ -318,8 +317,8 @@ Document :: struct {
 	filter_values: [dynamic]f32,
 	// feImage bitmaps (into `bitmaps`).
 	filter_bitmaps: [dynamic]i32,
-	verbs:         [dynamic]vg.Verb,
-	coords:        [dynamic]vg.Vec2,
+	// Every shape's and textPath's contours.
+	geometry:      vg.Path,
 	dashes:        [dynamic]f32,
 	// Element ids; `id_map` finds them.
 	ids:           [dynamic]string,
@@ -404,8 +403,7 @@ destroy :: proc(doc: ^Document) {
 	delete(doc.filter_subs)
 	delete(doc.filter_values)
 	delete(doc.filter_bitmaps)
-	delete(doc.verbs)
-	delete(doc.coords)
+	vg.path_destroy(&doc.geometry)
 	delete(doc.dashes)
 	delete(doc.ids)
 	delete(doc.attributes)
@@ -2262,7 +2260,7 @@ convert_shape :: proc(p: ^Parser, el: u32, tag: string, st: ^Computed, parent: i
 			vg.path_close(path)
 		}
 	}
-	if len(path.verbs) == 0 || len(path.coords) == 0 {
+	if vg.path_is_empty(path) {
 		return
 	}
 	doc := p.doc
@@ -2272,9 +2270,8 @@ convert_shape :: proc(p: ^Parser, el: u32, tag: string, st: ^Computed, parent: i
 	// Into the document before the effects: converting a referenced clip
 	// path reuses the scratch path.
 	shape := Shape {
-		verbs  = {u32(len(doc.verbs)), u32(len(path.verbs))},
-		coords = {u32(len(doc.coords)), u32(len(path.coords))},
-		style  = shape_style(p, st),
+		contours = {u32(len(doc.geometry.contours)), u32(len(path.contours))},
+		style    = shape_style(p, st),
 	}
 	if pl, ok := attr(e, "pathLength"); ok {
 		if v, vok := parse_number(pl); vok && v > 0 {
@@ -2285,7 +2282,10 @@ convert_shape :: proc(p: ^Parser, el: u32, tag: string, st: ^Computed, parent: i
 		// No area to fill.
 		shape.style.fill = {}
 	}
-	bbox := path_bbox(path.verbs[:], path.coords[:])
+	bbox := EMPTY_BOX
+	if b := vg.path_contours_bounds(path, 0, len(path.contours)); b != vg.EMPTY_BOUNDS {
+		bbox = {b.minx, b.miny, b.maxx - b.minx, b.maxy - b.miny}
+	}
 	// Built once, drawn at any scale.
 	shape.fill, _ = vg.shape_from_path(path, doc.allocator, false, &p.scratch)
 	if s := &shape.style; s.stroke_width > 0 && s.stroke.kind != .None {
@@ -2297,8 +2297,7 @@ convert_shape :: proc(p: ^Parser, el: u32, tag: string, st: ^Computed, parent: i
 			p.budget.hit += {.Dash_Segments}
 		}
 	}
-	append(&doc.verbs, ..path.verbs[:])
-	append(&doc.coords, ..path.coords[:])
+	vg.path_append(&doc.geometry, path)
 	n := new_node(p, .Shape, parent)
 	doc.nodes[n].transform = element_transform(p, e, st)
 	doc.nodes[n].data = i32(len(doc.shapes))
@@ -2367,46 +2366,6 @@ shape_style :: proc(p: ^Parser, st: ^Computed) -> Style {
 		s.stroke = {}
 	}
 	return s
-}
-
-// The exact bounds of path data (curve extrema, not control points).
-@(private)
-path_bbox :: proc(verbs: []vg.Verb, coords: []vg.Vec2) -> vg.Rect {
-	lo := vg.Vec2{1e30, 1e30}
-	hi := vg.Vec2{-1e30, -1e30}
-	add :: #force_inline proc "contextless" (lo, hi: ^vg.Vec2, q: vg.Vec2) {
-		lo^ = {min(lo.x, q.x), min(lo.y, q.y)}
-		hi^ = {max(hi.x, q.x), max(hi.y, q.y)}
-	}
-	// Drawing before the first Move_To draws nothing (as fill skips it).
-	ci := 0
-	cur: vg.Vec2
-	moved := false
-	for v in verbs {
-		switch v {
-		case .Move_To, .Line_To:
-			cur = coords[ci]
-			moved ||= v == .Move_To
-			if moved {
-				add(&lo, &hi, cur)
-			}
-			ci += 1
-		case .Bezier_To:
-			to := coords[ci + 2]
-			if moved {
-				blo, bhi := cv.cubic_bounds([4]vg.Vec2{cur, coords[ci], coords[ci + 1], to})
-				add(&lo, &hi, blo)
-				add(&lo, &hi, bhi)
-			}
-			cur = to
-			ci += 3
-		case .Close, .Solid, .Hole:
-		}
-	}
-	if lo.x > hi.x {
-		return EMPTY_BOX
-	}
-	return {lo.x, lo.y, hi.x - lo.x, hi.y - lo.y}
 }
 
 @(private)
@@ -2845,17 +2804,13 @@ text_path :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed) -> i32 {
 		vg.path_svg(path, d)
 		t = element_transform(p, pe, st)
 	}
-	if len(path.verbs) == 0 {
+	if vg.path_is_empty(path) {
 		return -1
 	}
 	tp := Text_Path {
-		verbs  = {u32(len(doc.verbs)), u32(len(path.verbs))},
-		coords = {u32(len(doc.coords)), u32(len(path.coords))},
+		contours = {u32(len(doc.geometry.contours)), u32(len(path.contours))},
 	}
-	append(&doc.verbs, ..path.verbs[:])
-	for q in path.coords {
-		append(&doc.coords, vg.transform_point(t, q.x, q.y))
-	}
+	vg.path_append(&doc.geometry, path, t)
 	if side, ok := attr(e, "side"); ok && strings.trim_space(side) == "right" {
 		tp.side = .Right
 	}
@@ -2865,7 +2820,7 @@ text_path :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed) -> i32 {
 			if l.unit == .Percent {
 				flat: vg.Flat_Path
 				vg.flat_path_init(&flat, p.tmp)
-				vg.path_flatten_verbs(doc.verbs[tp.verbs.start:][:tp.verbs.count], doc.coords[tp.coords.start:][:tp.coords.count], &flat)
+				vg.path_flatten_contours(&doc.geometry, int(tp.contours.start), int(tp.contours.count), &flat)
 				length = vg.flat_path_length(&flat)
 			}
 			tp.start = length_px(l, length, st.font_size)
@@ -3120,7 +3075,7 @@ layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk
 	tpd := &doc.text_paths[ch.path]
 	// Segments in proportion to the text, so it sits alike at any scale.
 	segment := doc.pieces[ch.pieces.start].size / 48
-	vg.text_path_set_verbs(tp, doc.verbs[tpd.verbs.start:][:tpd.verbs.count], doc.coords[tpd.coords.start:][:tpd.coords.count], segment)
+	vg.text_path_set_contours(tp, &doc.geometry, int(tpd.contours.start), int(tpd.contours.count), segment)
 	// x = 0 at the anchor, `x` along the path.
 	for &g in l.glyphs {
 		g.x -= x

@@ -60,7 +60,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.3), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.10), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.4), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -69,7 +69,7 @@ dependencies are Odin's own `vendor` packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.10 https://github.com/defnotmid/oglyph
-git clone -b v0.0.3 https://github.com/defnotmid/ocurves
+git clone -b v0.0.4 https://github.com/defnotmid/ocurves
 git clone -b v0.0.8 https://github.com/defnotmid/odecs
 ```
 
@@ -275,13 +275,14 @@ region (the whole canvas). A primitive's `subregion` cuts its own result.
 `path_simplify` resolves one path's overlaps and self-crossings under its
 fill rule, `path_boolean_many` folds any number of operands, and
 `path_divide` splits the operands into every region they make
-(Illustrator's divide: one Path, each face's verbs a `Range` of it, the
+(Illustrator's divide: one Path, each face a `Range` of its contours, the
 shapes nested in a face as its holes, and which operands each face lies
 inside in `Bool_Scratch.core.faces_in`). The
 result keeps the operands' own curves: each output segment is a range of
 an input line or cubic (a whole one copied bit for bit), cut where the
-operands meet, and `Bool_Scratch` records where each came from (the verb
-of its operand path and the t range on it) so an editor keeps its anchors.
+operands meet, and `Bool_Scratch` records where each came from (the
+segment of its operand path and the t range on it) so an editor keeps its
+anchors.
 Output contours are Solid-wound with holes reversed and never cross, so
 either fill rule fills the result alike; each is one boundary, appended
 region by region (the parts of the result joined across curves, each its
@@ -303,12 +304,11 @@ together) `out` is unchanged.
   per operand propagated from each component's outer face; the edges
   between kept and dropped faces are traced into contours. Shapes closer
   than eps fuse; points farther from every outline are classified exactly.
-- **Shared data**: the operands become a `cv.Contours` table (the flat line
-  and cubic contours the Lottie renderer also draws from;
-  `contours_append_path` / `path_append_contours` convert Paths, the six
-  rules of how fill reads a path written once in `path_events`), and every
-  cubic evaluation, sub-range, extremum, bound and area comes from
-  ocurves' cubic.odin, as fills, strokes, dashes and flattening do.
+- **Shared data**: a Path is ocurves' contour table, so the operands are
+  copied into one table as they are (`path_append`) and the result is one
+  too, and every cubic evaluation, sub-range, extremum, bound and area
+  comes from ocurves' cubic.odin, as fills, strokes, dashes and flattening
+  do.
 - **Checked** by `tools/bool_suite` (random polygons, self-crossing ones
   included, cubic blobs, circles and grid-aligned rects with shared edges
   and corners, tangent circles; every op under both rules, each result's
@@ -378,7 +378,8 @@ for run in layout.runs {
 an `svg.Document`, a render-ready, data-oriented copy in the spirit of usvg:
 flat tables of nodes (parent / first child / next indices, local transform,
 object bounding box, effects by index), shapes (path data stored once in
-shared verb / coordinate arrays, computed style), text chunks and pieces,
+one contour table, `geometry`, each shape a range of it; computed style),
+text chunks and pieces,
 images and decoded bitmaps, paint servers and stops, clip paths, masks,
 filters, dashes, element ids (`id_map`) and a string arena. `svg.layout`
 lays the document's text out with a `Font_Collection` into an `svg.Layout`
@@ -1017,10 +1018,15 @@ every part follows:
   sources were premultiplied twice).
 - `realloc_image` frees the old backend image.
 - Gradient ramps pad past the last stop.
-- Paths are plain data, read-only while drawn: `fill_path` builds the
-  path's shape into the frame. Scratch and frame buffers reuse their
-  allocations;
-  paints never allocate.
+- Paths are plain data, read-only while drawn: a `Path` is ocurves'
+  contour table (every contour's points, each segment's kind, a row per
+  contour), which the `path_*` calls write the way a fill reads it (a
+  close's line back to the start is a segment, drawing after a close
+  starts at the closed contour's start, `path_solidity` winds the contour
+  as it stands), and fills, strokes, dashes, booleans and hit tests walk
+  its rows as they are. `fill_path` builds the path's shape into the frame.
+  Scratch and frame buffers reuse their allocations; paints never
+  allocate.
 
 ## Test
 

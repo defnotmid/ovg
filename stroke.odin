@@ -70,32 +70,26 @@ stroke_outline :: proc(b: ^Shape_Builder, p: ^Path, t: Transform2D, s: Stroke_Se
 	if o.hw <= 0 {
 		return
 	}
-	clear(segs)
-	it := path_events(p)
-	for e in path_events_next(&it) {
-		switch e.kind {
-		case .Begin:
-			outline_contour(&o, segs[:], false)
-			clear(segs)
-		case .Line:
-			add_line(&o, segs, e.p[0], e.p[1], true)
-		case .Cubic:
+	for ct, ci in p.contours {
+		clear(segs)
+		it := cv.contour_segments(p, ci)
+		for s in cv.segments_next(&it) {
+			q := s.p
+			if s.kind == .Line {
+				add_line(&o, segs, q[0], q[3], true)
+				continue
+			}
 			// n quadratics, each the midpoint approximation of its piece.
-			n := cv.cubic_quad_count(e.p, tol)
-			from := e.p[0]
-			for i in 0 ..< n {
-				c, to := cv.cubic_quad(e.p, i, n)
-				add_quad(&o, segs, from, c, to, i == 0)
+			n := cv.cubic_quad_count(q, tol)
+			from := q[0]
+			for k in 0 ..< n {
+				c, to := cv.cubic_quad(q, k, n)
+				add_quad(&o, segs, from, c, to, k == 0)
 				from = to
 			}
-		case .Close:
-			add_line(&o, segs, e.p[0], e.p[1], true)
-			outline_contour(&o, segs[:], true)
-			clear(segs)
-		case .Solid, .Hole:
 		}
+		outline_contour(&o, segs[:], ct.closed)
 	}
-	outline_contour(&o, segs[:], false)
 }
 
 @(private = "file")
@@ -390,13 +384,10 @@ stroke_dots :: proc(p: ^Path, s: Stroke_Settings, tol: f32, dots: ^Path) {
 	path_reset(dots)
 	hw := s.line_width * 0.5
 	caps := [2]Line_Cap{s.line_cap_start, s.line_cap_end}
-	start, last, dir: Vec2
-	length: f32
-	open, has_seg := false, false
 	// The dot is the start cap behind the subpath's direction and the end
 	// cap ahead of it, each its own style.
-	finish :: proc(dots: ^Path, open, has_seg: bool, length, tol: f32, at, dir: Vec2, hw: f32, caps: [2]Line_Cap) {
-		if !open || !has_seg || length > tol {
+	finish :: proc(dots: ^Path, has_seg: bool, length, tol: f32, at, dir: Vec2, hw: f32, caps: [2]Line_Cap) {
+		if !has_seg || length > tol {
 			return
 		}
 		if caps == {.Round, .Round} {
@@ -432,18 +423,14 @@ stroke_dots :: proc(p: ^Path, s: Stroke_Settings, tol: f32, dots: ^Path) {
 		path_close(dots)
 		path_solidity(dots, .Hole)
 	}
-	it := path_events(p)
-	for e in path_events_next(&it) {
-		switch e.kind {
-		case .Begin:
-			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-			start, last = e.p[0], e.p[0]
-			length, dir = 0, {}
-			open, has_seg = true, false
-		case .Line, .Cubic:
-			pts := e.p
-			coords := pts[1:2] if e.kind == .Line else pts[1:4]
-			to := coords[len(coords) - 1]
+	for ct, ci in p.contours {
+		start := p.pts[ct.start]
+		last, dir := start, Vec2{}
+		length: f32
+		it := cv.contour_segments(p, ci)
+		for s in cv.segments_next(&it) {
+			q := s.p
+			coords := q[3:4] if s.kind == .Line else q[1:4]
 			d := coords[0] - last
 			if l := math.hypot(d.x, d.y); l > 0 && dir == {} {
 				dir = d / l
@@ -453,14 +440,8 @@ stroke_dots :: proc(p: ^Path, s: Stroke_Settings, tol: f32, dots: ^Path) {
 				length += math.hypot(e.x, e.y)
 				last = q
 			}
-			last = to
-			has_seg = true
-		case .Close:
-			has_seg = true
-			finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
-			open = false
-		case .Solid, .Hole:
 		}
+		// A closed point draws one too ("M p Z").
+		finish(dots, ct.segs > 0 || ct.closed, length, tol, start, dir, hw, caps)
 	}
-	finish(dots, open, has_seg, length, tol, start, dir, hw, caps)
 }

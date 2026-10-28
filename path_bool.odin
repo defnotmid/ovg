@@ -16,20 +16,19 @@ Bool_Operand :: struct {
 
 // Warm scratch for path booleans, kept by the caller: no allocation once
 // warm. After a call, provenance of the result's segment i (in the order
-// they were appended): it comes from verb `verbs[core.out_row[i]]` of its
-// operand's path (a, then b), over core.out_t[i] of that segment's
-// parameter; out_row max(u32) marks a closing line of an open contour.
+// they were appended): it comes from segment core.out_row[i] of the
+// operands' segments taken in order (a's `kinds`, then b's), over
+// core.out_t[i] of that segment's parameter; out_row max(u32) marks a
+// closing line of an open contour.
 Bool_Scratch :: struct {
 	core:   cv.Bool_Scratch,
-	input:  cv.Contours,
-	verbs:  [dynamic]u32,
+	input:  Path,
 	inputs: [dynamic]cv.Bool_Input,
 }
 
 bool_scratch_destroy :: proc(s: ^Bool_Scratch) {
 	cv.bool_scratch_destroy(&s.core)
-	cv.contours_destroy(&s.input)
-	delete(s.verbs)
+	path_destroy(&s.input)
 	delete(s.inputs)
 }
 
@@ -51,41 +50,38 @@ path_simplify :: proc(out: ^Path, a: Bool_Operand, s: ^Bool_Scratch, max_steps :
 // `op` over any number of operands: union of all, the first minus the
 // rest, the intersection of all, or the parts inside an odd number.
 path_boolean_many :: proc(out: ^Path, operands: []Bool_Operand, op: Bool_Op, s: ^Bool_Scratch, max_steps := DEFAULT_LIMITS[.Boolean_Steps]) -> Bool_Error {
-	cv.contours_clear(&s.input)
-	clear(&s.verbs)
+	bool_inputs(s, operands)
+	budget := max_steps
+	cv.bool_run(&s.core, &s.input, s.inputs[:], op, &budget) or_return
+	path_append(out, &s.core.out)
+	return nil
+}
+
+// The operands as one table, each its contours' range and its rule.
+@(private = "file")
+bool_inputs :: proc(s: ^Bool_Scratch, operands: []Bool_Operand) {
+	path_reset(&s.input)
 	clear(&s.inputs)
 	for o in operands {
 		first := u32(len(s.input.contours))
-		contours_append_path(&s.input, o.path, verbs = &s.verbs)
+		path_append(&s.input, o.path)
 		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule})
 	}
-	budget := max_steps
-	cv.bool_run(&s.core, &s.input, s.inputs[:], op, &budget) or_return
-	path_append_contours(out, &s.core.out, 0, u32(len(s.core.out.contours)))
-	return nil
 }
 
 // Appends every region the operands make (Illustrator's divide): each face
 // inside at least one operand, its outline Solid-wound with the shapes
 // nested directly in it as holes, curves kept; `faces` gets each region's
-// verbs in `out` (start, count), in arrangement order, and region i lies
+// contours in `out` (start, count), in arrangement order, and region i lies
 // inside operand o (under its rule) when s.core.faces_in[i * len(operands)
 // + o]. On an error `out` and `faces` are unchanged.
 path_divide :: proc(out: ^Path, faces: ^[dynamic]Range, operands: []Bool_Operand, s: ^Bool_Scratch, max_steps := DEFAULT_LIMITS[.Boolean_Steps]) -> Bool_Error {
-	cv.contours_clear(&s.input)
-	clear(&s.verbs)
-	clear(&s.inputs)
-	for o in operands {
-		first := u32(len(s.input.contours))
-		contours_append_path(&s.input, o.path, verbs = &s.verbs)
-		append(&s.inputs, cv.Bool_Input{first, u32(len(s.input.contours)) - first, o.rule})
-	}
+	bool_inputs(s, operands)
 	budget := max_steps
 	cv.bool_divide(&s.core, &s.input, s.inputs[:], &budget) or_return
 	for f in s.core.faces {
-		start := u32(len(out.verbs))
-		path_append_contours(out, &s.core.out, f[0], f[1])
-		append(faces, Range{start, u32(len(out.verbs)) - start})
+		append(faces, Range{u32(len(out.contours)), f[1]})
+		path_append_contours(out, &s.core.out, int(f[0]), int(f[1]))
 	}
 	return nil
 }

@@ -42,12 +42,12 @@ text_path_destroy :: proc(tp: ^Text_Path) {
 // Measures `p` for text, curves split into segments of about `segment`
 // units (a glyph turns at each).
 text_path_set :: proc(tp: ^Text_Path, p: ^Path, segment: f32 = 0.5) {
-	text_path_set_verbs(tp, p.verbs[:], p.coords[:], segment)
+	text_path_set_contours(tp, p, 0, len(p.contours), segment)
 }
 
-// `text_path_set` of a path held as its verbs and coordinates.
-text_path_set_verbs :: proc(tp: ^Text_Path, verbs: []Verb, coords: []Vec2, segment: f32 = 0.5) {
-	path_flatten_verbs(verbs, coords, &tp.flat, segment)
+// `text_path_set` of contours [first, first + count) of `p`.
+text_path_set_contours :: proc(tp: ^Text_Path, p: ^Path, first, count: int, segment: f32 = 0.5) {
+	path_flatten_contours(p, first, count, &tp.flat, segment)
 	resize(&tp.along, len(tp.flat.points))
 	d: f32
 	for ct in tp.flat.contours {

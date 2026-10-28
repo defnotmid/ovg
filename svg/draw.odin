@@ -239,9 +239,7 @@ path_node :: proc(w: ^Path_Walk, i: i32, parent: vg.Transform2D) {
 		if .Hidden in n.flags || sh.style.fill.kind == .None {
 			return
 		}
-		c0 := len(w.out.coords)
-		vg.path_append(w.out, doc.verbs[sh.verbs.start:][:sh.verbs.count], doc.coords[sh.coords.start:][:sh.coords.count])
-		path_transform(w.out, c0, t)
+		vg.path_append_contours(w.out, &doc.geometry, int(sh.contours.start), int(sh.contours.count), t)
 		path_rule(w, sh.style.fill_rule)
 	case .Text:
 		if w.text == nil || int(n.data) >= len(w.text.texts) {
@@ -255,7 +253,7 @@ path_node :: proc(w: ^Path_Walk, i: i32, parent: vg.Transform2D) {
 			}
 			font := vg.font_collection_font(w.text.fonts, run.face)
 			for g, k in w.text.glyphs[run.glyphs.start:][:run.glyphs.count] {
-				c0 := len(w.out.coords)
+				c0 := len(w.out.pts)
 				if pc.rotate == 0 && !run.turned {
 					vg.font_glyph_path(font, g.glyph, g.x, g.y, run.em, w.out)
 					path_transform(w.out, c0, t)
@@ -272,17 +270,14 @@ path_node :: proc(w: ^Path_Walk, i: i32, parent: vg.Transform2D) {
 	}
 }
 
-// Maps the coordinates of `p` from index `first` on by `t`.
+// Maps the points of `p` from index `first` on by `t`.
 @(private)
 path_transform :: proc(p: ^vg.Path, first: int, t: vg.Transform2D) {
 	if t == vg.TRANSFORM_IDENTITY {
 		return
 	}
-	for &q in p.coords[first:] {
+	for &q in p.pts[first:] {
 		q = vg.transform_point(t, q.x, q.y)
-	}
-	if len(p.coords) > 0 {
-		p.last_pos = p.coords[len(p.coords) - 1]
 	}
 }
 
@@ -602,10 +597,7 @@ clip_path :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) -> vg.Fill_Rule {
 	t := vg.transform_multiply(k.transform, clip_transform(cl, bbox))
 	p := &d.r.clip
 	vg.path_reset(p)
-	append(&p.verbs, ..doc.verbs[sh.verbs.start:][:sh.verbs.count])
-	for q in doc.coords[sh.coords.start:][:sh.coords.count] {
-		append(&p.coords, vg.transform_point(t, q.x, q.y))
-	}
+	vg.path_append_contours(p, &doc.geometry, int(sh.contours.start), int(sh.contours.count), t)
 	return sh.style.fill_rule
 }
 

@@ -16,8 +16,7 @@ import cv "deps:ocurves"
 path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst: ^Path, flat: ^Flat_Path, max_dashes := DEFAULT_LIMITS[.Dash_Segments]) -> bool {
 	undashed :: proc(src, dst: ^Path) {
 		path_reset(dst)
-		append(&dst.verbs, ..src.verbs[:])
-		append(&dst.coords, ..src.coords[:])
+		path_append(dst, src)
 	}
 	total: f32 = 0
 	for d in dashes {
@@ -61,35 +60,40 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 		seg^ += 1
 		return flat.points[fs.first:][:fs.count]
 	}
-	it := path_events(src)
-	for e in path_events_next(&it) {
-		ok := true
-		switch e.kind {
-		case .Begin:
-			// Where in the pattern the subpath starts.
-			phase := math.mod(offset * scale, total * scale)
-			if phase < 0 {
-				phase += total * scale
-			}
-			d.idx = 0
-			for phase >= dash_length(&d) {
-				phase -= dash_length(&d)
-				d.idx = (d.idx + 1) % n
-			}
-			d.remaining = dash_length(&d) - phase
-			d.on = d.idx % 2 == 0
-			if d.on {
-				path_move_to(dst, e.p[0].x, e.p[0].y)
-			}
-		case .Line, .Close:
-			ok = dash_segment(&d, {e.p[0], e.p[0], e.p[1], e.p[1]}, samples(flat, &seg))
-		case .Cubic:
-			ok = dash_segment(&d, e.p, samples(flat, &seg), true)
-		case .Solid, .Hole:
+	for ct, ci in src.contours {
+		start := src.pts[ct.start]
+		// Where in the pattern the subpath starts.
+		phase := math.mod(offset * scale, total * scale)
+		if phase < 0 {
+			phase += total * scale
 		}
-		if !ok {
-			undashed(src, dst)
-			return false
+		d.idx = 0
+		for phase >= dash_length(&d) {
+			phase -= dash_length(&d)
+			d.idx = (d.idx + 1) % n
+		}
+		d.remaining = dash_length(&d) - phase
+		d.on = d.idx % 2 == 0
+		if d.on {
+			path_move_to(dst, start.x, start.y)
+		}
+		it := cv.contour_segments(src, ci)
+		for s in cv.segments_next(&it) {
+			ok: bool
+			if s.kind == .Line {
+				ok = dash_segment(&d, {s.p[0], s.p[0], s.p[3], s.p[3]}, samples(flat, &seg))
+			} else {
+				ok = dash_segment(&d, s.p, samples(flat, &seg), true)
+			}
+			if !ok {
+				undashed(src, dst)
+				return false
+			}
+		}
+		// A closed point ("M p Z") is a dash of no length where the pattern
+		// draws, so its caps still make a dot.
+		if ct.segs == 0 && ct.closed {
+			dash_segment(&d, {start, start, start, start}, nil)
 		}
 	}
 	return true
@@ -184,7 +188,7 @@ dash_segment :: proc(d: ^Dasher, c: [4]Vec2, samples: []Vec2, cubic := false) ->
 
 // A path flattened to polylines: every contour's points in one array, each
 // contour a range of it (closed ones end on their first point), and each
-// drawing segment (line, cubic, closing line) the range of samples it added.
+// segment (line or cubic) the range of samples it added.
 Flat_Path :: struct {
 	points:   [dynamic]Vec2,
 	contours: [dynamic]Flat_Contour,
@@ -214,61 +218,40 @@ flat_path_destroy :: proc(f: ^Flat_Path) {
 }
 
 // Flattens `p` into `out` (cleared first). Curves are split into segments
-// of about `segment` units (at most 256 a curve); contours of fewer than two
-// points are dropped.
+// of about `segment` units (at most 256 a curve); contours without
+// segments are dropped.
 path_flatten :: proc(p: ^Path, out: ^Flat_Path, segment: f32 = 1.5) {
-	path_flatten_verbs(p.verbs[:], p.coords[:], out, segment)
+	path_flatten_contours(p, 0, len(p.contours), out, segment)
 }
 
-// `path_flatten` of a path held as its verbs and coordinates. The path is
-// read as fill reads it (path_events): a drawing verb after a Close starts
-// a new contour at the closed one's start.
-path_flatten_verbs :: proc(verbs: []Verb, coords: []Vec2, out: ^Flat_Path, segment: f32 = 1.5) {
+// `path_flatten` of contours [first, first + count) of `p`.
+path_flatten_contours :: proc(p: ^Path, first, count: int, out: ^Flat_Path, segment: f32 = 1.5) {
 	clear(&out.points)
 	clear(&out.contours)
 	clear(&out.segs)
-	open := false
-	end :: proc(out: ^Flat_Path) {
-		ct := &out.contours[len(out.contours) - 1]
-		ct.count = u32(len(out.points)) - ct.first
-		if ct.count < 2 {
-			resize(&out.points, int(ct.first))
-			pop(&out.contours)
+	for ci in first ..< first + count {
+		ct := p.contours[ci]
+		if ct.segs == 0 {
+			continue
 		}
-	}
-	it := path_events_of(verbs, coords)
-	for e in path_events_next(&it) {
-		switch e.kind {
-		case .Begin:
-			if open {
-				end(out)
+		at := u32(len(out.points))
+		append(&out.points, p.pts[ct.start])
+		it := cv.contour_segments(p, ci)
+		for s in cv.segments_next(&it) {
+			if s.kind == .Line {
+				append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
+				append(&out.points, s.p[3])
+				continue
 			}
-			append(&out.contours, Flat_Contour{first = u32(len(out.points))})
-			append(&out.points, e.p[0])
-			open = true
-		case .Line:
-			append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
-			append(&out.points, e.p[1])
-		case .Cubic:
-			p := e.p
-			approx := vec_len(p[1] - p[0]) + vec_len(p[2] - p[1]) + vec_len(p[3] - p[2])
+			q := s.p
+			approx := vec_len(q[1] - q[0]) + vec_len(q[2] - q[1]) + vec_len(q[3] - q[2])
 			n := clamp(int(approx / segment), 2, 256)
 			append(&out.segs, Flat_Segment{u32(len(out.points)), u32(n)})
 			for k in 1 ..= n {
-				append(&out.points, cv.cubic_at(p, f32(k) / f32(n)))
+				append(&out.points, cv.cubic_at(q, f32(k) / f32(n)))
 			}
-		case .Close:
-			ct := &out.contours[len(out.contours) - 1]
-			ct.closed = true
-			append(&out.segs, Flat_Segment{u32(len(out.points)), 1})
-			append(&out.points, out.points[ct.first])
-			end(out)
-			open = false
-		case .Solid, .Hole:
 		}
-	}
-	if open {
-		end(out)
+		append(&out.contours, Flat_Contour{at, u32(len(out.points)) - at, ct.closed})
 	}
 }
 

@@ -51,8 +51,7 @@ Renderer :: struct {
 	shaped:     [dynamic]i8,
 	scratch:    vg.Shape_Scratch,
 	// Repeater scratch: the geometry its copies repeat (gather).
-	copy_verbs:  [dynamic]vg.Verb,
-	copy_coords: [dynamic]vg.Vec2,
+	copied:   vg.Path,
 	// Merge paths: the operands' geometry, one input each, and the boolean's
 	// scratch; merges that fell back to concatenation (an inconsistent
 	// arrangement) during the last draw, which tests expect to be 0.
@@ -88,8 +87,7 @@ renderer_destroy :: proc(r: ^Renderer, c: ^vg.Canvas) {
 	delete(r.merge_inputs)
 	cv.bool_scratch_destroy(&r.merge)
 	delete(r.geometry)
-	delete(r.copy_verbs)
-	delete(r.copy_coords)
+	vg.path_destroy(&r.copied)
 	delete(r.lengths)
 	delete(r.values)
 	delete(r.stops)
@@ -841,16 +839,7 @@ merge :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, t: f32) {
 			case .Rect, .Ellipse, .Path, .Star, .Merge:
 				g := r.geometry[i]
 				first := u32(len(r.merge_in.contours))
-				for ci in g.start ..< g.start + g.count {
-					ct := r.contours[ci]
-					at :: proc(m: vg.Transform2D, p: vg.Vec2) -> vg.Vec2 {return vg.transform_point(m, p.x, p.y)}
-					cv.contours_begin(&r.merge_in, at(m, r.pts[ct.start]))
-					for k in 0 ..< ct.segs {
-						q := r.pts[ct.start + 3 * k:][:4]
-						cv.contours_segment(&r.merge_in, r.kinds[ct.seg + k], at(m, q[1]), at(m, q[2]), at(m, q[3]))
-					}
-					cv.contours_end(&r.merge_in, ct.closed, false)
-				}
+				vg.path_append_contours(&r.merge_in, &r.geo, int(g.start), int(g.count), m)
 				append(&r.merge_inputs, cv.Bool_Input{first, u32(len(r.merge_in.contours)) - first, .Non_Zero})
 				r.geometry[i] = {}
 			}
@@ -875,14 +864,7 @@ merge :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, t: f32) {
 			return
 		}
 	}
-	for ct in src.contours {
-		cv.contours_begin(&r.geo, src.pts[ct.start])
-		for k in 0 ..< ct.segs {
-			q := src.pts[ct.start + 3 * k:][:4]
-			cv.contours_segment(&r.geo, src.kinds[ct.seg + k], q[1], q[2], q[3])
-		}
-		cv.contours_end(&r.geo, ct.closed, false)
-	}
+	vg.path_append_contours(&r.geo, src, 0, len(src.contours))
 }
 
 @(private)
@@ -1080,11 +1062,11 @@ trim :: proc(d: ^Draw, sh: ^Shape, scope: vg.Range, t: f32) {
 // Fills r.lengths with the contour's segment lengths; returns their sum.
 @(private)
 contour_length :: proc(r: ^Renderer, ci: u32) -> f32 {
-	ct := r.contours[ci]
 	clear(&r.lengths)
 	total: f32
-	for s in 0 ..< ct.segs {
-		p := r.pts[ct.start + 3 * s:][:4]
+	it := cv.contour_segments(&r.geo, int(ci))
+	for sg in cv.segments_next(&it) {
+		p := sg.p
 		l := cubic_length(p[0], p[1], p[2], p[3])
 		append(&r.lengths, l)
 		total += l
@@ -1166,15 +1148,15 @@ trim_contour :: proc(r: ^Renderer, ci: u32, tr: ^Trim) {
 		}
 		first := true
 		acc: f32
-		for s in 0 ..< ct.segs {
-			l := r.lengths[s]
+		it := cv.contour_segments(&r.geo, int(ci))
+		for sg in cv.segments_next(&it) {
+			l := r.lengths[sg.index - int(ct.seg)]
 			s0, s1 := acc, acc + l
 			acc = s1
 			if s1 <= a || s0 >= b {
 				continue
 			}
-			src := r.pts[ct.start + 3 * s:][:4]
-			p := [4]vg.Vec2{src[0], src[1], src[2], src[3]}
+			p := sg.p
 			t0 := cubic_param(p[0], p[1], p[2], p[3], a - s0, l) if a > s0 else 0
 			t1 := cubic_param(p[0], p[1], p[2], p[3], b - s0, l) if b < s1 else 1
 			// A whole segment is copied as it is.
@@ -1183,7 +1165,7 @@ trim_contour :: proc(r: ^Renderer, ci: u32, tr: ^Trim) {
 				r.pts[len(r.pts) - 1] = q[0]
 			}
 			first = false
-			cv.contours_segment(&r.geo, r.kinds[ct.seg + s], q[1], q[2], q[3])
+			cv.contours_segment(&r.geo, sg.kind, q[1], q[2], q[3])
 		}
 		joined = b >= total
 	}
@@ -1456,7 +1438,7 @@ repeat :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, lo, k: u32, t: f32) {
 @(private)
 gather :: proc(d: ^Draw, items: vg.Range, k: u32, rel: vg.Transform2D, t: f32) {
 	doc, r := d.doc, d.r
-	first_verb, first_coord := len(r.path.verbs), len(r.path.coords)
+	first := len(r.path.contours)
 	for i in items.start ..< items.start + k {
 		sh := &doc.shapes[i]
 		if .Hidden in sh.flags {
@@ -1464,7 +1446,7 @@ gather :: proc(d: ^Draw, items: vg.Range, k: u32, rel: vg.Transform2D, t: f32) {
 		}
 		#partial switch sh.kind {
 		case .Repeater:
-			gather_copies(d, sh, first_verb, first_coord, rel, t)
+			gather_copies(d, sh, first, rel, t)
 		case .Group:
 			// A group's opacity fades only its own paints (lottie-web): a
 			// paint above it still fills its paths.
@@ -1472,41 +1454,31 @@ gather :: proc(d: ^Draw, items: vg.Range, k: u32, rel: vg.Transform2D, t: f32) {
 			gather(d, sh.children, sh.children.count, vg.transform_multiply(m, rel), t)
 		case .Rect, .Ellipse, .Path, .Star, .Merge:
 			g := r.geometry[i]
-			vg.path_append_contours(&r.path, &r.geo, g.start, g.count, rel)
+			vg.path_append_contours(&r.path, &r.geo, int(g.start), int(g.count), rel)
 		}
 	}
 }
 
-// Replaces r.path from (first_verb, first_coord) on, geometry in the
-// group's space mapped by `rel`, with one copy per repeater copy.
+// Replaces r.path's contours from `first` on, geometry in the group's
+// space mapped by `rel`, with one copy per repeater copy.
 @(private)
-gather_copies :: proc(d: ^Draw, sh: ^Shape, first_verb, first_coord: int, rel: vg.Transform2D, t: f32) {
+gather_copies :: proc(d: ^Draw, sh: ^Shape, first: int, rel: vg.Transform2D, t: f32) {
 	r := d.r
 	p := &r.path
 	inv, invertible := inverse(rel)
 	rep, ok := repeat_eval(d, sh, t)
 	if !ok || !invertible {
-		resize(&p.verbs, first_verb)
-		resize(&p.coords, first_coord)
+		vg.path_truncate(p, first)
 		return
 	}
-	clear(&r.copy_verbs)
-	clear(&r.copy_coords)
-	append(&r.copy_verbs, ..p.verbs[first_verb:])
-	append(&r.copy_coords, ..p.coords[first_coord:])
-	resize(&p.verbs, first_verb)
-	resize(&p.coords, first_coord)
+	vg.path_reset(&r.copied)
+	vg.path_append_contours(&r.copied, p, first, len(p.contours) - first)
+	vg.path_truncate(p, first)
 	for n in 0 ..< rep.copies {
 		// The copy's transform acts in the group's space: undo `rel`, apply
 		// it, redo `rel`.
 		m := vg.transform_multiply(vg.transform_multiply(inv, repeat_copy(&rep, n)), rel)
-		append(&p.verbs, ..r.copy_verbs[:])
-		for q in r.copy_coords {
-			append(&p.coords, vg.transform_point(m, q.x, q.y))
-		}
-	}
-	if len(p.coords) > 0 {
-		p.last_pos = p.coords[len(p.coords) - 1]
+		vg.path_append(p, &r.copied, m)
 	}
 }
 
@@ -1576,7 +1548,7 @@ paint :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, k: u32, t: f32) {
 	}
 	vg.path_reset(&r.path)
 	gather(d, items, k, vg.TRANSFORM_IDENTITY, t)
-	if len(r.path.verbs) == 0 {
+	if vg.path_is_empty(&r.path) {
 		return
 	}
 	if stroke {
