@@ -4,6 +4,7 @@ package scenes
 
 import "core:fmt"
 import "core:math"
+import "core:mem"
 
 import "../../svg"
 import "../../lottie"
@@ -746,7 +747,7 @@ Program_Params :: struct {
 // program.slang's fs_main on the CPU.
 program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: vg.Pixel_Format, sampler: vg.Program_Sampler) {
 	p: Program_Params
-	copy(([^]u8)(&p)[:size_of(p)], uniforms)
+	copy(mem.ptr_to_bytes(&p), uniforms)
 	unorm :: proc(v: f32) -> u8 {
 		return u8(clamp(v * 255 + 0.5, 0, 255))
 	}
@@ -769,9 +770,9 @@ program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8,
 
 scene_program :: proc(c: ^vg.Canvas, r: ^Resources) {
 	a := Program_Params{{1, 0.3, 0.1, 1}, {0.1, 0.4, 1, 0.8}, {0.3, 0.12, 1.5, 0}}
-	vg.run_program(c, r.program, r.prog_out, ([^]u8)(&a)[:size_of(a)], {r.checker})
+	vg.run_program(c, r.program, r.prog_out, mem.ptr_to_bytes(&a), {r.checker})
 	b := Program_Params{{0.9, 0.9, 0.2, 1}, {0.2, 0.9, 0.5, 1}, {0.2, 0.2, 0.75, 0}}
-	vg.run_program(c, r.program, r.prog_opaque, ([^]u8)(&b)[:size_of(b)], {r.checker}, {.Opaque})
+	vg.run_program(c, r.program, r.prog_opaque, mem.ptr_to_bytes(&b), {r.checker}, {.Opaque})
 	show(c, r, r.prog_out, 12, 20, 100, 80)
 	show(c, r, r.prog_opaque, 140, 20, 100, 80)
 	// Scaled and rotated like any image.

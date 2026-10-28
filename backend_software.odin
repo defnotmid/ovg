@@ -3,6 +3,7 @@ package ovg
 import "base:runtime"
 import "core:math"
 import "core:mem"
+import "core:slice"
 import common "deps:odecs/common"
 import cv "deps:ocurves"
 
@@ -1606,7 +1607,7 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	w, h := int(entry.info.width), int(entry.info.height)
 	format := entry.info.format
 	if format == .RGBA16F {
-		out := ([^][4]f16)(raw_data(entry.image.pixels))[:w * h]
+		out := slice.reinterpret([][4]f16, entry.image.pixels[:w * h * 8])
 		alpha: f16 = 1 if .Opaque in cmd.flags else 0
 		for &px in out {
 			px = {0, 0, 0, alpha}

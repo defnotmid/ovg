@@ -1,6 +1,7 @@
 package ovg
 
 import "core:hash"
+import "core:slice"
 
 GRADIENT_RAMP_WIDTH :: 256
 
@@ -27,7 +28,7 @@ gradient_store_destroy :: proc(s: ^Gradient_Store) {
 @(private)
 gradient_key :: proc(g: Multi_Stop_Gradient) -> u64 {
 	stops := g.stops
-	return hash.fnv64a(([^]u8)(raw_data(stops))[:len(stops) * size_of(Gradient_Stop)])
+	return hash.fnv64a(slice.to_bytes(stops))
 }
 
 gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient, images: ^Image_Store) -> (id: Image_Id, err: Error) {

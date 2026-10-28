@@ -1,12 +1,14 @@
 package ovg
 
+import "core:mem"
+import "core:slice"
 import "core:testing"
 
 // Writes uv-derived colors, with the first uniform float as alpha, plus
 // channel 0 sampled at the pixel's uv.
 @(private = "file")
 test_program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: Pixel_Format, sampler: Program_Sampler) {
-	alpha := (^f32)(raw_data(uniforms))^
+	alpha := slice.reinterpret([]f32, uniforms)[0]
 	for y in 0 ..< height {
 		for x in 0 ..< width {
 			uv := [2]f32{(f32(x) + 0.5) / f32(width), (f32(y) + 0.5) / f32(height)}
@@ -69,7 +71,7 @@ test_run_program_software :: proc(t: ^testing.T) {
 	dst, _ := create_image_empty(&c, 2, 2, .RGBA8, {.Premultiplied})
 
 	block := [4]f32{0.5, 0, 0, 0}
-	testing.expect_value(t, run_program(&c, prog, dst, ([^]u8)(&block)[:16], {src}), Error.None)
+	testing.expect_value(t, run_program(&c, prog, dst, mem.ptr_to_bytes(&block), {src}), Error.None)
 	// The block is copied at record time.
 	block[0] = 0
 	testing.expect_value(t, run_program(&c, prog, dst, nil, {dst}), Error.Unsupported_Operation)
@@ -82,7 +84,7 @@ test_run_program_software :: proc(t: ^testing.T) {
 
 	// Opaque forces alpha to 1; unbound channels read transparent black.
 	block[0] = 0.25
-	run_program(&c, prog, dst, ([^]u8)(&block)[:16], nil, {.Opaque})
+	run_program(&c, prog, dst, mem.ptr_to_bytes(&block), nil, {.Opaque})
 	flush(&c)
 	testing.expect_value(t, e.image.pixels[1], u8(0))
 	testing.expect_value(t, e.image.pixels[3], u8(255))
@@ -92,8 +94,8 @@ test_run_program_software :: proc(t: ^testing.T) {
 	hdr, _ := create_image_empty(&c, 2, 2, .RGBA16F)
 	hdr2, _ := create_image_empty(&c, 2, 2, .RGBA16F)
 	block[0] = 3
-	testing.expect_value(t, run_program(&c, prog, hdr, ([^]u8)(&block)[:16], {src}), Error.None)
-	testing.expect_value(t, run_program(&c, prog, hdr2, ([^]u8)(&block)[:16], {hdr}), Error.None)
+	testing.expect_value(t, run_program(&c, prog, hdr, mem.ptr_to_bytes(&block), {src}), Error.None)
+	testing.expect_value(t, run_program(&c, prog, hdr2, mem.ptr_to_bytes(&block), {hdr}), Error.None)
 	flush(&c)
 	texels, rerr := read_image(&c, hdr2, context.temp_allocator)
 	testing.expect_value(t, rerr, Error.None)

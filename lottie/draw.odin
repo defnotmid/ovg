@@ -1264,7 +1264,7 @@ effect_filter :: proc(doc: ^Document, e: ^Effect, t: f32, fx: ^Effect_Filter) ->
 		tones := prim(fx, &n, .Component_Transfer)
 		for c in 0 ..< 3 {
 			for k in 0 ..< 3 {
-				fx.values[2 * GAMMA_N + c * 3 + k] = (transmute([4]f32)cols[k])[c]
+				fx.values[2 * GAMMA_N + c * 3 + k] = vg.color_to_array(cols[k])[c]
 			}
 			tones.transfer[c] = {kind = .Table, first = u16(2 * GAMMA_N + c * 3), count = 3}
 		}

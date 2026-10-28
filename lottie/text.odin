@@ -575,11 +575,11 @@ text_animate :: proc(d: ^Draw, txt: ^Text, td: ^Text_Doc, s: ^Text_Scratch, t: f
 
 	// A colour animated over the letter's: the channels the property has.
 	toward :: proc(cur: vg.Color, v: [4]f32, dims: u8, mult: f32) -> vg.Color {
-		c := transmute([4]f32)cur
+		c := vg.color_to_array(cur)
 		for k in 0 ..< min(int(dims), 3) {
 			c[k] += (v[k] - c[k]) * mult
 		}
-		return transmute(vg.Color)c
+		return {c.r, c.g, c.b, c.a}
 	}
 	for &lt, i in letters {
 		if lt.newline {

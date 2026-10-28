@@ -1,6 +1,7 @@
 package ovg
 
 import "core:math"
+import "core:slice"
 import "core:testing"
 
 // feComponentTransfer, feMorphology, feTurbulence and lighting. Expected
@@ -28,14 +29,14 @@ fx2_close :: proc(s: ^Fx2) {
 
 @(private = "file")
 row_image :: proc(s: ^Fx2, px: [][4]u8) -> Image_Id {
-	id, _ := create_image(&s.canvas, image_source_rgba((cast([^]u8)raw_data(px))[:len(px) * 4], u32(len(px)), 1), {.Premultiplied})
+	id, _ := create_image(&s.canvas, image_source_rgba(slice.to_bytes(px), u32(len(px)), 1), {.Premultiplied})
 	return id
 }
 
 @(private = "file")
 row_pixels :: proc(s: ^Fx2, id: Image_Id, n: int) -> [][4]u8 {
 	p := image_store_get(&s.canvas.images, id).image.pixels
-	return (cast([^][4]u8)raw_data(p))[:n]
+	return slice.reinterpret([][4]u8, p)[:n]
 }
 
 @(test)
