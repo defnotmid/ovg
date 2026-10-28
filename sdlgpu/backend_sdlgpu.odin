@@ -13,21 +13,78 @@ import sdl "vendor:sdl3"
 import vg ".."
 
 VERT_SPV :: #load("../shaders/ovg.vert.spv")
-FRAG_SPV :: #load("../shaders/ovg.frag.spv")
 VERT_MSL :: #load("../shaders/ovg.vert.msl")
-FRAG_MSL :: #load("../shaders/ovg.frag.msl")
 SHAPE_VERT_SPV :: #load("../shaders/ovg.shape_vert.spv")
-SHAPE_FRAG_SPV :: #load("../shaders/ovg.shape_frag.spv")
 SHAPE_VERT_MSL :: #load("../shaders/ovg.shape_vert.msl")
-SHAPE_FRAG_MSL :: #load("../shaders/ovg.shape_frag.msl")
-SHAPE_BOX_FRAG_SPV :: #load("../shaders/ovg.shape_box_frag.spv")
-SHAPE_BOX_FRAG_MSL :: #load("../shaders/ovg.shape_box_frag.msl")
-SHAPE_GROUP_FRAG_SPV :: #load("../shaders/ovg.shape_group_frag.spv")
-SHAPE_GROUP_FRAG_MSL :: #load("../shaders/ovg.shape_group_frag.msl")
-SHAPE_HAIRLINE_FRAG_SPV :: #load("../shaders/ovg.shape_hairline_frag.spv")
-SHAPE_HAIRLINE_FRAG_MSL :: #load("../shaders/ovg.shape_hairline_frag.msl")
-MARKER_GROUP_FRAG_SPV :: #load("../shaders/ovg.marker_group_frag.spv")
-MARKER_GROUP_FRAG_MSL :: #load("../shaders/ovg.marker_group_frag.msl")
+
+// The fragment shaders, each (but the last two) with a motion-blur variant
+// that writes its target's velocity twin beside the colour (render.odin).
+Frag :: enum {
+	// Quads: clears, filters, images.
+	Main,
+	// Shape instances (shapes.odin).
+	Shape,
+	// Instances whose pixel footprint is a box (no rotation or skew).
+	Shape_Box,
+	// Groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
+	// the instances.
+	Shape_Group,
+	// Hairlines (vg.hairline_shape).
+	Shape_Hairline,
+	// Groups of markers (vg.fill_markers).
+	Marker_Group,
+	// Motion blur: a layer's motion onto its target's twin
+	// (vg.Cmd_Composite_Velocity), and the screen's twin resolved into the
+	// velocity and nearness textures.
+	Composite_Velocity,
+	Resolve_Velocity,
+}
+
+@(private = "file")
+Frag_Code :: struct {
+	spv, msl:          []u8,
+	entry:             cstring,
+	samplers, storage: u32,
+}
+
+// Each fragment shader and its motion variant (`nil` code: none).
+@(private = "file")
+FRAG_CODE := [Frag][2]Frag_Code {
+	.Main = {
+		{#load("../shaders/ovg.frag.spv"), #load("../shaders/ovg.frag.msl"), "fs_main", 2, 1},
+		{#load("../shaders/ovg.frag_motion.spv"), #load("../shaders/ovg.frag_motion.msl"), "fs_main_motion", 2, 1},
+	},
+	.Shape = {
+		{#load("../shaders/ovg.shape_frag.spv"), #load("../shaders/ovg.shape_frag.msl"), "fs_shape", 2, 3},
+		{#load("../shaders/ovg.shape_frag_motion.spv"), #load("../shaders/ovg.shape_frag_motion.msl"), "fs_shape_motion", 2, 4},
+	},
+	.Shape_Box = {
+		{#load("../shaders/ovg.shape_box_frag.spv"), #load("../shaders/ovg.shape_box_frag.msl"), "fs_shape_box", 2, 3},
+		{#load("../shaders/ovg.shape_box_frag_motion.spv"), #load("../shaders/ovg.shape_box_frag_motion.msl"), "fs_shape_box_motion", 2, 4},
+	},
+	.Shape_Group = {
+		{#load("../shaders/ovg.shape_group_frag.spv"), #load("../shaders/ovg.shape_group_frag.msl"), "fs_shape_group", 2, 3},
+		{#load("../shaders/ovg.shape_group_frag_motion.spv"), #load("../shaders/ovg.shape_group_frag_motion.msl"), "fs_shape_group_motion", 2, 4},
+	},
+	.Shape_Hairline = {
+		{#load("../shaders/ovg.shape_hairline_frag.spv"), #load("../shaders/ovg.shape_hairline_frag.msl"), "fs_shape_hairline", 2, 3},
+		{#load("../shaders/ovg.shape_hairline_frag_motion.spv"), #load("../shaders/ovg.shape_hairline_frag_motion.msl"), "fs_shape_hairline_motion", 2, 4},
+	},
+	.Marker_Group = {
+		{#load("../shaders/ovg.marker_group_frag.spv"), #load("../shaders/ovg.marker_group_frag.msl"), "fs_marker_group", 2, 3},
+		{#load("../shaders/ovg.marker_group_frag_motion.spv"), #load("../shaders/ovg.marker_group_frag_motion.msl"), "fs_marker_group_motion", 2, 4},
+	},
+	.Composite_Velocity = {{#load("../shaders/ovg.composite_velocity_frag.spv"), #load("../shaders/ovg.composite_velocity_frag.msl"), "fs_composite_velocity", 2, 1}, {}},
+	.Resolve_Velocity = {{#load("../shaders/ovg.resolve_velocity_frag.spv"), #load("../shaders/ovg.resolve_velocity_frag.msl"), "fs_resolve_velocity", 1, 0}, {}},
+}
+
+// Motion blur (vg.canvas_motion_blur): a frame's velocity, in pixels (the
+// shutter's middle minus its opening), and nearness (larger is nearer), as
+// `velocity_textures` gives them; and the twins of the targets drawn with
+// motion, each pixel (a * velocity, a * nearness, a) by coverage.
+VELOCITY_FORMAT :: sdl.GPUTextureFormat.R16G16_FLOAT
+NEARNESS_FORMAT :: sdl.GPUTextureFormat.R16_FLOAT
+TWIN_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
 
 MAX_FRAMES_IN_FLIGHT :: 4
 
@@ -71,20 +128,11 @@ SDL_Backend :: struct {
 	device:           ^sdl.GPUDevice,
 	owns_device:      bool,
 	vert:             ^sdl.GPUShader,
-	frag:             ^sdl.GPUShader,
 	// Shape instances (shapes.odin): quads pulled from `instance_stream`,
 	// coverage from the shapes in `shapes`.
 	shape_vert:       ^sdl.GPUShader,
-	shape_frag:       ^sdl.GPUShader,
-	// For instances whose pixel footprint is a box (no rotation or skew).
-	shape_box_frag:   ^sdl.GPUShader,
-	// For groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
-	// the instances.
-	shape_group_frag: ^sdl.GPUShader,
-	// For hairlines (vg.hairline_shape).
-	shape_hairline_frag: ^sdl.GPUShader,
-	// For groups of markers (vg.fill_markers).
-	marker_group_frag:   ^sdl.GPUShader,
+	// Each fragment shader, [1] its motion variant.
+	frags:            [Frag][2]^sdl.GPUShader,
 	shapes:           Shape_Store,
 	screen_width:     u32,
 	screen_height:    u32,
@@ -96,6 +144,15 @@ SDL_Backend :: struct {
 	vertex_stream:    Stream,
 	paint_stream:     Stream,
 	instance_stream:  Stream,
+	// Motion blur: the instances' motions (row for row), the twins of the
+	// frame's twinned targets (`twin_of`), and the velocity and nearness of
+	// the last frame drawn with motion (`velocity_textures`).
+	motion_stream:    Stream,
+	twins:            [dynamic]Cached_Texture,
+	twin_of:          [dynamic]Twin_Of,
+	velocity:         ^Image,
+	nearness:         ^Image,
+	motion_frame:     bool,
 	// The intermediates of image filters (`scratch_image`);
 	// unused ones are freed after a while.
 	scratch:          [dynamic]Cached_Texture,
@@ -134,6 +191,13 @@ SDL_Backend :: struct {
 	stats:            Frame_Stats,
 }
 
+// A frame's twinned target: its texture, and its twin's index in
+// `SDL_Backend.twins`.
+Twin_Of :: struct {
+	target: ^sdl.GPUTexture,
+	twin:   int,
+}
+
 // Counts of the GPU work one frame recorded.
 Frame_Stats :: struct {
 	draws:          int,
@@ -163,6 +227,8 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		shape_clips = make([dynamic][4]f32, allocator),
 		groups = make([dynamic]Gpu_Shape_Instance, allocator),
 		group_words = make([dynamic]u32, allocator),
+		twins = make([dynamic]Cached_Texture, allocator),
+		twin_of = make([dynamic]Twin_Of, allocator),
 	}
 	defer if err != nil {
 		destroy(b)
@@ -204,15 +270,20 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		})
 	}
 	b.vert = shader(b, VERT_SPV, VERT_MSL, "vs_main", .VERTEX, 0, 0, 1)
-	b.frag = shader(b, FRAG_SPV, FRAG_MSL, "fs_main", .FRAGMENT, 2, 1, 0)
 	b.shape_vert = shader(b, SHAPE_VERT_SPV, SHAPE_VERT_MSL, "vs_shape", .VERTEX, 0, 1, 2)
-	b.shape_frag = shader(b, SHAPE_FRAG_SPV, SHAPE_FRAG_MSL, "fs_shape", .FRAGMENT, 2, 3, 0)
-	b.shape_box_frag = shader(b, SHAPE_BOX_FRAG_SPV, SHAPE_BOX_FRAG_MSL, "fs_shape_box", .FRAGMENT, 2, 3, 0)
-	b.shape_group_frag = shader(b, SHAPE_GROUP_FRAG_SPV, SHAPE_GROUP_FRAG_MSL, "fs_shape_group", .FRAGMENT, 2, 3, 0)
-	b.shape_hairline_frag = shader(b, SHAPE_HAIRLINE_FRAG_SPV, SHAPE_HAIRLINE_FRAG_MSL, "fs_shape_hairline", .FRAGMENT, 2, 3, 0)
-	b.marker_group_frag = shader(b, MARKER_GROUP_FRAG_SPV, MARKER_GROUP_FRAG_MSL, "fs_marker_group", .FRAGMENT, 2, 3, 0)
-	if b.vert == nil || b.frag == nil || b.shape_vert == nil || b.shape_frag == nil || b.shape_box_frag == nil || b.shape_group_frag == nil || b.shape_hairline_frag == nil || b.marker_group_frag == nil {
+	if b.vert == nil || b.shape_vert == nil {
 		return .Shader_Compile
+	}
+	for variants, f in FRAG_CODE {
+		for code, k in variants {
+			if code.spv == nil {
+				continue
+			}
+			b.frags[f][k] = shader(b, code.spv, code.msl, code.entry, .FRAGMENT, code.samplers, code.storage, 0)
+			if b.frags[f][k] == nil {
+				return .Shader_Compile
+			}
+		}
 	}
 	store_init(b)
 
@@ -255,6 +326,8 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.shape_clips)
 		delete(b.groups)
 		delete(b.group_words)
+		delete(b.twins)
+		delete(b.twin_of)
 		b^ = {}
 		return
 	}
@@ -270,6 +343,13 @@ destroy :: proc(b: ^SDL_Backend) {
 		sdl.ReleaseGPUTexture(b.device, t.image.texture)
 	}
 	delete(b.scratch)
+	for t in b.twins {
+		sdl.ReleaseGPUTexture(b.device, t.image.texture)
+	}
+	delete(b.twins)
+	delete(b.twin_of)
+	release_image(b, b.velocity)
+	release_image(b, b.nearness)
 	for s in b.samplers {
 		if s != nil {
 			sdl.ReleaseGPUSampler(b.device, s)
@@ -281,19 +361,21 @@ destroy :: proc(b: ^SDL_Backend) {
 	stream_release(b, &b.vertex_stream)
 	stream_release(b, &b.paint_stream)
 	stream_release(b, &b.instance_stream)
+	stream_release(b, &b.motion_stream)
 	// Always: the map allocates on its first shape, but a frame of only its
 	// own words still fills `pending` and makes the buffers.
 	store_destroy(b)
-	for s in ([]^sdl.GPUShader{b.shape_vert, b.shape_frag, b.shape_box_frag, b.shape_group_frag, b.shape_hairline_frag, b.marker_group_frag}) {
+	for variants in b.frags {
+		for s in variants {
+			if s != nil {
+				sdl.ReleaseGPUShader(b.device, s)
+			}
+		}
+	}
+	for s in ([]^sdl.GPUShader{b.vert, b.shape_vert}) {
 		if s != nil {
 			sdl.ReleaseGPUShader(b.device, s)
 		}
-	}
-	if b.vert != nil {
-		sdl.ReleaseGPUShader(b.device, b.vert)
-	}
-	if b.frag != nil {
-		sdl.ReleaseGPUShader(b.device, b.frag)
 	}
 	delete(b.verts)
 	delete(b.paints)
@@ -448,6 +530,20 @@ image_borrow_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id, texture: ^sdl.GPUTe
 // The default screen texture of the last frame flushed without an output.
 offscreen_texture :: proc(b: ^SDL_Backend) -> ^sdl.GPUTexture {
 	return b.offscreen.texture if b.offscreen != nil else nil
+}
+
+// Motion blur (vg.canvas_motion_blur): the last frame's velocity
+// (VELOCITY_FORMAT: pixels, the shutter's middle minus its opening) and
+// nearness (NEARNESS_FORMAT, larger is nearer) at each screen pixel, each
+// the draws' over the pixel by their coverage over still, farthest ground,
+// as o3d's record_motion_blur takes them: in the frame's command buffer
+// (`Output.command_buffer`) after the flush, or any later one. Nil after a
+// frame without.
+velocity_textures :: proc(b: ^SDL_Backend) -> (velocity, nearness: ^sdl.GPUTexture) {
+	if !b.motion_frame || b.velocity == nil || b.nearness == nil {
+		return nil, nil
+	}
+	return b.velocity.texture, b.nearness.texture
 }
 
 @(private = "file")
@@ -635,7 +731,17 @@ sdl_delete_image :: proc(data: rawptr, image: vg.Backend_Image, id: vg.Image_Id)
 // Copies a texture back to the CPU as RGBA8, top-down (half-float
 // textures: as stored).
 read_texture :: proc(b: ^SDL_Backend, img: Image, allocator := context.allocator) -> (pixels: []u8, err: vg.Error) {
-	bpp: u32 = 1 if img.format == .R8_UNORM else 8 if img.format == .R16G16B16A16_FLOAT else 4
+	bpp: u32
+	#partial switch img.format {
+	case .R8_UNORM:
+		bpp = 1
+	case .R16_FLOAT:
+		bpp = 2
+	case .R16G16B16A16_FLOAT:
+		bpp = 8
+	case:
+		bpp = 4
+	}
 	size := img.width * img.height * bpp
 	transfer := sdl.CreateGPUTransferBuffer(b.device, {usage = .DOWNLOAD, size = size})
 	if transfer == nil {

@@ -28,6 +28,8 @@ State :: struct {
 	transform:           Transform2D,
 	scissor:             Scissor,
 	alpha:               f32,
+	// Motion blur: how what is drawn moves (set_motion).
+	motion:              Shape_Motion,
 }
 
 default_state :: proc "contextless" () -> State {
@@ -36,5 +38,7 @@ default_state :: proc "contextless" () -> State {
 		transform = TRANSFORM_IDENTITY,
 		scissor = {transform = TRANSFORM_IDENTITY},
 		alpha = 1,
+		// Still, the frame's first surface.
+		motion = {nearness = 1},
 	}
 }

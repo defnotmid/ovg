@@ -15,6 +15,8 @@ Canvas :: struct {
 	current_render_target: Render_Target,
 	// Drawing coordinates of the target's top-left pixel.
 	current_render_origin: [2]i32,
+	// The target keeps a velocity twin (Cmd_Set_Render_Target.velocity).
+	current_render_velocity: bool,
 	states:                [dynamic]State,
 	commands:              [dynamic]Command,
 	paints:                [dynamic]Params,
@@ -39,6 +41,11 @@ Canvas :: struct {
 	limited:               bit_set[Limit],
 	// Programs registered on a recording canvas, for the player to create.
 	program_ops:           [dynamic]Program_Op,
+	// Motion blur (canvas_motion_blur): each shape instance's motion, row
+	// for row with `shapes`, and the nearness of the frame's last surface.
+	motion_blur:           bool,
+	motions:               [dynamic]Shape_Motion,
+	nearness:              f32,
 }
 
 canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator) {
@@ -50,12 +57,14 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		paints          = make([dynamic]Params, allocator),
 		shapes          = make([dynamic]Shape_Instance, allocator),
 		shape_words     = make([dynamic]u32, allocator),
+		motions         = make([dynamic]Shape_Motion, allocator),
 		bytes           = make([dynamic]u8, allocator),
 		filters         = make([dynamic]Image_Filter, allocator),
 		runs            = make([dynamic]Program_Run, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
 		device_px_ratio = 1,
+		nearness        = 1,
 	}
 	shape_scratch_init(&c.scratch, allocator)
 	image_store_init(&c.images, backend, allocator)
@@ -84,6 +93,7 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.runs)
 	delete(c.shapes)
 	delete(c.shape_words)
+	delete(c.motions)
 	shape_scratch_destroy(&c.scratch)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
@@ -103,10 +113,17 @@ save :: proc(c: ^Canvas) {
 }
 
 restore :: proc(c: ^Canvas) {
+	was := state(c).motion.nearness
 	if len(c.states) > 1 {
 		pop(&c.states)
 	} else {
 		reset(c)
+	}
+	// What is drawn after a surface that moved its own way lies over it: a
+	// surface nearer than it.
+	if s := state(c); s.motion.nearness != was && s.motion.nearness != 0 {
+		c.nearness += 1
+		s.motion.nearness = c.nearness
 	}
 }
 
@@ -124,7 +141,8 @@ set_size :: proc(c: ^Canvas, width, height: u32, dpi: f32 = 1) {
 	c.backend.set_size(c.backend.data, width, height, dpi)
 	c.current_render_target = nil
 	c.current_render_origin = {}
-	append(&c.commands, Command{type = Cmd_Set_Render_Target{}})
+	c.current_render_velocity = c.motion_blur
+	append(&c.commands, Command{type = Cmd_Set_Render_Target{velocity = c.motion_blur}})
 }
 
 render_target_size :: proc(c: ^Canvas) -> (w, h: u32) {
@@ -155,12 +173,61 @@ set_composite_blend_func_separate :: proc "contextless" (c: ^Canvas, src_rgb, ds
 }
 
 // Directs subsequent drawing to `target` (`nil` = screen), whose top-left
-// pixel is at `origin` in drawing coordinates.
+// pixel is at `origin` in drawing coordinates. With motion blur the screen
+// keeps the frame's velocity; an image keeps none.
 set_render_target :: proc(c: ^Canvas, target: Render_Target, origin := [2]i32{}) {
-	if c.current_render_target != target || c.current_render_origin != origin {
-		append(&c.commands, Command{type = Cmd_Set_Render_Target{target, origin}})
+	render_target_set(c, target, origin, target == nil)
+}
+
+// set_render_target, an image keeping a velocity twin with `velocity` (a
+// layer's content, whose motion the layer stack composites).
+@(private)
+render_target_set :: proc(c: ^Canvas, target: Render_Target, origin: [2]i32, velocity: bool) {
+	twin := velocity && c.motion_blur
+	if c.current_render_target != target || c.current_render_origin != origin || c.current_render_velocity != twin {
+		append(&c.commands, Command{type = Cmd_Set_Render_Target{target, origin, twin}})
 		c.current_render_target = target
 		c.current_render_origin = origin
+		c.current_render_velocity = twin
+	}
+}
+
+// ---- motion blur ------------------------------------------------------------------
+
+// Records each frame's velocity and nearness from here on, for a motion
+// blur pass (o3d's): the screen's, which a backend gives with the frame
+// (software_backend_velocity, the SDL_GPU backend's velocity textures).
+// Switch it between frames.
+canvas_motion_blur :: proc(c: ^Canvas, on: bool) {
+	assert(len(c.shapes) == 0, "motion blur is switched between frames")
+	c.motion_blur = on
+}
+
+// Motion blur: what is drawn from here on (until a restore) moves as
+// `opened` says. It maps where a point is at the middle of the shutter, in
+// drawing coordinates (where the current transform puts it), to where it
+// was when the shutter opened: for a node drawn with transform `mid` that
+// had `open` at the opening, transform_multiply(transform_inverse(mid),
+// open). Each call starts a surface nearer than everything drawn before
+// it; call it for every node, still ones too (TRANSFORM_IDENTITY), so each
+// hides the motion of what it covers.
+set_motion :: proc "contextless" (c: ^Canvas, opened: Transform2D) {
+	c.nearness += 1
+	m := opened
+	state(c).motion = {{1 - m[0], -m[1], -m[2], 1 - m[3], -m[4], -m[5]}, c.nearness}
+}
+
+// The current motion for the last `n` shape instances appended.
+@(private)
+push_motions :: proc(c: ^Canvas, n: int) {
+	if !c.motion_blur {
+		return
+	}
+	at := len(c.motions)
+	resize(&c.motions, at + n)
+	m := state(c).motion
+	for &row in c.motions[at:] {
+		row = m
 	}
 }
 
@@ -645,6 +712,7 @@ device_bounds :: proc "contextless" (words: []u32, t: Transform2D, grow: f32) ->
 @(private)
 push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 = 0) {
 	append(&c.shapes, inst)
+	push_motions(c, 1)
 	at := u32(len(c.shapes) - 1)
 	if n := len(c.commands); n > 0 {
 		last := &c.commands[n - 1]
@@ -661,6 +729,7 @@ push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 =
 // `push_shape` for the last `n` instances appended at once.
 @(private)
 push_instances :: proc(c: ^Canvas, base: Command, n: int, group: u32 = 0) {
+	push_motions(c, n)
 	at := u32(len(c.shapes) - n)
 	if k := len(c.commands); k > 0 {
 		last := &c.commands[k - 1]
@@ -758,6 +827,9 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	resize(&c.runs, m.runs)
 	resize(&c.shapes, m.shapes)
 	resize(&c.shape_words, m.words)
+	if c.motion_blur {
+		resize(&c.motions, m.shapes)
+	}
 }
 
 // ---- flush ----------------------------------------------------------------------
@@ -774,13 +846,14 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	clear(&c.paints)
 	clear(&c.shapes)
 	clear(&c.shape_words)
+	clear(&c.motions)
 	frame_end(c)
 }
 
 // The frame recorded so far, as `flush` hands it over.
 @(private)
 canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
-	return {paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:], shape_words = c.shape_words[:]}
+	return {paints = c.paints[:], commands = c.commands[:], bytes = c.bytes[:], filters = c.filters[:], runs = c.runs[:], shapes = c.shapes[:], shape_words = c.shape_words[:], motion = c.motion_blur, motions = c.motions[:]}
 }
 
 @(private)
@@ -789,6 +862,12 @@ frame_end :: proc(c: ^Canvas) {
 	// The backend starts every frame on the screen; keep the canvas in sync.
 	c.current_render_target = nil
 	c.current_render_origin = {}
+	c.current_render_velocity = c.motion_blur
+	// Motion is a frame's: the next one starts still.
+	c.nearness = 1
+	for &s in c.states {
+		s.motion = {nearness = 1}
+	}
 }
 
 // A frame recorded on a recording canvas, handed whole to a `Player`: what
@@ -805,6 +884,8 @@ Recorded_Frame :: struct {
 	runs:        [dynamic]Program_Run,
 	shapes:      [dynamic]Shape_Instance,
 	shape_words: [dynamic]u32,
+	motion:      bool,
+	motions:     [dynamic]Shape_Motion,
 	image_ops:   [dynamic]Image_Op,
 	pixels:      [dynamic]u8,
 	program_ops: [dynamic]Program_Op,
@@ -818,6 +899,7 @@ recorded_frame_destroy :: proc(f: ^Recorded_Frame) {
 	delete(f.runs)
 	delete(f.shapes)
 	delete(f.shape_words)
+	delete(f.motions)
 	delete(f.image_ops)
 	delete(f.pixels)
 	delete(f.program_ops)
@@ -846,6 +928,8 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	swap_clear(&c.runs, &out.runs)
 	swap_clear(&c.shapes, &out.shapes)
 	swap_clear(&c.shape_words, &out.shape_words)
+	swap_clear(&c.motions, &out.motions)
+	out.motion = c.motion_blur
 	swap_clear(&c.images.ops, &out.image_ops)
 	swap_clear(&c.images.pixels, &out.pixels)
 	swap_clear(&c.program_ops, &out.program_ops)

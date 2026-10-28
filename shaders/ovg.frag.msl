@@ -3780,159 +3780,190 @@ float scissor_mask_0(float2 p_12, KernelContext_0 thread* kernelContext_48)
 }
 
 
-#line 128
+#line 71
+struct VS_Out_0
+{
+    float4 position_1;
+    float2 ftcoord_1;
+    float2 fpos_5;
+    [[flat]] uint paint_0;
+};
+
+
+#line 688
+float4 main_color_0(const VS_Out_0 thread* i_8, KernelContext_0 thread* kernelContext_49)
+{
+
+#line 689
+    kernelContext_49->paint_index_0 = i_8->paint_0;
+
+#line 689
+    int _S295 = shader_type_0(kernelContext_49);
+
+    if(_S295 >= int(10))
+    {
+
+#line 691
+        float4 _S296 = render_filter_0(_S295, i_8->fpos_5, kernelContext_49);
+        return _S296;
+    }
+
+#line 692
+    float stroke_alpha_0;
+
+
+    if(_S295 != int(6))
+    {
+
+#line 695
+        float _S297 = stroke_mask_0(i_8->ftcoord_1, kernelContext_49);
+
+#line 695
+        float _S298 = stroke_thr_0(kernelContext_49);
+
+        if(_S297 < _S298)
+        {
+
+#line 698
+            discard_fragment();
+
+#line 697
+        }
+
+#line 697
+        stroke_alpha_0 = _S297;
+
+#line 695
+    }
+    else
+    {
+
+#line 695
+        stroke_alpha_0 = 1.0f;
+
+#line 695
+    }
+
+#line 695
+    float4 result_0;
+
+#line 705
+    if(_S295 == int(6))
+    {
+
+#line 705
+        float4 _S299 = apply_tex_type_0(((kernelContext_49->tex_texture_0).sample((kernelContext_49->tex_sampler_0), (i_8->ftcoord_1), level((0.0f)))), kernelContext_49);
+
+#line 705
+        float4 _S300 = inner_col_0(kernelContext_49);
+        return _S299 * _S300;
+    }
+    else
+    {
+
+#line 707
+        if(_S295 == int(4))
+        {
+
+#line 707
+            float4 _S301 = render_filtered_image_0(i_8->fpos_5, kernelContext_49);
+
+#line 707
+            result_0 = _S301;
+
+#line 707
+        }
+        else
+        {
+
+#line 707
+            float4 _S302 = fill_color_0(_S295, i_8->fpos_5, kernelContext_49);
+
+#line 707
+            result_0 = _S302;
+
+#line 707
+        }
+
+#line 705
+    }
+
+#line 713
+    if(_S295 != int(4))
+    {
+
+#line 713
+        float _S303 = scissor_mask_0(i_8->fpos_5, kernelContext_49);
+
+#line 713
+        result_0 = result_0 * float4((stroke_alpha_0 * _S303)) ;
+
+#line 713
+    }
+
+
+    return result_0;
+}
+
+
+#line 716
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 128
+#line 716
 struct pixelInput_0
 {
-    float2 ftcoord_1 [[user(TEXCOORD)]];
-    float2 fpos_5 [[user(TEXCOORD_1)]];
-    [[flat]] uint paint_0 [[user(TEXCOORD_2)]];
+    float2 ftcoord_2 [[user(TEXCOORD)]];
+    float2 fpos_6 [[user(TEXCOORD_1)]];
+    [[flat]] uint paint_1 [[user(TEXCOORD_2)]];
 };
 
 
-#line 689
-[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S295 [[stage_in]], float4 position_1 [[position]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]], texture2d<float, access::sample> glyphtex_texture_1 [[texture(1)]], sampler glyphtex_sampler_1 [[sampler(1)]])
+#line 720
+[[fragment]] pixelOutput_0 fs_main(pixelInput_0 _S304 [[stage_in]], float4 position_2 [[position]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]], texture2d<float, access::sample> glyphtex_texture_1 [[texture(1)]], sampler glyphtex_sampler_1 [[sampler(1)]])
 {
 
-#line 689
-    thread KernelContext_0 kernelContext_49;
+#line 720
+    thread KernelContext_0 kernelContext_50;
 
-#line 689
-    (&kernelContext_49)->paints_0 = paints_1;
+#line 720
+    (&kernelContext_50)->paints_0 = paints_1;
 
-#line 689
-    (&kernelContext_49)->tex_texture_0 = tex_texture_1;
+#line 720
+    (&kernelContext_50)->tex_texture_0 = tex_texture_1;
 
-#line 689
-    (&kernelContext_49)->tex_sampler_0 = tex_sampler_1;
+#line 720
+    (&kernelContext_50)->tex_sampler_0 = tex_sampler_1;
 
-#line 689
-    (&kernelContext_49)->glyphtex_texture_0 = glyphtex_texture_1;
+#line 720
+    (&kernelContext_50)->glyphtex_texture_0 = glyphtex_texture_1;
 
-#line 689
-    (&kernelContext_49)->glyphtex_sampler_0 = glyphtex_sampler_1;
-    (&kernelContext_49)->paint_index_0 = _S295.paint_0;
+#line 720
+    (&kernelContext_50)->glyphtex_sampler_0 = glyphtex_sampler_1;
 
-#line 690
-    int _S296 = shader_type_0(&kernelContext_49);
+#line 720
+    thread VS_Out_0 _S305;
 
-    if(_S296 >= int(10))
-    {
+#line 720
+    (&_S305)->position_1 = position_2;
 
-#line 692
-        float4 _S297 = render_filter_0(_S296, _S295.fpos_5, &kernelContext_49);
+#line 720
+    (&_S305)->ftcoord_1 = _S304.ftcoord_2;
 
-#line 692
-        pixelOutput_0 _S298 = { _S297 };
-        return _S298;
-    }
+#line 720
+    (&_S305)->fpos_5 = _S304.fpos_6;
 
-#line 693
-    float stroke_alpha_0;
+#line 720
+    (&_S305)->paint_0 = _S304.paint_1;
 
+#line 720
+    float4 _S306 = main_color_0(&_S305, &kernelContext_50);
 
-    if(_S296 != int(6))
-    {
-
-#line 696
-        float _S299 = stroke_mask_0(_S295.ftcoord_1, &kernelContext_49);
-
-#line 696
-        float _S300 = stroke_thr_0(&kernelContext_49);
-
-        if(_S299 < _S300)
-        {
-
-#line 699
-            discard_fragment();
-
-#line 698
-        }
-
-#line 698
-        stroke_alpha_0 = _S299;
-
-#line 696
-    }
-    else
-    {
-
-#line 696
-        stroke_alpha_0 = 1.0f;
-
-#line 696
-    }
-
-#line 696
-    float4 result_0;
-
-#line 706
-    if(_S296 == int(6))
-    {
-
-#line 706
-        float4 _S301 = apply_tex_type_0((((&kernelContext_49)->tex_texture_0).sample(((&kernelContext_49)->tex_sampler_0), (_S295.ftcoord_1), level((0.0f)))), &kernelContext_49);
-
-#line 706
-        float4 _S302 = inner_col_0(&kernelContext_49);
-
-#line 706
-        pixelOutput_0 _S303 = { _S301 * _S302 };
-        return _S303;
-    }
-    else
-    {
-
-#line 708
-        if(_S296 == int(4))
-        {
-
-#line 708
-            float4 _S304 = render_filtered_image_0(_S295.fpos_5, &kernelContext_49);
-
-#line 708
-            result_0 = _S304;
-
-#line 708
-        }
-        else
-        {
-
-#line 708
-            float4 _S305 = fill_color_0(_S296, _S295.fpos_5, &kernelContext_49);
-
-#line 708
-            result_0 = _S305;
-
-#line 708
-        }
-
-#line 706
-    }
-
-#line 714
-    if(_S296 != int(4))
-    {
-
-#line 714
-        float _S306 = scissor_mask_0(_S295.fpos_5, &kernelContext_49);
-
-#line 714
-        result_0 = result_0 * float4((stroke_alpha_0 * _S306)) ;
-
-#line 714
-    }
-
-#line 714
-    pixelOutput_0 _S307 = { result_0 };
-
-
+#line 720
+    pixelOutput_0 _S307 = { _S306 };
     return _S307;
 }
 

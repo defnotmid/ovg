@@ -16,7 +16,15 @@ if [ -z "$FORMAT" ]; then
 	echo "no FORMAT in ../../ocurves/curves.odin" >&2
 	exit 1
 fi
-for unit in vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape shape_box_frag:fs_shape_box shape_group_frag:fs_shape_group shape_hairline_frag:fs_shape_hairline marker_group_frag:fs_marker_group; do
+# Each fragment unit's motion-blur variant (two colour targets) is
+# <unit>_motion, entry <entry>_motion.
+UNITS=(vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape shape_box_frag:fs_shape_box shape_group_frag:fs_shape_group shape_hairline_frag:fs_shape_hairline marker_group_frag:fs_marker_group)
+for unit in frag shape_frag shape_box_frag shape_group_frag shape_hairline_frag marker_group_frag; do
+	entry=$(printf '%s\n' "${UNITS[@]}" | sed -n "s/^$unit://p")
+	UNITS+=("${unit}_motion:${entry}_motion")
+done
+UNITS+=(composite_velocity_frag:fs_composite_velocity resolve_velocity_frag:fs_resolve_velocity)
+for unit in "${UNITS[@]}"; do
 	IFS=: read -r suffix entry <<<"$unit"
 	slangc ovg.slang "${FLAGS[@]}" -entry "$entry" -target spirv -o "ovg.$suffix.spv"
 	slangc ovg.slang "${FLAGS[@]}" -entry "$entry" -target metal -o "ovg.$suffix.msl"
@@ -26,8 +34,8 @@ for unit in vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape sh
 	fi
 	echo "  ovg.slang:$entry -> ovg.$suffix.{spv,msl}"
 done
-for blob in vert frag shape_vert shape_frag shape_box_frag shape_group_frag shape_hairline_frag marker_group_frag; do
-	spirv-val --target-env vulkan1.2 "ovg.$blob.spv"
+for unit in "${UNITS[@]}"; do
+	spirv-val --target-env vulkan1.2 "ovg.${unit%%:*}.spv"
 done
 cat >../sdlgpu/curves_format.odin <<EOF
 package ovg_sdlgpu

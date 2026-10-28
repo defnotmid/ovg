@@ -685,8 +685,7 @@ float4 fill_color(int type, float2 fpos) {
     return inner_col();
 }
 
-[shader("fragment")]
-float4 fs_main(VS_Out i) : SV_Target {
+float4 main_color(VS_Out i) {
     paint_index = i.paint;
     int type = shader_type();
     if (type >= FILTER_COLOR_MATRIX) {
@@ -715,6 +714,62 @@ float4 fs_main(VS_Out i) : SV_Target {
         result *= stroke_alpha * scissor_mask(i.fpos);
     }
     return result;
+}
+
+[shader("fragment")]
+float4 fs_main(VS_Out i) : SV_Target {
+    return main_color(i);
+}
+
+// ---- motion blur (ovg canvas_motion_blur) -----------------------------------
+//
+// A target with a velocity twin (ovg Cmd_Set_Render_Target.velocity) takes
+// a second colour target: each pixel's motion premultiplied by coverage,
+// (a * velocity, a * nearness, a), blended source-over whatever the
+// colour's blend (ONE, ONE_MINUS_SRC_ALPHA).
+
+// The colour and the motion it adds to the twin.
+struct Motion_Targets {
+    float4 color : SV_Target0;
+    float4 motion : SV_Target1;
+};
+
+// A clear on a twinned target (its Copy blend on both): still and
+// farthest, at the clear's alpha.
+[shader("fragment")]
+Motion_Targets fs_main_motion(VS_Out i) {
+    float4 c = main_color(i);
+    Motion_Targets o;
+    o.color = c;
+    o.motion = float4(0, 0, 0, c.a);
+    return o;
+}
+
+// A layer's or a group's motion `g` (a twin pixel), faded by `opacity` and
+// cut to the coverage `a` it composites with where that is less (a clip or
+// mask): what it adds to the twin (premultiplied source-over).
+float4 twin_composite(float4 g, float a, float opacity) {
+    return g * (g.a > a ? opacity * a / g.a : opacity);
+}
+
+// A layer's motion composited onto the twin (ovg Cmd_Composite_Velocity),
+// drawn over the layer's window: its twin (`tex`) at its coverage
+// (`glyphtex`'s alpha) and opacity (the paint's frag[0].x), both read at
+// the pixel (a nearest sampler over a quad on their texels).
+[shader("fragment")]
+float4 fs_composite_velocity(VS_Out i) : SV_Target {
+    float4 g = tex.SampleLevel(i.ftcoord, 0);
+    return twin_composite(g, glyphtex.SampleLevel(i.ftcoord, 0).a, paints[i.paint].frag[0].x);
+}
+
+// The screen's twin (`tex`) as velocity (RG) and nearness (R) targets.
+[shader("fragment")]
+Motion_Targets fs_resolve_velocity(VS_Out i) {
+    float4 t = tex.SampleLevel(i.ftcoord, 0);
+    Motion_Targets o;
+    o.color = float4(t.xy, 0, 0);
+    o.motion = float4(t.z, 0, 0, 0);
+    return o;
 }
 
 // ---- shapes (ovg shape.odin) ------------------------------------------------
@@ -752,6 +807,34 @@ struct Shape_Draw {
 [[vk::binding(4, 2)]] StructuredBuffer<Shape_Instance> members : register(t2, space2);
 [[vk::binding(1, 1)]] ConstantBuffer<Shape_Draw> shape_draw : register(b1, space1);
 [[vk::binding(3, 2)]] StructuredBuffer<uint> shapes : register(t1, space2);
+
+// An instance's motion (ovg Shape_Motion): at drawing coordinates p its
+// velocity is velocity.xy * p.x + velocity.zw * p.y + offset.xy, and
+// offset.z its nearness (0: it writes no motion). Row for row with the
+// frame's instances; read by the motion variants only.
+struct Shape_Motion {
+    float4 velocity;
+    float4 offset;
+};
+[[vk::binding(5, 2)]] StructuredBuffer<Shape_Motion> motions : register(t3, space2);
+
+// Instance `index`'s motion at p over `under` (a twin pixel) by coverage a.
+float4 motion_over(uint index, float2 p, float a, float4 under) {
+    Shape_Motion m = motions[index];
+    if (m.offset.z == 0.0) {
+        return under;
+    }
+    float2 v = m.velocity.xy * p.x + m.velocity.zw * p.y + m.offset.xy;
+    return float4(v, m.offset.z, 1.0) * a + under * (1.0 - a);
+}
+
+// The colour `c` of instance `index` and its motion at p.
+Motion_Targets shape_targets(float4 c, uint index, float2 p) {
+    Motion_Targets o;
+    o.color = c;
+    o.motion = motion_over(index, p, c.a, float4(0, 0, 0, 0));
+    return o;
+}
 
 struct VS_Shape_Out {
     float4 position : SV_Position;
@@ -834,8 +917,7 @@ float shape_aliased(VS_Shape_Out i) {
 
 // Instances without rotation or skew (the pixel's footprint a box): a
 // leaner shader than the parallelogram one, so it runs with more waves.
-[shader("fragment")]
-float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
+float4 shape_box(VS_Shape_Out i) {
     shape_clip(i);
     paint_index = i.data.y;
     if ((i.data.z & 2u) != 0u) {
@@ -845,7 +927,16 @@ float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
 }
 
 [shader("fragment")]
-float4 fs_shape(VS_Shape_Out i) : SV_Target {
+float4 fs_shape_box(VS_Shape_Out i) : SV_Target {
+    return shape_box(i);
+}
+
+[shader("fragment")]
+Motion_Targets fs_shape_box_motion(VS_Shape_Out i) {
+    return shape_targets(shape_box(i), i.data.w & 0x7fffffffu, i.fpos);
+}
+
+float4 shape_affine(VS_Shape_Out i) {
     shape_clip(i);
     paint_index = i.data.y;
     if ((i.data.z & 2u) != 0u) {
@@ -854,13 +945,32 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
     return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, shape_rule(i.data.z)));
 }
 
+[shader("fragment")]
+float4 fs_shape(VS_Shape_Out i) : SV_Target {
+    return shape_affine(i);
+}
+
+[shader("fragment")]
+Motion_Targets fs_shape_motion(VS_Shape_Out i) {
+    return shape_targets(shape_affine(i), i.data.w & 0x7fffffffu, i.fpos);
+}
+
 // A hairline (ovg hairline_shape): the shape's outline drawn asfloat(data.z)
 // pixels wide under any transform.
-[shader("fragment")]
-float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
+float4 shape_hairline(VS_Shape_Out i) {
     shape_clip(i);
     paint_index = i.data.y;
     return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
+}
+
+[shader("fragment")]
+float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
+    return shape_hairline(i);
+}
+
+[shader("fragment")]
+Motion_Targets fs_shape_hairline_motion(VS_Shape_Out i) {
+    return shape_targets(shape_hairline(i), i.data.w & 0x7fffffffu, i.fpos);
 }
 
 // A group of markers (ovg draw_markers): its records and cells a group of
@@ -869,8 +979,7 @@ float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
 // union of the fills and of the outlines, stopping once both are whole (or
 // absent), then the fill's paint (the members' row) at the first and the
 // outlines' (the tint) at the second over it.
-[shader("fragment")]
-float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
+float4 marker_group(VS_Shape_Out i) {
     shape_clip(i);
     uint dims = shapes[i.data.x];
     uint nx = dims & 0xffffu;
@@ -920,14 +1029,26 @@ float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
     return result;
 }
 
+[shader("fragment")]
+float4 fs_marker_group(VS_Shape_Out i) : SV_Target {
+    return marker_group(i);
+}
+
+// The group's motion: its first marker's (one draw_markers call's).
+[shader("fragment")]
+Motion_Targets fs_marker_group_motion(VS_Shape_Out i) {
+    return shape_targets(marker_group(i), i.data.z, i.fpos);
+}
+
 // A group (ovg Cmd_Draw_Shapes.group): a record over its instances'
 // bounds, in cells (rc: cell units; data: its grid's word offset in
 // `shapes`, the grid's columns and rows its first word, the tint's paint
 // row and the first instance). Each pixel composites the instances its cell lists, in
 // order, each shaded as `shape_fill` would, source-over, then takes the
-// tint.
-[shader("fragment")]
-float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
+// tint. With `moves` the members' motion accumulates beside their colour
+// and composites as a layer's, the tint's alpha its opacity (`motion`).
+float4 shape_group(VS_Shape_Out i, bool moves, out float4 motion) {
+    motion = float4(0, 0, 0, 0);
     shape_clip(i);
     uint dims = shapes[i.data.x];
     uint nx = dims & 0xffffu;
@@ -960,10 +1081,28 @@ float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
         paint_index = s.data.y;
         float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
         acc = c + acc * (1.0 - c.a);
+        if (moves) {
+            motion = motion_over(i.data.z + shapes[lists + k], i.fpos, c.a, motion);
+        }
     }
     if (acc.a < 1.0 / 510.0) {
         discard;
     }
     paint_index = i.data.y;
-    return acc * (fill_color(shader_type(), i.fpos) * scissor_mask(i.fpos));
+    float4 tint = fill_color(shader_type(), i.fpos) * scissor_mask(i.fpos);
+    motion = twin_composite(motion, acc.a, tint.a);
+    return acc * tint;
+}
+
+[shader("fragment")]
+float4 fs_shape_group(VS_Shape_Out i) : SV_Target {
+    float4 motion;
+    return shape_group(i, false, motion);
+}
+
+[shader("fragment")]
+Motion_Targets fs_shape_group_motion(VS_Shape_Out i) {
+    Motion_Targets o;
+    o.color = shape_group(i, true, o.motion);
+    return o;
 }

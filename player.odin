@@ -160,7 +160,7 @@ player_render :: proc(p: ^Player, f: ^Recorded_Frame, output: Render_Output = 0)
 		h := int(run.program.handle)
 		run.program = p.programs[h] if h < len(p.programs) else {}
 	}
-	p.backend.render(p.backend.data, output, &p.images, {paints = f.paints[:], commands = f.commands[:], bytes = f.bytes[:], filters = f.filters[:], runs = f.runs[:], shapes = f.shapes[:], shape_words = f.shape_words[:]})
+	p.backend.render(p.backend.data, output, &p.images, {paints = f.paints[:], commands = f.commands[:], bytes = f.bytes[:], filters = f.filters[:], runs = f.runs[:], shapes = f.shapes[:], shape_words = f.shape_words[:], motion = f.motion, motions = f.motions[:]})
 	for &run, i in f.runs {
 		run.program = p.recorded[i]
 	}

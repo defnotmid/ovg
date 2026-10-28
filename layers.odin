@@ -26,6 +26,13 @@ import "core:math"
 // images are cleared as they become targets and hold nothing from one frame
 // to the next, so they are `.Transient`; uploads (filled before the frame's
 // commands run) and turbulence lattices (kept across frames) are not.
+//
+// With motion blur (canvas_motion_blur) a layer's content keeps a velocity
+// twin as the target it composites onto does, and the pop composites the
+// layer's motion as it composited its pixels (Cmd_Composite_Velocity): the
+// content's motion, faded, clipped and masked as the layer is, whatever its
+// blend mode; filters don't apply to motion (where one spreads the layer,
+// its motion stays where its content drew).
 
 Layer_Params :: struct {
 	// The layer's group opacity, 0 meaning 1. The global alpha is not a
@@ -72,10 +79,12 @@ Layer_Window :: struct {
 
 @(private)
 Layer_Target :: struct {
-	target: Render_Target,
-	origin: [2]i32,
+	target:   Render_Target,
+	origin:   [2]i32,
 	// The layer stack's size to restore when this offscreen image ends.
-	outer:  [2]u32,
+	outer:    [2]u32,
+	// It keeps a velocity twin (render_target_set).
+	velocity: bool,
 }
 
 // Stand-in render targets of one depth (`image_store_alloc_virtual`).
@@ -107,6 +116,8 @@ Layer_Frame :: struct {
 	blend:      Blend_Mode,
 	mask_alpha: bool,
 	mask_invert: bool,
+	// The content keeps a velocity twin, as the target under it does.
+	velocity:   bool,
 }
 
 @(private)
@@ -202,7 +213,7 @@ layer_stack_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, width, height: u32, targ
 	ls.width, ls.height = width, height
 	ls.frame += 1
 	clear(&ls.targets)
-	append(&ls.targets, Layer_Target{target, {}, {}})
+	append(&ls.targets, Layer_Target{target, {}, {}, target == nil})
 	clear(&ls.frames)
 	layer_pool_reset(c, &ls.pool, ls.frame)
 	layer_pool_reset(c, &ls.tiles, ls.frame)
@@ -219,7 +230,7 @@ layer_stack_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, width, height: u32, targ
 	ls.root = {}
 	if root_layer {
 		ls.root = layer_acquire(ls, c, width, height)
-		layer_target_begin(ls, c, ls.root)
+		layer_target_begin(ls, c, ls.root, velocity = ls.targets[0].velocity)
 	}
 }
 
@@ -233,6 +244,7 @@ layer_stack_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	set_global_alpha(c, 1)
 	layer_blit(ls, c, ls.root, 0, 0, ls.width, ls.height, 1)
 	restore(c)
+	layer_composite_velocity(c, ls.root, ls.root, 0, 0, ls.width, ls.height, 1)
 	layer_release(ls, ls.root)
 	ls.root = {}
 }
@@ -310,6 +322,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	f.blend = params.blend
 	f.mask_alpha = params.mask_alpha
 	f.mask_invert = params.mask_invert
+	f.velocity = ls.targets[len(ls.targets) - 1].velocity
 	if params.blend != .Normal {
 		// Blending reads the target as an image of the canvas size.
 		f.full = true
@@ -339,7 +352,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 		}
 	}
 	append(&ls.frames, f)
-	layer_target_begin(ls, c, ls.stand_ins[depth].content)
+	layer_target_begin(ls, c, ls.stand_ins[depth].content, velocity = f.velocity)
 	ls.frames[depth].content = len(c.commands)
 }
 
@@ -353,8 +366,9 @@ layer_mask_begin :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 }
 
 layer_mask_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
+	depth := len(ls.frames) - 1
 	layer_target_end(ls, c)
-	layer_target_begin(ls, c, ls.stand_ins[len(ls.frames) - 1].content, keep = true)
+	layer_target_begin(ls, c, ls.stand_ins[depth].content, keep = true, velocity = ls.frames[depth].velocity)
 }
 
 // Ends the top layer: blurs, clips, masks and composites it.
@@ -387,6 +401,9 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	layer_relocate(c, f.mark.commands, si, content, mask, win)
 	ls.window = win
 	x, y := f32(win.x), f32(win.y)
+	// The content's twin holds its motion, which composites cut to the
+	// layer's coverage, whatever image that ends in.
+	drew := content
 	if f.filter != nil {
 		// The region cuts what the filter sees and what it makes.
 		filter_region_clip(ls, c, f.filter, f.xform, content)
@@ -441,7 +458,18 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	} else {
 		layer_blit(ls, c, content, x, y, w, h, f.opacity)
 	}
+	layer_composite_velocity(c, drew, content, x, y, w, h, f.opacity)
 	layer_release(ls, content)
+}
+
+// Motion blur: the motion `source` drew (its twin) composited onto the
+// current target's twin at `alpha`'s coverage times `opacity`, both images
+// lying at (x, y); nothing where the target keeps no twin.
+@(private = "file")
+layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32, w, h: u32, opacity: f32) {
+	if c.current_render_velocity {
+		append(&c.commands, Command{type = Cmd_Composite_Velocity{source, alpha, x, y, f32(w), f32(h), opacity}})
+	}
 }
 
 // Draws the layer `f` as a group of its shapes (`Cmd_Draw_Shapes.group`)
@@ -658,10 +686,12 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opa
 }
 
 // Draws a `w x h` layer image at (x, y) on the current target, untransformed
-// and unclipped, at `opacity` times the global alpha.
+// and unclipped, at `opacity` times the global alpha. It writes no motion:
+// a layer's goes by its velocity twin (layer_pop).
 layer_blit :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, x, y: f32, w, h: u32, opacity: f32) {
 	alpha := opacity * state(c).alpha
 	save(c)
+	state(c).motion = {}
 	set_global_alpha(c, 1)
 	reset_transform(c)
 	reset_scissor(c)
@@ -913,11 +943,11 @@ layer_draw_image :: proc(ls: ^Layer_Stack, c: ^Canvas, dst: Image_Id, dw, dh: u3
 }
 
 // Directs drawing into `layer`, its top-left pixel at `origin` (cleared
-// unless `keep`).
+// unless `keep`), with a velocity twin if `velocity`.
 @(private)
-layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep := false, origin := [2]i32{}) {
-	append(&ls.targets, Layer_Target{layer, origin, {}})
-	set_render_target(c, layer, origin)
+layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep := false, origin := [2]i32{}, velocity := false) {
+	append(&ls.targets, Layer_Target{layer, origin, {}, velocity})
+	render_target_set(c, layer, origin, velocity)
 	if !keep {
 		info, _ := image_info(c, layer)
 		save(c)
@@ -931,5 +961,5 @@ layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep :
 layer_target_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	pop(&ls.targets)
 	t := ls.targets[len(ls.targets) - 1]
-	set_render_target(c, t.target, t.origin)
+	render_target_set(c, t.target, t.origin, t.velocity)
 }

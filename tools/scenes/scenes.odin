@@ -97,6 +97,7 @@ ALL := [?]Scene {
 	{"curves_alpha", scene_curves_alpha},
 	{"hairlines", scene_hairlines},
 	{"markers", scene_markers},
+	{"motion", scene_motion},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the

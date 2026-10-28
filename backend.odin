@@ -212,10 +212,27 @@ composite_state_from_op :: proc "contextless" (op: Composite_Operation) -> Compo
 // `target`: the target is a window onto a larger drawing space (the layer
 // stack draws a layer in canvas coordinates into an image of its bounds).
 // Clear rectangles and scissor rectangles are in drawing coordinates too;
-// image filters and programs ignore the origin.
+// image filters and programs ignore the origin. With `velocity` (motion
+// blur, Frame.motion) the target keeps a velocity twin beside its pixels:
+// each draw's motion goes to it as its colour goes to the pixels.
 Cmd_Set_Render_Target :: struct {
-	target: Render_Target,
-	origin: [2]i32,
+	target:   Render_Target,
+	origin:   [2]i32,
+	velocity: bool,
+}
+// Motion blur: a layer's motion composited onto the current target's twin,
+// as its pixels were (the layer stack records it after the layer's own
+// composite, whose draw writes no motion). Over window (x, y, w, h)
+// (drawing coordinates), `source`'s twin, each pixel's motion as its
+// content left it, goes source-over onto the target's faded by `opacity`
+// and cut to `alpha`'s coverage where that is less: the layer as clipped
+// and masked (`source` itself when nothing else applied); where a filter
+// spread the layer its motion stays its content's. Both images lie at the
+// window.
+Cmd_Composite_Velocity :: struct {
+	source, alpha: Image_Id,
+	x, y, w, h:    f32,
+	opacity:       f32,
 }
 // Overwrites `rect` (clipped by the command's scissor) with `color`.
 Cmd_Clear_Rect :: struct {
@@ -305,6 +322,7 @@ Command_Type :: union {
 	Cmd_Filter_Image,
 	Cmd_Run_Program,
 	Cmd_Run_External,
+	Cmd_Composite_Velocity,
 }
 
 Command :: struct {
@@ -331,6 +349,21 @@ Frame :: struct {
 	shapes:    []Shape_Instance,
 	// The words of the shapes built this frame (`Shape_Instance.words`).
 	shape_words: []u32,
+	// Motion blur (canvas_motion_blur): the frame target and the targets set
+	// with `velocity` keep velocity twins, and `motions` holds each shape
+	// instance's motion, row for row with `shapes` (empty without).
+	motion:      bool,
+	motions:     []Shape_Motion,
+}
+
+// A shape instance's motion over the shutter's first half: at drawing
+// coordinates p its velocity is `velocity(p)` (pixels, the middle minus the
+// opening), and `nearness` orders surfaces (larger is nearer: a later
+// set_motion). A nearness of 0 writes no motion: the layer stack's own
+// composites, whose layer's motion goes by Cmd_Composite_Velocity.
+Shape_Motion :: struct {
+	velocity: Transform2D,
+	nearness: f32,
 }
 
 // Backend-specific output for `render`; the SDL_GPU backend reads it as a

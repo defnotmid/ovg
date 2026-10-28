@@ -1,0 +1,49 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 732 "ovg.slang"
+struct Motion_Targets_0
+{
+    float4 color_0 [[color(0)]];
+    float4 motion_0 [[color(1)]];
+};
+
+
+#line 732
+struct pixelInput_0
+{
+    float2 ftcoord_0 [[user(TEXCOORD)]];
+    float2 fpos_0 [[user(TEXCOORD_1)]];
+    [[flat]] uint paint_0 [[user(TEXCOORD_2)]];
+};
+
+
+#line 732
+struct KernelContext_0
+{
+    texture2d<float, access::sample> tex_texture_0;
+    sampler tex_sampler_0;
+};
+
+
+#line 767
+[[fragment]] Motion_Targets_0 fs_resolve_velocity(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
+{
+
+#line 767
+    thread KernelContext_0 kernelContext_0;
+
+#line 767
+    (&kernelContext_0)->tex_texture_0 = tex_texture_1;
+
+#line 767
+    (&kernelContext_0)->tex_sampler_0 = tex_sampler_1;
+    float4 _S2 = ((tex_texture_1).sample((tex_sampler_1), (_S1.ftcoord_0), level((0.0f))));
+    thread Motion_Targets_0 o_0;
+    (&o_0)->color_0 = float4(_S2.xy, 0.0f, 0.0f);
+    (&o_0)->motion_0 = float4(_S2.z, 0.0f, 0.0f, 0.0f);
+    return o_0;
+}
+

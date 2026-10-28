@@ -18,16 +18,15 @@ import vg ".."
 // instances under any scissors draw together.
 
 Pipeline_Key :: struct {
-	blend:   vg.Composite_Operation_State,
-	format:  sdl.GPUTextureFormat,
-	// The shape pipeline (shapes.odin) instead of the triangle one, its
-	// box variant (instances without rotation or skew), its group one (of
-	// markers: `marker`) and its hairline one.
-	shapes:   bool,
-	box:      bool,
-	group:    bool,
-	marker:   bool,
-	hairline: bool,
+	blend:  vg.Composite_Operation_State,
+	format: sdl.GPUTextureFormat,
+	// The fragment shader: the shape ones (shapes.odin) pull their
+	// instances, the others draw quads.
+	frag:   Frag,
+	// A second colour target's format (INVALID: none): a twinned target's
+	// velocity twin (TWIN_FORMAT, the shader's motion variant), or the
+	// resolve's nearness.
+	second: sdl.GPUTextureFormat,
 }
 
 // `vg.Params` as the shader reads it (`vg.pack_frag_uniforms`).
@@ -68,6 +67,8 @@ Row_Kind :: enum u8 {
 Row :: struct {
 	kind:     Row_Kind,
 	target:   Image,
+	// The second colour target (`Pipeline_Key.second`; texture nil: none).
+	second:   Image,
 	// Drawing coordinates of the target's top-left pixel.
 	origin:   [2]i32,
 	key:      Pipeline_Key,
@@ -98,6 +99,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	b.frame += 1
 	b.stats = {shape_instances = len(frame.shapes)}
 	evict_textures(b, &b.scratch)
+	evict_textures(b, &b.twins)
 
 	screen: Image
 	if o != nil {
@@ -125,11 +127,13 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	vert_count := len(b.verts)
 	paint_count := len(frame.paints) + len(b.paints)
 	instance_count := len(frame.shapes) + len(b.groups)
+	motion_count := len(frame.motions)
 	// A frame whose buffers the device can't provide (out of memory, a lost
 	// device) is dropped, not drawn from nil buffers.
 	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(Vertex), {.VERTEX}) ||
 	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) ||
-	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) {
+	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) ||
+	   (motion_count > 0 && !stream_reserve(b, &b.motion_stream, motion_count * size_of(Gpu_Shape_Motion), {.GRAPHICS_STORAGE_READ})) {
 		return
 	}
 
@@ -181,6 +185,17 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 			}
 			copy(out[len(frame.shapes):instance_count], b.groups[:])
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
+		} else {
+			uploaded = false
+		}
+	}
+	if motion_count > 0 {
+		if out := ([^]Gpu_Shape_Motion)(stream_map(b, &b.motion_stream, motion_count)); out != nil {
+			for m, i in frame.motions {
+				v := m.velocity
+				out[i] = {{v[0], v[1], v[2], v[3]}, {v[4], v[5], m.nearness, 0}}
+			}
+			stream_commit(b, &b.motion_stream, copy_pass, motion_count * size_of(Gpu_Shape_Motion))
 		} else {
 			uploaded = false
 		}
@@ -272,7 +287,12 @@ Planner :: struct {
 	screen: Image,
 	target: Image,
 	origin: [2]i32,
+	// The target's velocity twin (texture nil: none).
+	twin:   Image,
 }
+
+// An instance's motion as the shaders read it (Shape_Motion in ovg.slang).
+Gpu_Shape_Motion :: [2][4]f32
 
 // Where the planner's next quad starts in the vertex buffer.
 @(private = "file")
@@ -295,6 +315,8 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 	}
 	clear(&b.groups)
 	clear(&b.group_words)
+	clear(&b.twin_of)
+	b.motion_frame = frame.motion
 	resize(&b.shape_clips, len(frame.shapes))
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
@@ -306,6 +328,9 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 					p.target = img^
 				}
 			}
+			p.twin = plan_twin(&p, p.target) if c.velocity else {}
+		case vg.Cmd_Composite_Velocity:
+			plan_composite_velocity(&p, c)
 		case vg.Cmd_Clear_Rect:
 			plan_clear(&p, cmd, c)
 		case vg.Cmd_Draw_Shapes:
@@ -324,7 +349,6 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 				k = clip
 			}
 			row.kind = .Shapes
-			row.key.shapes = true
 			row.scissor = {0, 0, i32(p.target.width), i32(p.target.height)}
 			if c.group != 0 {
 				plan_group(&p, row, c, clip)
@@ -346,11 +370,130 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 			append(&b.rows, Row{kind = .External, external = &c})
 		}
 	}
+	plan_resolve_velocity(&p)
 	grids, placed := store_place(b, frame)
 	for &g in b.groups {
 		g.data.x += grids
 	}
 	return placed
+}
+
+// ---- motion blur ----------------------------------------------------------------------
+
+// The twin of `target` this frame: one the frame gave it already, else a
+// free one of its size (made if none is), the screen's cleared first (a
+// layer clears its own). Texture nil when none can be made: its motion is
+// lost.
+@(private = "file")
+plan_twin :: proc(p: ^Planner, target: Image) -> Image {
+	b := p.b
+	for t in b.twin_of {
+		if t.target == target.texture {
+			return b.twins[t.twin].image
+		}
+	}
+	at := -1
+	for t, i in b.twins {
+		if t.last_used != b.frame && t.image.width == target.width && t.image.height == target.height {
+			at = i
+			break
+		}
+	}
+	if at < 0 {
+		img, err := create_texture(b, target.width, target.height, TWIN_FORMAT, {.SAMPLER, .COLOR_TARGET})
+		if err != nil {
+			return {}
+		}
+		append(&b.twins, Cached_Texture{img^, b.frame})
+		free(img, b.allocator)
+		at = len(b.twins) - 1
+	}
+	b.twins[at].last_used = b.frame
+	append(&b.twin_of, Twin_Of{target.texture, at})
+	twin := b.twins[at].image
+	if target.texture == p.screen.texture {
+		plan_quad(p, twin, {}, {blend = vg.composite_state_from_op(.Copy), format = TWIN_FORMAT, frag = .Main}, {texture_binding(b, nil), texture_binding(b, nil)}, {0, 0, f32(twin.width), f32(twin.height)}, add_paint(p, solid_paint({})))
+	}
+	return twin
+}
+
+// A layer's motion onto the target's twin (vg.Cmd_Composite_Velocity): a
+// quad over its window sampling its twin and its coverage, blended
+// source-over.
+@(private = "file")
+plan_composite_velocity :: proc(p: ^Planner, c: vg.Cmd_Composite_Velocity) {
+	src, alpha := lookup(p, c.source), lookup(p, c.alpha)
+	if p.twin.texture == nil || src == nil || alpha == nil {
+		return
+	}
+	for t in p.b.twin_of {
+		if t.target != src.texture {
+			continue
+		}
+		// The opacity rides in the paint's first word (fs_composite_velocity).
+		paint := add_paint(p, {0 = {c.opacity, 0, 0, 0}})
+		nearest := p.b.samplers[4]
+		key := Pipeline_Key{blend = vg.composite_state_from_op(.Source_Over), format = TWIN_FORMAT, frag = .Composite_Velocity}
+		plan_quad(p, p.twin, p.origin, key, {{p.b.twins[t.twin].image.texture, nearest}, {alpha.texture, nearest}}, {c.x, c.y, c.w, c.h}, paint)
+		return
+	}
+}
+
+// The screen's twin as the velocity and nearness textures, after the
+// frame's drawing.
+@(private = "file")
+plan_resolve_velocity :: proc(p: ^Planner) {
+	b := p.b
+	twin: Image
+	for t in b.twin_of {
+		if t.target == p.screen.texture {
+			twin = b.twins[t.twin].image
+		}
+	}
+	if twin.texture == nil {
+		b.motion_frame = false
+		return
+	}
+	for out, k in ([2]^^Image{&b.velocity, &b.nearness}) {
+		format := VELOCITY_FORMAT if k == 0 else NEARNESS_FORMAT
+		if out^ != nil && (out^.width != twin.width || out^.height != twin.height) {
+			release_image(b, out^)
+			out^ = nil
+		}
+		if out^ == nil {
+			img, err := create_texture(b, twin.width, twin.height, format, {.SAMPLER, .COLOR_TARGET})
+			if err != nil {
+				b.motion_frame = false
+				return
+			}
+			out^ = img
+		}
+	}
+	key := Pipeline_Key{blend = vg.composite_state_from_op(.Copy), format = VELOCITY_FORMAT, frag = .Resolve_Velocity, second = NEARNESS_FORMAT}
+	plan_quad(p, b.velocity^, {}, key, {{twin.texture, b.samplers[4]}, texture_binding(b, nil)}, {0, 0, f32(twin.width), f32(twin.height)}, 0, b.nearness^)
+}
+
+// A row drawing one quad over `rect` (drawing coordinates, texture
+// coordinates 0..1) into `target` placed at `origin`.
+@(private = "file")
+plan_quad :: proc(p: ^Planner, target: Image, origin: [2]i32, key: Pipeline_Key, textures: [2]sdl.GPUTextureSamplerBinding, rect: vg.Rect, paint: u32, second := Image{}) {
+	append(&p.b.rows, Row{kind = .Draw, target = target, second = second, origin = origin, key = key, textures = textures, scissor = {0, 0, i32(target.width), i32(target.height)}, verts = {extra_base(p), 6}})
+	x0, y0 := rect.x, rect.y
+	x1, y1 := x0 + rect.w, y0 + rect.h
+	append(&p.b.verts, vertex(x0, y0, 0, 0, paint), vertex(x1, y0, 1, 0, paint), vertex(x1, y1, 1, 1, paint))
+	append(&p.b.verts, vertex(x0, y0, 0, 0, paint), vertex(x1, y1, 1, 1, paint), vertex(x0, y1, 0, 1, paint))
+}
+
+// A paint filling with premultiplied `color`.
+@(private = "file")
+solid_paint :: proc(color: [4]f32) -> Paint {
+	params := vg.default_params()
+	params.shader_type = .Fill_Color
+	params.inner_col = color
+	params.outer_col = color
+	params.stroke_mult = 1
+	params.stroke_thr = -1
+	return vg.pack_frag_uniforms(params)
 }
 
 @(private = "file")
@@ -365,8 +508,8 @@ add_paint :: proc(p: ^Planner, paint: Paint) -> u32 {
 	return u32(len(p.frame.paints) + len(p.b.paints) - 1)
 }
 
-// A row drawing `cmd` into the current target; the caller sets its
-// vertices.
+// A row drawing `cmd` into the current target (and its twin); the caller
+// sets its vertices.
 @(private = "file")
 draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 	scissor := sdl.Rect{0, 0, i32(p.target.width), i32(p.target.height)}
@@ -376,8 +519,9 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 	return {
 		kind = .Draw,
 		target = p.target,
+		second = p.twin,
 		origin = p.origin,
-		key = {blend = cmd.composite_operation, format = p.target.format},
+		key = {blend = cmd.composite_operation, format = p.target.format, second = TWIN_FORMAT if p.twin.texture != nil else .INVALID},
 		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, nil)},
 		scissor = scissor,
 	}
@@ -422,13 +566,7 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 	if area.w <= 0 || area.h <= 0 {
 		return
 	}
-	params := vg.default_params()
-	params.shader_type = .Fill_Color
-	params.inner_col = vg.color_to_array(vg.premultiplied(c.color))
-	params.outer_col = params.inner_col
-	params.stroke_mult = 1
-	params.stroke_thr = -1
-	paint := add_paint(p, vg.pack_frag_uniforms(params))
+	paint := add_paint(p, solid_paint(vg.color_to_array(vg.premultiplied(c.color))))
 	row := draw_row(p, cmd)
 	row.scissor = area
 	row.verts = {extra_base(p), 6}
@@ -448,14 +586,13 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 	start := instances.start
 	for i in instances.start ..< instances.start + instances.count {
 		inst := &p.frame.shapes[i]
-		hairline := inst.hairline > 0
-		box := !hairline && inst.transform[1] == 0 && inst.transform[2] == 0
-		if i > start && (box != row.key.box || hairline != row.key.hairline) {
+		frag := Frag.Shape_Hairline if inst.hairline > 0 else (.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape)
+		if i > start && frag != row.key.frag {
 			row.verts = {start, i - start}
 			append(&p.b.rows, row)
 			start = i
 		}
-		row.key.box, row.key.hairline = box, hairline
+		row.key.frag = frag
 	}
 	row.verts = {start, instances.start + instances.count - start}
 	append(&p.b.rows, row)
@@ -537,8 +674,7 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 		}
 	}
 	row := base
-	row.key.group = true
-	row.key.marker = p.frame.shapes[c.instances.start].marker != .None
+	row.key.frag = .Marker_Group if p.frame.shapes[c.instances.start].marker != .None else .Shape_Group
 	first := len(b.groups)
 	listed :: proc(words: ^[dynamic]u32, cell: int) -> bool {
 		return words[cell] != words[cell + 1]
@@ -759,8 +895,9 @@ Recorder :: struct {
 	frame:    vg.Frame,
 	cmd:      ^sdl.GPUCommandBuffer,
 	pass:     ^sdl.GPURenderPass,
-	// The open pass's target and origin.
+	// The open pass's targets and origin.
 	target:   ^sdl.GPUTexture,
+	second:   ^sdl.GPUTexture,
 	origin:   [2]i32,
 	// State set in the open pass.
 	pipeline: ^sdl.GPUGraphicsPipeline,
@@ -819,6 +956,7 @@ continues :: proc(pending, row: Row) -> bool {
 		!row.own_pass &&
 		row.verts.start == pending.verts.start + pending.verts.count &&
 		row.target.texture == pending.target.texture &&
+		row.second.texture == pending.second.texture &&
 		row.origin == pending.origin &&
 		row.key == pending.key &&
 		row.textures == pending.textures &&
@@ -834,10 +972,10 @@ flush :: proc(r: ^Recorder) {
 	}
 	row := r.pending
 	r.gathering = false
-	if row.own_pass || r.target != row.target.texture || r.origin != row.origin {
+	if row.own_pass || r.target != row.target.texture || r.second != row.second.texture || r.origin != row.origin {
 		end_pass(r)
 	}
-	if !begin_pass(r, row.target, row.origin) {
+	if !begin_pass(r, row.target, row.second, row.origin) {
 		return
 	}
 	pipeline := get_pipeline(r.b, row.key)
@@ -873,30 +1011,31 @@ flush :: proc(r: ^Recorder) {
 	}
 }
 
-// Starts a render pass on `target` if none is open.
+// Starts a render pass on `target` (and `second`) if none is open.
 @(private = "file")
-begin_pass :: proc(r: ^Recorder, target: Image, origin: [2]i32) -> bool {
+begin_pass :: proc(r: ^Recorder, target, second: Image, origin: [2]i32) -> bool {
 	if r.pass != nil {
 		return true
 	}
-	color := sdl.GPUColorTargetInfo {
-		texture  = target.texture,
-		load_op  = .LOAD,
-		store_op = .STORE,
-	}
-	r.pass = sdl.BeginGPURenderPass(r.cmd, &color, 1, nil)
+	color := [2]sdl.GPUColorTargetInfo{{texture = target.texture, load_op = .LOAD, store_op = .STORE}, {texture = second.texture, load_op = .LOAD, store_op = .STORE}}
+	r.pass = sdl.BeginGPURenderPass(r.cmd, &color[0], 2 if second.texture != nil else 1, nil)
 	if r.pass == nil {
 		return false
 	}
 	r.b.stats.render_passes += 1
-	r.target, r.origin = target.texture, origin
+	r.target, r.second, r.origin = target.texture, second.texture, origin
 	vertices := sdl.GPUBufferBinding {
 		buffer = r.b.vertex_stream.buffer,
 	}
 	sdl.BindGPUVertexBuffers(r.pass, 0, &vertices, 1)
-	// The group shader reads the instances too.
-	storage := [3]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer, r.b.instance_stream.buffer}
-	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], 3 if storage[1] != nil && storage[2] != nil else 1)
+	// The group shader reads the instances too, and the motion variants
+	// their motions.
+	storage := [4]^sdl.GPUBuffer{r.b.paint_stream.buffer, r.b.shapes.buffer, r.b.instance_stream.buffer, r.b.motion_stream.buffer}
+	bound: u32 = 1
+	if storage[1] != nil && storage[2] != nil {
+		bound = 4 if second.texture != nil && storage[3] != nil else 3
+	}
+	sdl.BindGPUFragmentStorageBuffers(r.pass, 0, &storage[0], bound)
 	if instances := r.b.instance_stream.buffer; instances != nil {
 		sdl.BindGPUVertexStorageBuffers(r.pass, 0, &instances, 1)
 	}
@@ -914,7 +1053,7 @@ end_pass :: proc(r: ^Recorder) {
 	if r.pass != nil {
 		sdl.EndGPURenderPass(r.pass)
 		r.pass = nil
-		r.target = nil
+		r.target, r.second = nil, nil
 	}
 }
 
@@ -1129,10 +1268,8 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		{location = 1, buffer_slot = 0, format = .USHORT2_NORM, offset = u32(offset_of(Vertex, u))},
 		{location = 2, buffer_slot = 0, format = .UINT, offset = u32(offset_of(Vertex, paint))},
 	}
-	s := key.blend
-	color := sdl.GPUColorTargetDescription {
-		format = key.format,
-		blend_state = {
+	blend :: proc(s: vg.Composite_Operation_State) -> sdl.GPUColorTargetBlendState {
+		return {
 			enable_blend = true,
 			src_color_blendfactor = blend_factor(s.src_rgb),
 			dst_color_blendfactor = blend_factor(s.dst_rgb),
@@ -1140,17 +1277,22 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 			src_alpha_blendfactor = blend_factor(s.src_alpha),
 			dst_alpha_blendfactor = blend_factor(s.dst_alpha),
 			alpha_blend_op = .ADD,
-		},
+		}
 	}
-	if key.shapes {
+	// A draw's motion goes over the twin's source-over, whatever its blend;
+	// a clear's (Main) and the resolve's copy as the colour does.
+	color := [2]sdl.GPUColorTargetDescription{{format = key.format, blend_state = blend(key.blend)}, {format = key.second, blend_state = blend(key.blend if key.frag == .Main || key.frag == .Resolve_Velocity else vg.composite_state_from_op(.Source_Over))}}
+	targets: u32 = 1 if key.second == .INVALID else 2
+	frag := b.frags[key.frag][1] if targets == 2 && b.frags[key.frag][1] != nil else b.frags[key.frag][0]
+	if key.frag >= .Shape && key.frag <= .Marker_Group {
 		// No vertex input: the shader pulls its instances.
 		info := sdl.GPUGraphicsPipelineCreateInfo {
 			vertex_shader = b.shape_vert,
-			fragment_shader = (b.marker_group_frag if key.marker else b.shape_group_frag) if key.group else (b.shape_hairline_frag if key.hairline else (b.shape_box_frag if key.box else b.shape_frag)),
+			fragment_shader = frag,
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			multisample_state = {sample_count = ._1},
-			target_info = {color_target_descriptions = &color, num_color_targets = 1},
+			target_info = {color_target_descriptions = &color[0], num_color_targets = targets},
 		}
 		p := sdl.CreateGPUGraphicsPipeline(b.device, info)
 		if p != nil {
@@ -1160,7 +1302,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 	}
 	info := sdl.GPUGraphicsPipelineCreateInfo {
 		vertex_shader = b.vert,
-		fragment_shader = b.frag,
+		fragment_shader = frag,
 		vertex_input_state = {
 			vertex_buffer_descriptions = &buffer,
 			num_vertex_buffers = 1,
@@ -1170,7 +1312,7 @@ get_pipeline :: proc(b: ^SDL_Backend, key: Pipeline_Key) -> ^sdl.GPUGraphicsPipe
 		primitive_type = .TRIANGLELIST,
 		rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 		multisample_state = {sample_count = ._1},
-		target_info = {color_target_descriptions = &color, num_color_targets = 1},
+		target_info = {color_target_descriptions = &color[0], num_color_targets = targets},
 	}
 	p := sdl.CreateGPUGraphicsPipeline(b.device, info)
 	if p != nil {

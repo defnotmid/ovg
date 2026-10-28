@@ -42,6 +42,9 @@ Added in ovg:
   as layers, with image, video or group children.
 - **Recording and playback**: record a frame's commands on one thread and play
   them on the GPU thread, for parallel frame building.
+- **Motion blur input**: each frame's velocity and nearness per pixel, from
+  how each draw moves (`set_motion`), through groups and layers, for a
+  motion blur pass such as o3d's (see Motion blur below).
 - **Editor overlays**: a shape kept in document units drawn at many places
   with one paint (`fill_shapes`), its outline as a hairline a constant
   number of pixels wide at any zoom (`hairline_shape`), and anchors and
@@ -151,9 +154,10 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   the store starts over in a buffer four times their size. `gpu.stats`
   counts a frame's shape instances, the words it uploaded and whether the
   store started over (`shape_restarts`).
-- Pipelines are cached by blend factors, target format and kind (quads,
-  shapes, box shapes, groups, hairlines, groups of markers). There is no
-  depth or stencil buffer. Blur
+- Pipelines are cached by blend factors, target format, fragment shader
+  (quads, shapes, box shapes, groups, hairlines, groups of markers, and
+  motion blur's composite and resolve) and second target (a velocity
+  twin's, or the resolve's nearness). There is no depth or stencil buffer. Blur
   intermediates are kept per image shape and released after 30 frames
   unused.
 - RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
@@ -175,7 +179,9 @@ shader type and glyph mode come from the uniforms and are branched on at
 runtime, as in femtovg. Bindings follow SDL_GPU's convention (vertex uniforms
 set 1, fragment samplers set 2, fragment uniforms set 3).
 `shaders/build.sh` compiles it with `slangc` to the committed `.spv`
-(Vulkan) and `.msl` (Metal) blobs, which the backend `#load`s. Only shader
+(Vulkan) and `.msl` (Metal) blobs, which the backend `#load`s; each
+fragment entry but the motion blur passes' has a `_motion` variant writing
+a second target (a velocity twin). Only shader
 edits need slangc. It includes ocurves' `curves.slang` from the checkout
 beside ovg and records that ocurves' `curves.FORMAT` in
 `sdlgpu/curves_format.odin`, and the backend `#assert`s it is the one it
@@ -210,6 +216,45 @@ texture for N recording canvases); a `stable` source is borrowed instead of
 copied. Programs registered on a recording canvas are created by the player
 (their blobs must outlive the frames using them). The pixels are the same as
 drawing on the player's backend directly (`player_test.odin`).
+
+## Motion blur
+
+With `canvas_motion_blur(&c, true)` (switched between frames) a frame also
+records how its draws move, and the backend gives each screen pixel's
+velocity (pixels, the middle of the shutter minus its opening) and
+nearness (larger is nearer), as o3d's motion blur pass takes them:
+
+```odin
+vg.canvas_motion_blur(&c, true)
+// for each node, still ones too:
+vg.set_motion(&c, vg.transform_multiply(vg.transform_inverse(mid), open))
+// ... draw it ...
+vg.flush(&c)
+v, n := vg.software_backend_velocity(&sw)       // [][2]f32, []f32
+vt, nt := vgsdl.velocity_textures(&gpu)          // R16G16_FLOAT, R16_FLOAT
+```
+
+- `set_motion(c, opened)` maps a point's place at the middle of the shutter
+  (drawing coordinates) to its place at the opening, for what is drawn until
+  a restore. Each call starts a surface nearer than everything drawn
+  before it, and so does drawing on after a restore brings an earlier one
+  back.
+- A draw's motion goes over the pixel's by the draw's coverage (its final
+  alpha), whatever its blend mode, over still, farthest ground: the
+  outputs are premultiplied by coverage, as the blend leaves them.
+- Groups and layers composite their content's motion as they composite its
+  pixels: faded, clipped and masked. Filters don't apply to motion: where
+  one spreads a layer (a blur's halo), the motion stays where its content
+  drew. Programs and external work write no motion.
+- The screen and each layer's content keep a velocity twin, (a * velocity,
+  a * nearness, a) per pixel: `[4]f32` in the software backend,
+  `R16G16B16A16_FLOAT` on the GPU, whose shape shaders write it as a second
+  target. `tools/sdlgpu_parity` draws every scene again with motion blur:
+  its pixels don't change, and the velocity and nearness match the software
+  backend's (`motion_test.odin` checks them against each draw's motion).
+- Cost: off, nothing more is recorded, allocated or drawn (the software
+  rasterizer's loops are specialized on whether a draw moves); on, the
+  twins' memory and a twin write per covered pixel.
 
 ## Filters and paint extras
 

@@ -35,6 +35,19 @@ Software_Backend :: struct {
 	// threads must have its own (an Odin thread's default, as odecs'
 	// Static_Pool's workers do).
 	pool:      ^common.Work_Pool,
+	// Motion blur (Frame.motion): the velocity twins of the screen and of
+	// each image a frame draws into with `velocity`, one block carved for a
+	// render (sw_twins) and kept at the largest render's size; `twin_at`
+	// holds an image's span start by its slot (-1: none). A twin pixel is
+	// (a * velocity, a * nearness, a): premultiplied by coverage.
+	twins:     [][4]f32,
+	twin_at:   [dynamic]int,
+	// The screen's twin and the current target's (pixels nil: none).
+	screen_twin: Sw_Twin,
+	twin:      Sw_Twin,
+	// The last frame's velocity and nearness (software_backend_velocity).
+	velocity:  [dynamic][2]f32,
+	nearness:  [dynamic]f32,
 }
 
 software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocator) {
@@ -42,6 +55,9 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.binned = make([dynamic]Sw_Binned, allocator)
 	b.starts = make([dynamic]u32, allocator)
 	b.bounds = make([dynamic]Bounds, allocator)
+	b.twin_at = make([dynamic]int, allocator)
+	b.velocity = make([dynamic][2]f32, allocator)
+	b.nearness = make([dynamic]f32, allocator)
 }
 
 software_backend_destroy :: proc(b: ^Software_Backend) {
@@ -51,6 +67,10 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.starts)
 	delete(b.bounds)
 	delete(b.transient, b.allocator)
+	delete(b.twins, b.allocator)
+	delete(b.twin_at)
+	delete(b.velocity)
+	delete(b.nearness)
 	b^ = {}
 }
 
@@ -73,6 +93,15 @@ software_backend :: proc(b: ^Software_Backend) -> Backend {
 // The screen contents (RGBA8, premultiplied, top-down).
 software_backend_pixels :: proc(b: ^Software_Backend) -> Image_Source {
 	return image_source_rgba(b.pixels, b.width, b.height)
+}
+
+// Motion blur (canvas_motion_blur): the last frame's velocity (pixels, the
+// shutter's middle minus its opening) and nearness at each screen pixel,
+// top-down, each the draws' over the pixel by their coverage over still,
+// farthest ground, as o3d's motion_blur takes them; empty after a frame
+// without.
+software_backend_velocity :: proc(b: ^Software_Backend) -> (velocity: [][2]f32, nearness: []f32) {
+	return b.velocity[:], b.nearness[:]
 }
 
 @(private = "file")
@@ -162,6 +191,14 @@ Sw_Target :: struct {
 	format: Pixel_Format,
 }
 
+// A velocity twin: its target's pixels' motion (Software_Backend.twins).
+@(private = "file")
+Sw_Twin :: struct {
+	pixels: [][4]f32,
+	width:  u32,
+	height: u32,
+}
+
 @(private = "file")
 sw_active_target :: proc(b: ^Software_Backend, images: ^Image_Store) -> (Sw_Target, bool) {
 	if image_id_valid(b.target) {
@@ -181,8 +218,10 @@ sw_active_target :: proc(b: ^Software_Backend, images: ^Image_Store) -> (Sw_Targ
 sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, frame: Frame) {
 	b := (^Software_Backend)(data)
 	sw_lend(b, images)
+	sw_twins(b, images, frame)
 	b.target = {}
 	b.origin = {}
+	b.twin = sw_twin_of(b, images, nil, frame.motion)
 	// The frame's instances' bounds: room for its largest frame, kept.
 	if len(b.bounds) < len(frame.shapes) {
 		resize(&b.bounds, len(frame.shapes))
@@ -202,6 +241,9 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 			if id, is_image := v.target.(Image_Id); is_image {
 				b.target = id
 			}
+			b.twin = sw_twin_of(b, images, v.target, v.velocity)
+		case Cmd_Composite_Velocity:
+			sw_composite_velocity(b, images, v)
 		case Cmd_Filter_Image:
 			sw_filter_image(b, images, cmd, v.target_image, frame.filters[v.filter])
 		case Cmd_Run_Program:
@@ -212,6 +254,116 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 	}
 	sw_draw_run(b, images, frame, frame.commands[run:])
 	sw_take_back(b, images)
+	sw_resolve_velocity(b)
+}
+
+// Gives the screen and every image the frame draws into with `velocity` a
+// twin, its span of one block sized for them all (grown, never shrunk),
+// the screen's cleared (a layer clears its own). Out of memory leaves them
+// without: their motion is lost.
+@(private = "file")
+sw_twins :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame) {
+	clear(&b.twin_at)
+	b.screen_twin = {}
+	if !frame.motion {
+		return
+	}
+	resize(&b.twin_at, len(images.entries.slots))
+	for &at in b.twin_at {
+		at = -1
+	}
+	total := int(b.width * b.height)
+	for cmd in frame.commands {
+		rt, is_target := cmd.type.(Cmd_Set_Render_Target)
+		id, is_image := rt.target.(Image_Id)
+		if !is_target || !is_image || !rt.velocity || b.twin_at[id.key.idx] >= 0 {
+			continue
+		}
+		if e := image_store_get(images, id); e != nil {
+			b.twin_at[id.key.idx] = total
+			total += int(e.info.width * e.info.height)
+		}
+	}
+	if len(b.twins) < total {
+		delete(b.twins, b.allocator)
+		b.twins, _ = make([][4]f32, total, b.allocator)
+	}
+	if len(b.twins) < total {
+		clear(&b.twin_at)
+		return
+	}
+	b.screen_twin = {b.twins[:b.width * b.height], b.width, b.height}
+	mem.zero_slice(b.screen_twin.pixels)
+}
+
+// The twin of `target` (nil: the screen), none without `velocity`.
+@(private = "file")
+sw_twin_of :: proc(b: ^Software_Backend, images: ^Image_Store, target: Render_Target, velocity: bool) -> Sw_Twin {
+	id, is_image := target.(Image_Id)
+	if !velocity || !is_image {
+		return b.screen_twin if velocity else {}
+	}
+	e := image_store_get(images, id)
+	if e == nil || int(id.key.idx) >= len(b.twin_at) || b.twin_at[id.key.idx] < 0 {
+		return {}
+	}
+	return {b.twins[b.twin_at[id.key.idx]:][:e.info.width * e.info.height], e.info.width, e.info.height}
+}
+
+// A layer's motion onto the target's twin (Cmd_Composite_Velocity), over
+// the part of its window inside the target.
+@(private = "file")
+sw_composite_velocity :: proc(b: ^Software_Backend, images: ^Image_Store, c: Cmd_Composite_Velocity) {
+	src := sw_twin_of(b, images, c.source, true)
+	alpha, ok := lookup_texture(images, c.alpha)
+	if b.twin.pixels == nil || src.pixels == nil || !ok {
+		return
+	}
+	// The window's corner on the target.
+	wx, wy := i32(c.x) - b.origin.x, i32(c.y) - b.origin.y
+	x0, y0 := max(wx, 0), max(wy, 0)
+	x1 := min(wx + i32(c.w), i32(b.twin.width), wx + i32(src.width), wx + i32(alpha.width))
+	y1 := min(wy + i32(c.h), i32(b.twin.height), wy + i32(src.height), wy + i32(alpha.height))
+	for y in y0 ..< y1 {
+		for x in x0 ..< x1 {
+			sx, sy := u32(x - wx), u32(y - wy)
+			twin_composite(&b.twin.pixels[int(y) * int(b.twin.width) + int(x)], src.pixels[int(sy) * int(src.width) + int(sx)], fetch(alpha, sx, sy)[3], c.opacity)
+		}
+	}
+}
+
+// The screen's twin as velocity and nearness (software_backend_velocity).
+@(private = "file")
+sw_resolve_velocity :: proc(b: ^Software_Backend) {
+	n := len(b.screen_twin.pixels)
+	resize(&b.velocity, n)
+	resize(&b.nearness, n)
+	for t, i in b.screen_twin.pixels {
+		b.velocity[i] = t.xy
+		b.nearness[i] = t.z
+	}
+}
+
+// Motion blur: a draw's motion `m` over the twin's pixel `d` at drawing
+// coordinates (px, py), by its coverage `a` (its final alpha):
+// premultiplied source-over, whatever the draw's blend.
+@(private = "file")
+twin_over :: #force_inline proc "contextless" (d: ^[4]f32, m: Shape_Motion, px, py, a: f32) {
+	v := transform_point(m.velocity, px, py)
+	d^ = [4]f32{v.x, v.y, m.nearness, 1} * a + d^ * (1 - a)
+}
+
+// A layer's or a group's motion `g` (a twin pixel) over the twin's pixel
+// `d`, faded by `opacity` and cut to the coverage `a` it composites with
+// where that is less (a clip or mask): its motion at the layer's coverage,
+// or where a filter spread the layer, at its content's own.
+@(private = "file")
+twin_composite :: #force_inline proc "contextless" (d: ^[4]f32, g: [4]f32, a, opacity: f32) {
+	s := opacity
+	if g[3] > a {
+		s *= a / g[3]
+	}
+	d^ = g * s + d^ * (1 - g[3] * s)
 }
 
 // Gives every `.Transient` image of the store pixels for this render,
@@ -283,6 +435,7 @@ Sw_Run :: struct {
 	cmds:   []Command,
 	target: Sw_Target,
 	origin: [2]i32,
+	twin:   Sw_Twin,
 }
 
 // Draws a run's commands (clears and shape draws on the current target):
@@ -299,7 +452,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 	if !ok {
 		return
 	}
-	run := Sw_Run{b, images, frame, cmds, target, b.origin}
+	run := Sw_Run{b, images, frame, cmds, target, b.origin, b.twin}
 	rows := int(target.height)
 	bands := (rows + SW_BAND_ROWS - 1) / SW_BAND_ROWS
 	if bands == 0 {
@@ -367,8 +520,8 @@ sw_bin :: proc(run: ^Sw_Run, fill: bool, item: Sw_Binned, y0, y1: i32) {
 }
 
 // One band of a run: its draws, a command's together. A group's pixels
-// before its tint go through the band's scratch, in the temp arena of the
-// thread drawing the band.
+// before its tint (and their motion, on a twin) go through the band's
+// scratch, in the temp arena of the thread drawing the band.
 @(private = "file")
 sw_run_band :: proc(data: rawptr, y0, y1: int) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -377,7 +530,7 @@ sw_run_band :: proc(data: rawptr, y0, y1: int) {
 	k := y0 / SW_BAND_ROWS
 	items := b.binned[b.starts[k]:b.starts[k + 1]]
 	top, bottom := i32(y0) + run.origin.y, i32(y1) + run.origin.y
-	scratch: [][4]f32
+	scratch, motion: [][4]f32
 	for i := 0; i < len(items); {
 		j := i + 1
 		for j < len(items) && items[j].cmd == items[i].cmd {
@@ -385,9 +538,13 @@ sw_run_band :: proc(data: rawptr, y0, y1: int) {
 		}
 		cmd := run.cmds[items[i].cmd]
 		if c, ok := cmd.type.(Cmd_Draw_Shapes); ok && c.group != 0 && scratch == nil {
-			scratch = make([][4]f32, int(run.target.width) * (y1 - y0), context.temp_allocator)
+			n := int(run.target.width) * (y1 - y0)
+			scratch = make([][4]f32, n, context.temp_allocator)
+			if run.twin.pixels != nil {
+				motion = make([][4]f32, n, context.temp_allocator)
+			}
 		}
-		sw_band_command(run, cmd, items[i:j], top, bottom, scratch)
+		sw_band_command(run, cmd, items[i:j], top, bottom, scratch, motion)
 		i = j
 	}
 }
@@ -402,6 +559,7 @@ Raster :: struct {
 	x1, y1:  i32,
 	frag:    ^Frag,
 	blend:   Composite_Operation_State,
+	twin:    Sw_Twin,
 }
 
 // The command's drawable area on the run's target (its scissor applied).
@@ -416,6 +574,7 @@ sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 		y0      = run.origin.y,
 		x1      = run.origin.x + i32(run.target.width),
 		y1      = run.origin.y + i32(run.target.height),
+		twin    = run.twin,
 	}
 	if sr, ok := cmd.scissor_rect.?; ok {
 		r.x0 = max(r.x0, i32(math.floor(sr.x)))
@@ -427,9 +586,9 @@ sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 }
 
 // A command's draws in one band, rows [top, bottom); `scratch` holds a
-// group's band before its tint.
+// group's band before its tint, and `motion` its motion.
 @(private = "file")
-sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bottom: i32, scratch: [][4]f32) {
+sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bottom: i32, scratch, motion: [][4]f32) {
 	r := sw_raster(run, cmd)
 	r.y0 = max(r.y0, top)
 	r.y1 = min(r.y1, bottom)
@@ -441,11 +600,21 @@ sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bot
 	case Cmd_Clear_Rect:
 		sw_clear_rect(&r, c)
 	case Cmd_Draw_Shapes:
+		// With a twin or not, once per command.
+		twinned := r.twin.pixels != nil
 		if c.group != 0 && frame.shapes[c.instances.start].marker != .None {
-			raster_markers(run, &r, cmd, c, items, scratch)
+			if twinned {
+				raster_markers(run, &r, cmd, c, items, scratch, true)
+			} else {
+				raster_markers(run, &r, cmd, c, items, scratch, false)
+			}
 			return
 		} else if c.group != 0 {
-			raster_group(run, &r, cmd, c, items, scratch)
+			if twinned {
+				raster_group(run, &r, cmd, c, items, scratch, motion, true)
+			} else {
+				raster_group(run, &r, cmd, c, items, scratch, motion, false)
+			}
 			return
 		}
 		frag: Frag
@@ -457,9 +626,21 @@ sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bot
 				row = inst.paint
 			}
 			r.frag = &frag
-			raster_shape(&r, inst, run.b.bounds[it.inst], frame.shape_words)
+			// Moving or not, once per instance.
+			if m := sw_motion(run, it.inst); m.nearness != 0 {
+				raster_shape(&r, inst, m, run.b.bounds[it.inst], frame.shape_words, true)
+			} else {
+				raster_shape(&r, inst, m, run.b.bounds[it.inst], frame.shape_words, false)
+			}
 		}
 	}
+}
+
+// Instance `i`'s motion where the run's target keeps a twin, else none
+// (nearness 0).
+@(private = "file")
+sw_motion :: #force_inline proc "contextless" (run: ^Sw_Run, i: u32) -> Shape_Motion {
+	return run.frame.motions[i] if run.twin.pixels != nil else {}
 }
 
 // The area a group's or markers' draws in a band cover, clipped to the
@@ -480,9 +661,11 @@ sw_items_area :: proc(run: ^Sw_Run, r: ^Raster, items: []Sw_Binned) -> (x0, y0, 
 
 // A group, as the shape shader draws it: each pixel the instances
 // source-over in order (each as `raster_shape` shades it), then times the
-// tint, blended once. `scratch` holds the band's pixels before the tint.
+// tint, blended once. `scratch` holds the band's pixels before the tint,
+// and on a twin (`twinned`) `motion` their motion, which composites as a
+// layer's.
 @(private = "file")
-raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32) {
+raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch, motion: [][4]f32, $twinned: bool) {
 	frame := run.frame
 	x0, y0, x1, y1 := sw_items_area(run, r, items)
 	if x0 >= x1 || y0 >= y1 {
@@ -491,6 +674,10 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 	w, h := int(x1 - x0), int(y1 - y0)
 	acc := scratch[:w * h]
 	mem.zero_slice(acc)
+	when twinned {
+		vacc := motion[:w * h]
+		mem.zero_slice(vacc)
+	}
 	frag: Frag
 	row := max(u32)
 	for it in items {
@@ -505,6 +692,10 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 		inv := transform_inverse(inst.transform)
 		u, v := instance_footprint(inst)
 		words := instance_words(inst, frame.shape_words)
+		when twinned {
+			m := sw_motion(run, it.inst)
+			moves := m.nearness != 0
+		}
 		for y in iy0 ..< iy1 {
 			py := f32(y) + 0.5
 			for x in ix0 ..< ix1 {
@@ -517,8 +708,13 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 				if !keep {
 					continue
 				}
-				a := &acc[int(y - y0) * w + int(x - x0)]
-				a^ = src + a^ * (1 - src[3])
+				i := int(y - y0) * w + int(x - x0)
+				acc[i] = src + acc[i] * (1 - src[3])
+				when twinned {
+					if moves {
+						twin_over(&vacc[i], m, px, py, src[3])
+					}
+				}
 			}
 		}
 	}
@@ -538,6 +734,9 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
 			dst := load_texel(r.target, tx, ty)
 			store_texel(r.target, tx, ty, apply_blend(r.blend, a * t, dst))
+			when twinned {
+				twin_composite(&r.twin.pixels[ty * r.twin.width + tx], vacc[int(y - y0) * w + int(x - x0)], a[3], t[3])
+			}
 		}
 	}
 }
@@ -546,9 +745,10 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 // the union of the markers' fills and of their outlines, a pixel stopping
 // once both are whole (or absent), then the fill's paint at the first and
 // the outlines' (the tint) at the second over it, blended once. The fill,
-// its paint and the outline width are the command's first marker's.
+// its paint and the outline width are the command's first marker's, and
+// so is the motion they take on a twin (`twinned`).
 @(private = "file")
-raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32) {
+raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32, $twinned: bool) {
 	frame := run.frame
 	x0, y0, x1, y1 := sw_items_area(run, r, items)
 	if x0 >= x1 || y0 >= y1 {
@@ -589,6 +789,10 @@ raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shape
 	}
 	fill := make_frag(run.images, cmd, frame.paints[first.paint])
 	tint := make_frag(run.images, cmd, frame.paints[c.group - 1])
+	when twinned {
+		m := sw_motion(run, c.instances.start)
+		moves := m.nearness != 0
+	}
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
@@ -611,14 +815,20 @@ raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shape
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
 			dst := load_texel(r.target, tx, ty)
 			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
+			when twinned {
+				if moves {
+					twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
+				}
+			}
 		}
 	}
 }
 
 // Every pixel center of the instance's bounds `ib` (instance_bounds): its
-// coverage (shape.odin) as the paint's edge coverage, as the shader does.
+// coverage (shape.odin) as the paint's edge coverage, as the shader does,
+// and if it `moves` its motion `m` on the twin.
 @(private = "file")
-raster_shape :: proc(r: ^Raster, inst: Shape_Instance, ib: Bounds, frame_words: []u32) {
+raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Bounds, frame_words: []u32, $moves: bool) {
 	x0 := max(r.x0, i32(math.floor(ib.minx)))
 	y0 := max(r.y0, i32(math.floor(ib.miny)))
 	x1 := min(r.x1, i32(math.ceil(ib.maxx)))
@@ -642,6 +852,9 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, ib: Bounds, frame_words: 
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
 			dst := load_texel(r.target, tx, ty)
 			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
+			when moves {
+				twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
+			}
 		}
 	}
 }
@@ -674,6 +887,15 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	for y in y0 ..< y1 {
 		for x in x0 ..< x1 {
 			store_texel(r.target, u32(x - r.ox), u32(y - r.oy), col)
+		}
+	}
+	// What a clear leaves is still and farthest, at its alpha.
+	if r.twin.pixels != nil {
+		for y in y0 ..< y1 {
+			row := r.twin.pixels[int(y - r.oy) * int(r.twin.width):]
+			for x in x0 ..< x1 {
+				row[x - r.ox] = {0, 0, 0, col[3]}
+			}
 		}
 	}
 }
