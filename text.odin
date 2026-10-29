@@ -105,7 +105,8 @@ font_destroy :: proc(f: ^Font) {
 
 // The glyph's shape, built on first use (safe from several threads) and
 // owned by the font until `font_destroy`; nil for glyphs without an outline. Shape units map to
-// font units, y down, the pen at the origin (`shape_local`).
+// font units, y down, the pen at the origin (`shape_local`). It fills, and
+// draws as the glyph's contours too (hairline_shape, hairline_glyph_outlines).
 font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 	fs := font_shapes(f)
 	sync.mutex_lock(&fs.lock)
@@ -114,7 +115,7 @@ font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 		return s
 	}
 	context.allocator = fs.allocator
-	shape, ok := shape_from_glyph(f, g, &fs.outline, builder = &fs.builder)
+	shape, ok := shape_from_glyph(f, g, &fs.outline, builder = &fs.builder, outline = true)
 	s: ^Shape
 	if ok {
 		s = new_clone(shape)
@@ -302,6 +303,25 @@ fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, sc
 	paint := paint
 	paint.fill_rule = .Non_Zero
 	fill_path(c, scratch, paint)
+}
+
+// Draws the glyphs' contours as hairlines `width` pixels wide whatever the
+// transform scales or turns (hairline_shape on each glyph's shape), all
+// sharing one paint row: text in an editor's outline view, without a
+// stroke to build. `scale` converts font units to pixels. A colour glyph
+// (COLR) draws its own outline, the one fonts give it for where colour
+// isn't drawn (none when it has none).
+hairline_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, scale: f32, paint: Paint, width: f32) {
+	if !(width > 0) {
+		return
+	}
+	cmd: Command
+	row := max(u32)
+	for g in glyphs {
+		if s := font_glyph_shape(f, g.glyph); s != nil {
+			push_shape_instance(c, s, paint, width, {scale, 0, 0, scale, g.x, g.y}, &cmd, &row)
+		}
+	}
 }
 
 // Strokes the glyph outlines.

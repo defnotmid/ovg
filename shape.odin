@@ -222,10 +222,11 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 }
 
 // Builds a glyph's shape (font units, y down, the pen at the origin);
-// false for glyphs without an outline. `builder` is kept by a caller that
+// false for glyphs without an outline. With `outline` it also draws as the
+// glyph's contours (hairline_shape). `builder` is kept by a caller that
 // builds many; without one a build makes its own on the heap and frees it
 // after.
-shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator, builder: ^Shape_Builder = nil) -> (Shape, bool) {
+shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := context.allocator, builder: ^Shape_Builder = nil, outline := false) -> (Shape, bool) {
 	temp: Shape_Builder
 	b := builder
 	if b == nil {
@@ -236,6 +237,7 @@ shape_from_glyph :: proc(f: ^Font, g: Glyph_Index, o: ^ft.Outline, allocator := 
 		shape_builder_destroy(&temp)
 	}
 	shape_builder_reset(b)
+	b.outline = outline
 	if !shape_add_glyph(b, f, g, o) {
 		return {}, false
 	}

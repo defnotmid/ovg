@@ -630,3 +630,48 @@ test_shape_without_scratch_leaves_no_temp :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, track.total_memory_allocated, 0)
 }
+
+// Glyph shapes draw as hairlines: hairline_glyph_outlines draws each
+// glyph's contours, a pixel wide at any scale, as hairline_shape on its
+// shape would, and a glyph's inside stays unlit.
+@(test)
+test_sw_hairline_glyph_outlines :: proc(t: ^testing.T) {
+	font, err := font_load(DEFAULT_FONT_DATA)
+	testing.expect_value(t, err, nil)
+	defer font_destroy(&font)
+	scale := font_scale_for_em(&font, 200)
+	glyphs := [2]Positioned_Glyph{{font_glyph_index(&font, 'I'), 20, 170}, {font_glyph_index(&font, 'l'), 90, 170}}
+	draw :: proc(font: ^Font, glyphs: []Positioned_Glyph, scale: f32, one_call: bool) -> []u8 {
+		b: Software_Backend
+		software_backend_init(&b)
+		defer software_backend_destroy(&b)
+		c: Canvas
+		canvas_init(&c, software_backend(&b))
+		defer canvas_destroy(&c)
+		set_size(&c, 160, 200)
+		clear_rect(&c, 0, 0, 160, 200, WHITE)
+		if one_call {
+			hairline_glyph_outlines(&c, font, glyphs, scale, paint_color(BLACK), 1)
+		} else {
+			for g in glyphs {
+				hairline_shape(&c, font_glyph_shape(font, g.glyph), paint_color(BLACK), 1, {scale, 0, 0, scale, g.x, g.y})
+			}
+		}
+		flush(&c)
+		return slice.clone(b.pixels)
+	}
+	one := draw(&font, glyphs[:], scale, true)
+	defer delete(one)
+	each := draw(&font, glyphs[:], scale, false)
+	defer delete(each)
+	testing.expect(t, slice.equal(one, each))
+	// The I's stem: its left edge lit, its middle not.
+	s := font_glyph_shape(&font, glyphs[0].glyph)
+	testing.expect(t, s != nil && s.data[4] != 0)
+	x0, _, x1, _ := shape_bounds(s)
+	left := glyphs[0].x + (x0 * s.extent + s.origin.x) * scale
+	right := glyphs[0].x + (x1 * s.extent + s.origin.x) * scale
+	at :: proc(px: []u8, x, y: int) -> u8 {return px[(y * 160 + x) * 4]}
+	testing.expectf(t, at(one, int(left), 100) < 128, "the stem's left edge at %v is unlit", left)
+	testing.expect_value(t, at(one, int((left + right) / 2), 100), 255)
+}

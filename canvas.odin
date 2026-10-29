@@ -596,25 +596,32 @@ fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint:
 push_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, locals: []Transform2D) {
 	cmd: Command
 	row := max(u32)
-	current := state(c).transform
 	for local in locals {
-		to := transform_multiply(local, current)
-		inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
-		inst.transform = transform_multiply(shape_local(s), to)
-		if outside_target(c, device_bounds(s.data, inst.transform, instance_reach(inst))) {
-			continue
-		}
-		if row == max(u32) {
-			pp := paint
-			if hairline > 0 {
-				pp.feather = 0
-			}
-			cmd, row = shape_paint(c, pp)
-		}
-		inst.shape = s
-		inst.paint = row
-		push_shape(c, cmd, inst)
+		push_shape_instance(c, s, paint, hairline, local, &cmd, &row)
 	}
+}
+
+// One instance of `s` at `local` (under the current transform), unless it
+// lies outside the target; the paint row `row` (and its command `cmd`) is
+// added by the first that draws, max(u32) until then.
+@(private)
+push_shape_instance :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, local: Transform2D, cmd: ^Command, row: ^u32) {
+	to := transform_multiply(local, state(c).transform)
+	inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
+	inst.transform = transform_multiply(shape_local(s), to)
+	if outside_target(c, device_bounds(s.data, inst.transform, instance_reach(inst))) {
+		return
+	}
+	if row^ == max(u32) {
+		pp := paint
+		if hairline > 0 {
+			pp.feather = 0
+		}
+		cmd^, row^ = shape_paint(c, pp)
+	}
+	inst.shape = s
+	inst.paint = row^
+	push_shape(c, cmd^, inst)
 }
 
 
