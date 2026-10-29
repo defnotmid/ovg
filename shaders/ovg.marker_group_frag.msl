@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 839 "ovg.slang"
+#line 844 "ovg.slang"
 struct VS_Shape_Out_0
 {
     float4 position_0;
@@ -14,7 +14,7 @@ struct VS_Shape_Out_0
 };
 
 
-#line 807
+#line 812
 struct Shape_Instance_natural_0
 {
     packed_float4 m_0;
@@ -52,57 +52,57 @@ struct KernelContext_0
 };
 
 
-#line 883
+#line 888
 void shape_clip_0(const VS_Shape_Out_0 thread* i_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 884
+#line 889
     uint _S1 = i_0->data_0.w;
 
-#line 884
+#line 889
     if((_S1 & 2147483648U) != 0U)
     {
 
-#line 884
+#line 889
         float4 _S2 = float4(kernelContext_0->members_0[_S1 & 2147483647U].clip_0) ;
 
         float2 _S3 = i_0->position_0.xy;
 
-#line 886
+#line 891
         bool _S4;
 
-#line 886
+#line 891
         if(any(_S3 < (_S2.xy)))
         {
 
-#line 886
+#line 891
             _S4 = true;
 
-#line 886
+#line 891
         }
         else
         {
 
-#line 886
+#line 891
             _S4 = any(_S3 >= (_S2.zw));
 
-#line 886
+#line 891
         }
 
-#line 886
+#line 891
         if(_S4)
         {
 
-#line 887
+#line 892
             discard_fragment();
 
-#line 886
+#line 891
         }
 
-#line 884
+#line 889
     }
 
-#line 890
+#line 895
     return;
 }
 
@@ -649,59 +649,59 @@ float conic_fraction_0(float2 fpos_2, KernelContext_0 thread* kernelContext_17)
 }
 
 
-#line 671
+#line 676
 float4 fill_color_0(int type_0, float2 fpos_3, KernelContext_0 thread* kernelContext_18)
 {
 
-#line 672
+#line 677
     if(type_0 == int(0))
     {
 
-#line 672
+#line 677
         float4 _S68 = inner_col_0(kernelContext_18);
 
-#line 672
+#line 677
         float4 _S69 = outer_col_0(kernelContext_18);
 
-#line 672
+#line 677
         float _S70 = gradient_t_0(fpos_3, kernelContext_18);
         return mix(_S68, _S69, float4(_S70) );
     }
     else
     {
 
-#line 674
+#line 679
         if(type_0 == int(3))
         {
 
-#line 674
+#line 679
             float _S71 = gradient_t_0(fpos_3, kernelContext_18);
 
             float4 _S72 = ((kernelContext_18->tex_texture_0).sample((kernelContext_18->tex_sampler_0), (float2(_S71, 0.0f)), level((0.0f))));
 
-#line 676
+#line 681
             float4 _S73 = inner_col_0(kernelContext_18);
 
-#line 676
+#line 681
             return _S72 * _S73;
         }
         else
         {
 
-#line 677
+#line 682
             if(type_0 == int(1))
             {
 
-#line 677
+#line 682
                 float2 _S74 = transform_point_0(int(3), fpos_3, kernelContext_18);
 
-#line 677
+#line 682
                 float2 _S75 = extent_0(kernelContext_18);
 
-#line 677
+#line 682
                 float4 _S76 = apply_tex_type_0(((kernelContext_18->tex_texture_0).sample((kernelContext_18->tex_sampler_0), (_S74 / _S75), level((0.0f)))), kernelContext_18);
 
-#line 677
+#line 682
                 float4 _S77 = inner_col_0(kernelContext_18);
 
                 return _S76 * _S77;
@@ -709,54 +709,54 @@ float4 fill_color_0(int type_0, float2 fpos_3, KernelContext_0 thread* kernelCon
             else
             {
 
-#line 680
+#line 685
                 if(type_0 == int(8))
                 {
 
-#line 680
+#line 685
                     float4 _S78 = inner_col_0(kernelContext_18);
 
-#line 680
+#line 685
                     float4 _S79 = outer_col_0(kernelContext_18);
 
-#line 680
+#line 685
                     float _S80 = conic_fraction_0(fpos_3, kernelContext_18);
                     return mix(_S78, _S79, float4(_S80) );
                 }
                 else
                 {
 
-#line 682
+#line 687
                     if(type_0 == int(9))
                     {
 
-#line 682
+#line 687
                         float _S81 = conic_fraction_0(fpos_3, kernelContext_18);
                         float4 _S82 = ((kernelContext_18->tex_texture_0).sample((kernelContext_18->tex_sampler_0), (float2(_S81, 0.0f)), level((0.0f))));
 
-#line 683
+#line 688
                         float4 _S83 = inner_col_0(kernelContext_18);
 
-#line 683
+#line 688
                         return _S82 * _S83;
                     }
 
-#line 680
+#line 685
                 }
 
-#line 677
+#line 682
             }
 
-#line 674
+#line 679
         }
 
-#line 672
+#line 677
     }
 
-#line 672
+#line 677
     float4 _S84 = inner_col_0(kernelContext_18);
 
-#line 685
+#line 690
     return _S84;
 }
 
@@ -862,28 +862,28 @@ float scissor_mask_0(float2 p_2, KernelContext_0 thread* kernelContext_23)
 }
 
 
-#line 982
+#line 987
 float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* kernelContext_24)
 {
 
-#line 982
+#line 987
     shape_clip_0(i_2, kernelContext_24);
 
-#line 982
+#line 987
     uint4 _S97 = i_2->data_0;
 
     uint _S98 = i_2->data_0.x;
 
-#line 984
+#line 989
     uint dims_0 = kernelContext_24->shapes_0[_S98];
     uint nx_0 = dims_0 & 65535U;
     uint _S99 = dims_0 >> 16U;
 
-#line 986
+#line 991
     uint2 cell_0 = min(uint2(max(i_2->rc_0, float2(0.0f) )), uint2(nx_0, _S99) - uint2(1U) );
     uint _S100 = _S98 + 1U;
 
-#line 987
+#line 992
     uint at_0 = _S100 + cell_0.y * nx_0 + cell_0.x;
     uint _S101 = _S100 + nx_0 * _S99 + 1U;
 
@@ -891,132 +891,132 @@ float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* 
 
     uint _S102 = kernelContext_24->shapes_0[at_0];
 
-#line 992
+#line 997
     uint fill_row_0 = 0U;
 
-#line 992
+#line 997
     uint k_0 = _S102;
 
-#line 992
+#line 997
     float cf_0 = 0.0f;
 
-#line 992
+#line 997
     float co_0 = 0.0f;
 
-#line 992
+#line 997
     for(;;)
     {
 
-#line 992
+#line 997
         if(k_0 < (kernelContext_24->shapes_0)[at_0 + 1U])
         {
         }
         else
         {
 
-#line 992
+#line 997
             break;
         }
 
-#line 993
+#line 998
         Shape_Instance_natural_0 s_1 = kernelContext_24->members_0[_S97.z + kernelContext_24->shapes_0[_S101 + k_0]];
 
-#line 993
+#line 998
         float4 _S103 = float4(s_1.t_0) ;
         float2 d_2 = i_2->fpos_0 - _S103.xy;
 
-#line 994
+#line 999
         float4 _S104 = float4(s_1.m_0) ;
         float _S105 = _S104.w;
 
-#line 995
+#line 1000
         float _S106 = d_2.x;
 
-#line 995
+#line 1000
         float _S107 = _S104.z;
 
-#line 995
+#line 1000
         float _S108 = d_2.y;
 
-#line 995
+#line 1000
         float _S109 = _S104.x;
 
-#line 995
+#line 1000
         float _S110 = _S104.y;
 
-#line 995
+#line 1000
         float2 rc_2 = float2(_S105 * _S106 - _S107 * _S108, _S109 * _S108 - _S110 * _S106) / float2((_S109 * _S105 - _S107 * _S110)) ;
         float2 epp_0 = _S103.zw;
 
-#line 996
+#line 1001
         float4 _S111 = float4(s_1.bounds_0) ;
 
-#line 996
+#line 1001
         bool _S112;
         if(any(rc_2 < (_S111.xy - epp_0)))
         {
 
-#line 997
+#line 1002
             _S112 = true;
 
-#line 997
+#line 1002
         }
         else
         {
 
-#line 997
+#line 1002
             _S112 = any(rc_2 > (_S111.zw + epp_0));
 
-#line 997
+#line 1002
         }
 
-#line 997
+#line 1002
         if(_S112)
         {
 
-#line 998
+#line 1003
             k_0 = k_0 + 1U;
 
-#line 992
+#line 997
             continue;
         }
 
-#line 992
+#line 997
         uint4 _S113 = uint4(s_1.data_1) ;
 
-#line 1000
+#line 1005
         uint _S114 = _S113.x;
 
-#line 1000
+#line 1005
         bool circle_1 = (_S114 & 15U) == 2U;
         bool filled_0 = (_S114 & 16U) != 0U;
         float outline_1 = (as_type<float>((_S113.z)));
         uint _S115 = _S113.y;
 
-#line 1003
+#line 1008
         float cf_1;
         if(filled_0)
         {
 
-#line 1004
+#line 1009
             float4 _S116 = float4(s_1.uv_1) ;
             float f_1 = curves_marker_0(circle_1, rc_2, _S116.xy, _S116.zw, 0.0f);
 
-#line 1005
+#line 1010
             cf_1 = cf_0 + (f_1 - cf_0 * f_1);
 
-#line 1004
+#line 1009
         }
         else
         {
 
-#line 1004
+#line 1009
             cf_1 = cf_0;
 
-#line 1004
+#line 1009
         }
 
-#line 1004
+#line 1009
         float co_1;
 
 
@@ -1024,25 +1024,25 @@ float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* 
         if(outline_1 > 0.0f)
         {
 
-#line 1008
+#line 1013
             float4 _S117 = float4(s_1.uv_1) ;
             float o_0 = curves_marker_0(circle_1, rc_2, _S117.xy, _S117.zw, outline_1);
 
-#line 1009
+#line 1014
             co_1 = co_0 + (o_0 - co_0 * o_0);
 
-#line 1008
+#line 1013
         }
         else
         {
 
-#line 1008
+#line 1013
             co_1 = co_0;
 
-#line 1008
+#line 1013
         }
 
-#line 1008
+#line 1013
         bool _S118;
 
 
@@ -1050,124 +1050,124 @@ float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* 
         if(!filled_0)
         {
 
-#line 1012
+#line 1017
             _S118 = true;
 
-#line 1012
+#line 1017
         }
         else
         {
 
-#line 1012
+#line 1017
             _S118 = cf_1 >= 1.0f;
 
-#line 1012
+#line 1017
         }
 
-#line 1012
+#line 1017
         bool _S119;
 
-#line 1012
+#line 1017
         if(_S118)
         {
 
-#line 1012
+#line 1017
             if(outline_1 <= 0.0f)
             {
 
-#line 1012
+#line 1017
                 _S119 = true;
 
-#line 1012
+#line 1017
             }
             else
             {
 
-#line 1012
+#line 1017
                 _S119 = co_1 >= 1.0f;
 
-#line 1012
+#line 1017
             }
 
-#line 1012
+#line 1017
         }
         else
         {
 
-#line 1012
+#line 1017
             _S119 = false;
 
-#line 1012
+#line 1017
         }
 
-#line 1012
+#line 1017
         if(_S119)
         {
 
-#line 1012
+#line 1017
             fill_row_0 = _S115;
 
-#line 1012
+#line 1017
             cf_0 = cf_1;
 
-#line 1012
+#line 1017
             co_0 = co_1;
             break;
         }
 
-#line 1013
+#line 1018
         fill_row_0 = _S115;
 
-#line 1013
+#line 1018
         cf_0 = cf_1;
 
-#line 1013
+#line 1018
         co_0 = co_1;
 
-#line 992
+#line 997
         k_0 = k_0 + 1U;
 
-#line 992
+#line 997
     }
 
-#line 1016
+#line 1021
     float4 _S120 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 1016
+#line 1021
     float4 result_0;
     if(cf_0 >= 0.00196078442968428f)
     {
 
-#line 1018
+#line 1023
         kernelContext_24->paint_index_0 = fill_row_0;
 
-#line 1018
+#line 1023
         int _S121 = shader_type_0(kernelContext_24);
 
-#line 1018
+#line 1023
         float2 _S122 = i_2->fpos_0;
 
-#line 1018
+#line 1023
         float4 _S123 = fill_color_0(_S121, i_2->fpos_0, kernelContext_24);
 
-#line 1018
+#line 1023
         float _S124 = stroke_mask_0(float2(0.5f, cf_0), kernelContext_24);
 
-#line 1018
+#line 1023
         float _S125 = scissor_mask_0(_S122, kernelContext_24);
 
-#line 1018
+#line 1023
         result_0 = _S123 * float4((_S124 * _S125)) ;
 
-#line 1017
+#line 1022
     }
     else
     {
 
-#line 1017
+#line 1022
         result_0 = _S120;
 
-#line 1017
+#line 1022
     }
 
 
@@ -1175,39 +1175,39 @@ float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* 
     if(co_0 >= 0.00196078442968428f)
     {
 
-#line 1022
+#line 1027
         kernelContext_24->paint_index_0 = _S97.y;
 
-#line 1022
+#line 1027
         int _S126 = shader_type_0(kernelContext_24);
 
-#line 1022
+#line 1027
         float2 _S127 = i_2->fpos_0;
 
-#line 1022
+#line 1027
         float4 _S128 = fill_color_0(_S126, i_2->fpos_0, kernelContext_24);
 
-#line 1022
+#line 1027
         float _S129 = stroke_mask_0(float2(0.5f, co_0), kernelContext_24);
 
-#line 1022
+#line 1027
         float _S130 = scissor_mask_0(_S127, kernelContext_24);
         float4 o_1 = _S128 * float4((_S129 * _S130)) ;
 
-#line 1023
+#line 1028
         result_0 = o_1 + result_0 * float4((1.0f - o_1.w)) ;
 
-#line 1021
+#line 1026
     }
 
-#line 1026
+#line 1031
     if((result_0.w) < 0.00196078442968428f)
     {
 
-#line 1027
+#line 1032
         discard_fragment();
 
-#line 1026
+#line 1031
     }
 
 
@@ -1215,14 +1215,14 @@ float4 marker_group_0(const VS_Shape_Out_0 thread* i_2, KernelContext_0 thread* 
 }
 
 
-#line 1029
+#line 1034
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 1029
+#line 1034
 struct pixelInput_0
 {
     float2 rc_3 [[user(TEXCOORD)]];
@@ -1232,50 +1232,50 @@ struct pixelInput_0
 };
 
 
-#line 1033
+#line 1038
 [[fragment]] pixelOutput_0 fs_marker_group(pixelInput_0 _S131 [[stage_in]], float4 position_1 [[position]], Shape_Instance_natural_0 device* members_1 [[buffer(2)]], uint device* shapes_1 [[buffer(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]])
 {
 
-#line 1033
+#line 1038
     thread KernelContext_0 kernelContext_25;
 
-#line 1033
+#line 1038
     (&kernelContext_25)->members_0 = members_1;
 
-#line 1033
+#line 1038
     (&kernelContext_25)->shapes_0 = shapes_1;
 
-#line 1033
+#line 1038
     (&kernelContext_25)->paints_0 = paints_1;
 
-#line 1033
+#line 1038
     (&kernelContext_25)->tex_texture_0 = tex_texture_1;
 
-#line 1033
+#line 1038
     (&kernelContext_25)->tex_sampler_0 = tex_sampler_1;
 
-#line 1033
+#line 1038
     thread VS_Shape_Out_0 _S132;
 
-#line 1033
+#line 1038
     (&_S132)->position_0 = position_1;
 
-#line 1033
+#line 1038
     (&_S132)->rc_0 = _S131.rc_3;
 
-#line 1033
+#line 1038
     (&_S132)->fpos_0 = _S131.fpos_4;
 
-#line 1033
+#line 1038
     (&_S132)->uv_0 = _S131.uv_2;
 
-#line 1033
+#line 1038
     (&_S132)->data_0 = _S131.data_3;
 
-#line 1033
+#line 1038
     float4 _S133 = marker_group_0(&_S132, &kernelContext_25);
 
-#line 1033
+#line 1038
     pixelOutput_0 _S134 = { _S133 };
     return _S134;
 }

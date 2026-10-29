@@ -619,6 +619,11 @@ float4 turbulence(int2 p) {
         st *= 2;
     }
     float4 c = fractal ? (sum * 255.0 + 255.0) / 2.0 : sum * 255.0;
+    if (P(3).z != 0.0) {
+        // An RGBA16F target: the noise unrounded, premultiplied.
+        c = clamp(c, 0.0, 255.0) / 255.0;
+        return float4(c.xyz * c.w, c.w);
+    }
     c = floor(clamp(c, 0.0, 255.0) + 0.5);
     // Premultiplied as resvg's multiply_alpha.
     return float4(floor(c.xyz * (c.w / 255.0) + 0.5), c.w) / 255.0;

@@ -1206,7 +1206,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 	dst := Sw_Target{dst_entry.image.pixels, dst_entry.info.width, dst_entry.info.height, dst_entry.info.format}
 	if t, is_turbulence := filter.(Turbulence); is_turbulence {
 		// The source is the GPU's lattice image; the seed makes the f64 one.
-		if dst.format == .RGBA8 {
+		if dst.format == .RGBA8 || dst.format == .RGBA16F {
 			sw_turbulence(b, dst, t)
 		}
 		return
@@ -1354,9 +1354,16 @@ sw_turbulence :: proc(b: ^Software_Backend, dst: Sw_Target, t: Turbulence) {
 	lattice: Turbulence_Lattice
 	turbulence_init(&lattice, t.seed)
 	job := Sw_Turbulence{dst, t, &lattice}
+	if dst.format == .RGBA16F {
+		sw_bands(b, int(dst.height), &job, proc(data: rawptr, y0, y1: int) {
+			j := (^Sw_Turbulence)(data)
+			turbulence_fill(j.dst.pixels, int(j.dst.width), int(j.dst.height), j.t, j.lattice, y0, y1, true)
+		})
+		return
+	}
 	sw_bands(b, int(dst.height), &job, proc(data: rawptr, y0, y1: int) {
 		j := (^Sw_Turbulence)(data)
-		turbulence_fill(j.dst.pixels, int(j.dst.width), int(j.dst.height), j.t, j.lattice, y0, y1)
+		turbulence_fill(j.dst.pixels, int(j.dst.width), int(j.dst.height), j.t, j.lattice, y0, y1, false)
 	})
 }
 

@@ -2,6 +2,7 @@ package ovg
 
 import "core:math"
 import "core:mem"
+import "core:slice"
 import "core:testing"
 
 // ---- helpers ------------------------------------------------------------------
@@ -168,15 +169,15 @@ test_path_queries :: proc(t: ^testing.T) {
 @(test)
 test_gradient_synthesize :: proc(t: ^testing.T) {
 	stops := []Gradient_Stop{{0, {1, 0, 0, 1}}, {1, {0, 0, 1, 1}}}
-	ramp: [GRADIENT_RAMP_WIDTH * 4]u8
+	ramp: [GRADIENT_RAMP_WIDTH][4]f16
 	gradient_synthesize({stops, 1}, &ramp)
-	testing.expect(t, ramp[0] == 255 && ramp[1] == 0 && ramp[3] == 255)
-	testing.expect(t, ramp[1022] >= 253 && ramp[1020] <= 2)
+	testing.expect(t, ramp[0] == {1, 0, 0, 1})
+	testing.expect(t, ramp[255][2] >= 0.99 && ramp[255][0] <= 0.01)
 
 	// A last stop before 1.0 pads to the end.
 	short := []Gradient_Stop{{0, {1, 0, 0, 1}}, {0.5, {0, 1, 0, 1}}}
 	gradient_synthesize({short, 1}, &ramp)
-	testing.expect(t, ramp[255 * 4 + 1] == 255 && ramp[255 * 4 + 3] == 255)
+	testing.expect(t, ramp[255][1] == 1 && ramp[255][3] == 1)
 }
 
 // ---- canvas recording -------------------------------------------------------------------
@@ -719,10 +720,11 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 }
 
 // An RGBA16F offscreen image keeps levels an RGBA8 one rounds away, in the
-// layers pushed inside it too: white at 0.4/255 alpha through a clipped
-// layer at half opacity, its alpha then scaled by 64, shows at 13/255 (0
-// from RGBA8). Two adds of 0.75 (`.Lighter`) keep 1.5, which draws at half
-// opacity as 0.75 (0.5 from RGBA8, clamped at 1).
+// layers and pattern tiles made inside it too: white at 0.4/255 alpha, its
+// alpha then scaled by 64, shows at 13/255 through a clipped layer at half
+// opacity and at 26/255 from a pattern tile (0 from RGBA8). Two adds of
+// 0.75 (`.Lighter`) keep 1.5, which draws at half opacity as 0.75 (0.5
+// from RGBA8, clamped at 1).
 @(test)
 test_layer_image_rgba16f :: proc(t: ^testing.T) {
 	s: Sw
@@ -731,8 +733,9 @@ test_layer_image_rgba16f :: proc(t: ^testing.T) {
 	c := &s.canvas
 	ls: Layer_Stack
 	defer layer_stack_destroy(&ls, c)
-	p: Path
+	p, q: Path
 	defer path_destroy(&p)
+	defer path_destroy(&q)
 	path_rect(&p, 0, 0, 16, 16)
 	for format in ([2]Pixel_Format{.RGBA8, .RGBA16F}) {
 		deep := format == .RGBA16F
@@ -740,8 +743,18 @@ test_layer_image_rgba16f :: proc(t: ^testing.T) {
 		layer_stack_begin(&ls, c, 16, 16)
 		faint := layer_image_begin(&ls, c, 16, 16, format)
 		layer_push(&ls, c, {opacity = 0.5, clip_path = &p})
-		fill_path(c, &p, paint_color({1, 1, 1, 0.4 / 255}))
+		path_reset(&q)
+		path_rect(&q, 0, 0, 8, 16)
+		fill_path(c, &q, paint_color({1, 1, 1, 0.4 / 255}))
 		layer_pop(&ls, c)
+		tile := layer_pattern_begin(&ls, c, 4, 4)
+		path_reset(&q)
+		path_rect(&q, 0, 0, 4, 4)
+		fill_path(c, &q, paint_color({1, 1, 1, 0.4 / 255}))
+		layer_pattern_end(&ls, c)
+		path_reset(&q)
+		path_rect(&q, 8, 0, 8, 16)
+		fill_path(c, &q, paint_image(tile, 0, 0, 4, 4, 0))
 		layer_image_end(&ls, c)
 		scaled := layer_image_begin(&ls, c, 16, 16)
 		layer_image_end(&ls, c)
@@ -752,8 +765,11 @@ test_layer_image_rgba16f :: proc(t: ^testing.T) {
 		layer_stack_end(&ls, c)
 		flush(c)
 		want: u8 = 13 if deep else 0
-		got := px(&s, 8, 8)
-		testing.expectf(t, got == {want, want, want, want}, "%v: got %v, want %d", format, got, want)
+		got := px(&s, 4, 8)
+		testing.expectf(t, got == {want, want, want, want}, "%v layer: got %v, want %d", format, got, want)
+		want = 26 if deep else 0
+		got = px(&s, 12, 8)
+		testing.expectf(t, got == {want, want, want, want}, "%v tile: got %v, want %d", format, got, want)
 
 		clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
 		layer_stack_begin(&ls, c, 16, 16)
@@ -770,6 +786,63 @@ test_layer_image_rgba16f :: proc(t: ^testing.T) {
 		got = px(&s, 8, 8)
 		testing.expectf(t, got == {want, want, want, want}, "%v: got %v, want %d", format, got, want)
 	}
+}
+
+// Paints keep more than 8 bits in an RGBA16F target: a gradient fading out
+// from 0.12 alpha (its ramp is half floats) stores levels between 8-bit
+// steps, and so do an antialiased edge's coverage and feTurbulence.
+@(test)
+test_rgba16f_target_levels :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 4)
+	defer sw_close(&s)
+	c := &s.canvas
+	img, err := create_image_empty(c, 64, 4, .RGBA16F, {.Premultiplied})
+	testing.expect_value(t, err, nil)
+	p: Path
+	defer path_destroy(&p)
+	set_render_target(c, img)
+	path_rect(&p, 0, 0, 64, 2)
+	stops := []Gradient_Stop{{0, {1, 0.8, 0.55, 0.12}}, {1, {1, 0.8, 0.55, 0}}}
+	fill_path(c, &p, paint_linear_gradient_stops(0, 0, 64, 0, stops))
+	path_reset(&p)
+	path_rect(&p, 0, 2, 10.3, 2)
+	fill_path(c, &p, paint_color({1, 1, 1, 0.12}))
+	set_render_target(c, nil)
+	flush(c)
+	bytes, rerr := read_image(c, img)
+	defer delete(bytes)
+	testing.expect_value(t, rerr, nil)
+	texels := slice.reinterpret([][4]f16, bytes)
+	between := 0
+	for x in 0 ..< 64 {
+		v := f32(texels[x][3]) * 255
+		if abs(v - math.round(v)) > 0.01 {
+			between += 1
+		}
+	}
+	testing.expectf(t, between > 48, "%d of 64 gradient texels between 8-bit steps", between)
+	edge := f32(texels[2 * 64 + 10][3])
+	testing.expectf(t, abs(edge - 0.3 * 0.12) < 0.0005, "edge alpha %v, want %v", edge, 0.3 * 0.12)
+
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	noise, nerr := create_image_empty(c, 64, 4, .RGBA16F, {.Premultiplied})
+	testing.expect_value(t, nerr, nil)
+	turbulence := Turbulence{{{0.05, 0.05}, 2, true, false}, 3, {}, {1, 1}, {0, 0, 64, 4}}
+	filter_image(c, noise, turbulence, layer_turbulence_lattice(&ls, c, 3))
+	flush(c)
+	nbytes, nrerr := read_image(c, noise)
+	defer delete(nbytes)
+	testing.expect_value(t, nrerr, nil)
+	between = 0
+	for texel in slice.reinterpret([][4]f16, nbytes) {
+		v := f32(texel[3]) * 255
+		if abs(v - math.round(v)) > 0.01 {
+			between += 1
+		}
+	}
+	testing.expectf(t, between > 200, "%d of 256 noise texels between 8-bit steps", between)
 }
 
 @(test)

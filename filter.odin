@@ -329,8 +329,9 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	last[len(last) - 1] = len(last)
 	for &p, i in f.primitives {
 		in1 := resolve(ls, c, p.in1, i, results, graphic, &alpha)
-		// Turbulence is made in 8 bits (the software backend writes bytes).
-		out := layer_acquire(ls, c, w, h, format = .RGBA8 if p.op == .Turbulence else format)
+		// Turbulence is made in the layer's format: rounded to 8 bits as
+		// resvg's in an RGBA8 one, unrounded in an RGBA16F one.
+		out := layer_acquire(ls, c, w, h, format = ls.format if p.op == .Turbulence else format)
 		switch p.op {
 		case .Gaussian_Blur:
 			layer_blur_into(ls, c, out, in1, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)

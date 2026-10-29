@@ -6,7 +6,8 @@ import "core:slice"
 GRADIENT_RAMP_WIDTH :: 256
 
 // The 256x1 ramp textures of multi-stop gradients, by stop list (a paint's
-// alpha is applied when drawing, so fades reuse the ramp). Ramps used in a
+// alpha is applied when drawing, so fades reuse the ramp). Ramps are half
+// floats, so a gradient keeps more than 8 bits in an RGBA16F target. Ramps used in a
 // frame survive into the next; anything unused for a whole frame is freed.
 // Kept across frames because the stops arrive with every draw and a ramp
 // is a texture upload.
@@ -41,10 +42,10 @@ gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient,
 	if cached, ok := s.this_frame[key]; ok {
 		return cached, nil
 	}
-	id = image_store_alloc(images, {{.Repeat_Y}, GRADIENT_RAMP_WIDTH, 1, .RGBA8}) or_return
-	ramp: [GRADIENT_RAMP_WIDTH * 4]u8
+	id = image_store_alloc(images, {{.Repeat_Y}, GRADIENT_RAMP_WIDTH, 1, .RGBA16F}) or_return
+	ramp: [GRADIENT_RAMP_WIDTH][4]f16
 	gradient_synthesize(g, &ramp)
-	image_store_update(images, id, image_source_rgba(ramp[:], GRADIENT_RAMP_WIDTH, 1), 0, 0) or_return
+	image_store_update(images, id, {.RGBA16F, slice.to_bytes(ramp[:]), GRADIENT_RAMP_WIDTH, 1, 0}, 0, 0) or_return
 	s.this_frame[key] = id
 	return id, nil
 }
@@ -58,9 +59,9 @@ gradient_store_release_old :: proc(s: ^Gradient_Store, images: ^Image_Store) {
 	s.this_frame, s.prev_frame = s.prev_frame, s.this_frame
 }
 
-// Renders the gradient's stops (not its tint) into a premultiplied RGBA8
-// ramp. Offsets outside the stop range pad with the first/last stop color.
-gradient_synthesize :: proc "contextless" (g: Multi_Stop_Gradient, dest: ^[GRADIENT_RAMP_WIDTH * 4]u8) {
+// Renders the gradient's stops (not its tint) into a premultiplied ramp.
+// Offsets outside the stop range pad with the first/last stop color.
+gradient_synthesize :: proc "contextless" (g: Multi_Stop_Gradient, dest: ^[GRADIENT_RAMP_WIDTH][4]f16) {
 	dest^ = {}
 	if len(g.stops) == 0 {
 		return
@@ -84,7 +85,7 @@ gradient_synthesize :: proc "contextless" (g: Multi_Stop_Gradient, dest: ^[GRADI
 }
 
 @(private)
-gradient_span :: proc "contextless" (dest: ^[GRADIENT_RAMP_WIDTH * 4]u8, c0, c1: Color, offset0, offset1: f32) {
+gradient_span :: proc "contextless" (dest: ^[GRADIENT_RAMP_WIDTH][4]f16, c0, c1: Color, offset0, offset1: f32) {
 	o0 := clamp(offset0, 0, 1)
 	o1 := clamp(offset1, 0, 1)
 	s := int(o0 * GRADIENT_RAMP_WIDTH)
@@ -101,9 +102,6 @@ gradient_span :: proc "contextless" (dest: ^[GRADIENT_RAMP_WIDTH * 4]u8, c0, c1:
 		g := c0.g + (c1.g - c0.g) * t
 		b := c0.b + (c1.b - c0.b) * t
 		a := c0.a + (c1.a - c0.a) * t
-		dest[i * 4 + 0] = u8(clamp(r * a * 255, 0, 255))
-		dest[i * 4 + 1] = u8(clamp(g * a * 255, 0, 255))
-		dest[i * 4 + 2] = u8(clamp(b * a * 255, 0, 255))
-		dest[i * 4 + 3] = u8(clamp(a * 255, 0, 255))
+		dest[i] = {f16(clamp(r * a, 0, 1)), f16(clamp(g * a, 0, 1)), f16(clamp(b * a, 0, 1)), f16(clamp(a, 0, 1))}
 	}
 }

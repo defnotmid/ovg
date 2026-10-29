@@ -3,35 +3,35 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 751 "ovg.slang"
+#line 756 "ovg.slang"
 float4 twin_composite_0(float4 g_0, float a_0, float opacity_0)
 {
 
-#line 752
+#line 757
     float _S1 = g_0.w;
 
-#line 752
+#line 757
     float _S2;
 
-#line 752
+#line 757
     if(_S1 > a_0)
     {
 
-#line 752
+#line 757
         _S2 = opacity_0 * a_0 / _S1;
 
-#line 752
+#line 757
     }
     else
     {
 
-#line 752
+#line 757
         _S2 = opacity_0;
 
-#line 752
+#line 757
     }
 
-#line 752
+#line 757
     return g_0 * float4(_S2) ;
 }
 
@@ -77,29 +77,29 @@ struct KernelContext_0
 };
 
 
-#line 760
+#line 765
 [[fragment]] pixelOutput_0 fs_composite_velocity(pixelInput_0 _S3 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> tex_texture_1 [[texture(0)]], sampler tex_sampler_1 [[sampler(0)]], texture2d<float, access::sample> glyphtex_texture_1 [[texture(1)]], sampler glyphtex_sampler_1 [[sampler(1)]], Paint_natural_0 device* paints_1 [[buffer(0)]])
 {
 
-#line 760
+#line 765
     thread KernelContext_0 kernelContext_0;
 
-#line 760
+#line 765
     (&kernelContext_0)->tex_texture_0 = tex_texture_1;
 
-#line 760
+#line 765
     (&kernelContext_0)->tex_sampler_0 = tex_sampler_1;
 
-#line 760
+#line 765
     (&kernelContext_0)->glyphtex_texture_0 = glyphtex_texture_1;
 
-#line 760
+#line 765
     (&kernelContext_0)->glyphtex_sampler_0 = glyphtex_sampler_1;
 
-#line 760
+#line 765
     (&kernelContext_0)->paints_0 = paints_1;
 
-#line 760
+#line 765
     pixelOutput_0 _S4 = { twin_composite_0(((tex_texture_1).sample((tex_sampler_1), (_S3.ftcoord_0), level((0.0f)))), ((glyphtex_texture_1).sample((glyphtex_sampler_1), (_S3.ftcoord_0), level((0.0f)))).w, (float4((&(paints_1+_S3.paint_0)->frag_0)->data_0[int(0)]) ).x) };
 
     return _S4;

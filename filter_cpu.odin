@@ -282,13 +282,14 @@ turbulence :: proc "contextless" (l: ^Turbulence_Lattice, tp: Turbulence_Params,
 	return turbulence_sum(l, tp, freq, cells, p, {tile[0], tile[1]})
 }
 
-// Fills rows y0 ..< y1 of `out` (w x h RGBA8, premultiplied) with `t` as
-// resvg's apply_turbulence: pixel (x, y) is user point ((x + offset.x) /
-// scale.x, (y + offset.y) / scale.y); the stitching tile is `t.region`.
-turbulence_fill :: proc "contextless" (out: []u8, w, h: int, t: Turbulence, l: ^Turbulence_Lattice, y0, y1: int) {
+// Fills rows y0 ..< y1 of `out` (w x h, premultiplied: RGBA8 rounded as
+// resvg's apply_turbulence, or RGBA16F unrounded if `half`) with `t`: pixel
+// (x, y) is user point ((x + offset.x) / scale.x, (y + offset.y) /
+// scale.y); the stitching tile is `t.region`.
+turbulence_fill :: proc "contextless" (out: []u8, w, h: int, t: Turbulence, l: ^Turbulence_Lattice, y0, y1: int, $half: bool) {
 	tp, region := t.params, t.region
 	freq, cells := turbulence_frequency(tp, {region[2], region[3]})
-	if len(out) < w * h * 4 || y0 < 0 || y1 > h {
+	if len(out) < w * h * (8 if half else 4) || y0 < 0 || y1 > h {
 		return
 	}
 	for y in y0 ..< y1 {
@@ -296,6 +297,17 @@ turbulence_fill :: proc "contextless" (out: []u8, w, h: int, t: Turbulence, l: ^
 			p := [2]f64{(f64(x) + t.offset.x) / t.scale.x, (f64(y) + t.offset.y) / t.scale.y}
 			// resvg passes the pixel's place in the region as the tile origin.
 			n := turbulence_sum(l, tp, freq, cells, p, {f64(x) - region[0], f64(y) - region[1]})
+			when half {
+				// RGBA16F: the noise unrounded, premultiplied.
+				c: [4]f32
+				for k in 0 ..< 4 {
+					c[k] = clamp(f32((n[k] + 1) / 2 if tp.fractal_noise else n[k]), 0, 1)
+				}
+				#no_bounds_check {
+					(^[4]f16)(&out[(y * w + x) * 8])^ = {f16(c[0] * c[3]), f16(c[1] * c[3]), f16(c[2] * c[3]), f16(c[3])}
+				}
+				continue
+			}
 			px: [4]u8
 			for k in 0 ..< 4 {
 				v := (n[k] * 255 + 255) / 2 if tp.fractal_noise else n[k] * 255

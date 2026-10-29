@@ -750,7 +750,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 	extent := [2]f32{f32(src_info.width), f32(src_info.height)}
 	if t, is_turbulence := filter.(vg.Turbulence); is_turbulence {
 		// The source is the lattice image, not the target's size.
-		frag := turbulence_uniforms(t)
+		frag := turbulence_uniforms(t, dst_info.format == .RGBA16F)
 		frag[9] = {f32(dst_info.width), f32(dst_info.height), 0, 0}
 		frag[10] = {0, 0, 0, f32(vg.Shader_Type.Filter_Turbulence)}
 		plan_filter_pass(p, lookup(p, cmd.image), nil, lookup(p, c.target_image), frag)
@@ -1203,15 +1203,16 @@ scratch_image :: proc(b: ^SDL_Backend, info: vg.Image_Info) -> ^Image {
 // feTurbulence's uniforms (see `turbulence` in ovg.slang): frag[0] the
 // lattice coordinate of target pixel x, y as (x + a) * b, frag[1] =
 // (octaves, fractal, stitch, 0); stitching: frag[2] the tile size in
-// cells and the region origin, frag[3].xy the frequencies. Computed in
+// cells and the region origin, frag[3].xy the frequencies; frag[3].z is 1
+// for an RGBA16F target, which takes the noise unrounded. Computed in
 // f64 here, so the shader's f32 starts from rounded exact values.
 @(private = "file")
-turbulence_uniforms :: proc "contextless" (t: vg.Turbulence) -> (frag: [14][4]f32) {
+turbulence_uniforms :: proc "contextless" (t: vg.Turbulence, half: bool) -> (frag: [14][4]f32) {
 	freq, cells := vg.turbulence_frequency(t.params, {t.region[2], t.region[3]})
 	frag[0] = {f32(t.offset.x), f32(t.offset.y), f32(freq.x / t.scale.x), f32(freq.y / t.scale.y)}
 	frag[1] = {f32(t.params.octaves), 1 if t.params.fractal_noise else 0, 1 if t.params.stitch else 0, 0}
 	frag[2] = {f32(cells.x), f32(cells.y), f32(t.region[0]), f32(t.region[1])}
-	frag[3] = {f32(freq.x), f32(freq.y), 0, 0}
+	frag[3] = {f32(freq.x), f32(freq.y), 1 if half else 0, 0}
 	return
 }
 

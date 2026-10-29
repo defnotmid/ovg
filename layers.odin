@@ -17,8 +17,9 @@ import "core:math"
 // layer would use, so the pixels match a full-frame layer's. A layer that a
 // child blends with (`blend` other than Normal) covers the whole canvas.
 // Inside an offscreen image (a pattern tile or `layer_image_begin`) the
-// "canvas" is that image: layers are sized and placed within it, and made
-// in its format (an RGBA16F image's layers keep its precision).
+// "canvas" is that image: layers are sized and placed within it, and they
+// and pattern tiles are made in its format (an RGBA16F image's keep its
+// precision).
 //
 // The stack keeps a pool of layer images, sized in steps (see
 // `layer_bucket`) and reused across frames; images unused for a while are
@@ -259,9 +260,9 @@ layer_stack_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // A repeating tile image (`w x h` pixels) to draw a pattern into: drawing
 // goes to it until `layer_pattern_end`, which returns it for an image paint.
 // Tiles sample nearest-neighbour (as resvg's pattern shader), so tile edges
-// stay sharp. Tiles are pooled with the layers.
+// stay sharp. Tiles are pooled with the layers, in the layers' format.
 layer_pattern_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32) -> Image_Id {
-	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, .RGBA8, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest, .Transient})
+	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, ls.format, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest, .Transient})
 }
 
 layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
@@ -274,8 +275,9 @@ layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // a shader child). Pooled like the layers, by size and format; nests.
 // `format` is RGBA8 or RGBA16F: an RGBA16F image holds what RGBA8 would
 // (premultiplied, sRGB-encoded) in half floats, so faint levels an 8-bit
-// texel rounds away survive, and layers pushed inside it are RGBA16F too.
-// Values past 1, which only a composite that adds makes (`.Lighter`, or
+// texel rounds away survive; layers and pattern tiles made inside it are
+// RGBA16F too, and feTurbulence is unrounded (feComponentTransfer stays an
+// 8-bit lookup, as resvg's). Values past 1, which only a composite that adds makes (`.Lighter`, or
 // blend factors that add), are kept, not clamped.
 layer_image_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, format := Pixel_Format.RGBA8) -> Image_Id {
 	assert(format == .RGBA8 || format == .RGBA16F, "an offscreen image is RGBA8 or RGBA16F")

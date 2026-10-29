@@ -305,7 +305,8 @@ image). feTurbulence is the
 spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
 seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
 row bands as resvg on the software backend (on the caller's
-`Software_Backend.pool`, as all its drawing). The transfer tables are computed on the CPU and
+`Software_Backend.pool`, as all its drawing); both round it to 8 bits as
+resvg does, and keep it unrounded in an RGBA16F offscreen image. The transfer tables are computed on the CPU and
 uploaded; the other primitives are filter passes. `Filter.region`
 (`Filter_Region{units, x, y, w, h, bbox}`, `.User_Space_On_Use` or
 `.Object_Bounding_Box` with the caller's bounding box;
@@ -732,7 +733,9 @@ Paints:
 - `Paint.spread`: `.Pad`, `.Reflect`, `.Repeat` (SVG spreadMethod) for linear,
   radial and box gradients, two-stop and multi-stop.
 - Gradient colors interpolate in straight alpha (SVG): two stops with
-  different alphas use the ramp texture, like multi-stop gradients.
+  different alphas use the ramp texture, like multi-stop gradients. Ramps
+  are 256 half floats, so a gradient keeps more than 8 bits in an RGBA16F
+  target, and an 8-bit one rounds it once.
 - `paint_radial_gradient_focal_stops(cx, cy, r, fx, fy, fr, stops)`: SVG's
   two-point conical radial gradient (`Paint_Radial_Gradient.focal`), in the
   shader and the software backend; a focal point outside the circle moves
@@ -863,11 +866,14 @@ every part follows:
   stored as an RGBA8 image would store it (premultiplied, sRGB-encoded) in
   half floats, so a faint gradient keeps the levels an 8-bit texel rounds
   away (a low-alpha flare bands once the sRGB curve spreads each 8-bit
-  step over many output codes). Layers pushed inside it are made in its
-  format. Values pass 1 only where a composite adds (`.Lighter`, or blend
-  factors that add), and stay: a GPU's blend unit clamps a unorm target's
-  source and result but nothing on a float target, and the software
-  backend blends the same way.
+  step over many output codes). Layers and pattern tiles made inside it
+  take its format, feTurbulence there is unrounded and gradient ramps are
+  half floats, so only content that is 8-bit to begin with (images) and
+  feComponentTransfer (an 8-bit table looked up at an 8-bit index, as
+  resvg) keep 8-bit levels. Values pass 1 only where a composite adds
+  (`.Lighter`, or blend factors that add), and stay: a GPU's blend unit
+  clamps a unorm target's source and result but nothing on a float
+  target, and the software backend blends the same way.
 - **Backdrop blur** (`layer_backdrop_blur(ls, c, path, sigma)`, CSS
   backdrop-filter: blur()): in draw order, what the target holds under the
   path is copied out (grown by the blur's reach, into a pooled image),
