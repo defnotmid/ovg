@@ -17,7 +17,8 @@ import "core:math"
 // layer would use, so the pixels match a full-frame layer's. A layer that a
 // child blends with (`blend` other than Normal) covers the whole canvas.
 // Inside an offscreen image (a pattern tile or `layer_image_begin`) the
-// "canvas" is that image: layers are sized and placed within it.
+// "canvas" is that image: layers are sized and placed within it, and made
+// in its format (an RGBA16F image's layers keep its precision).
 //
 // The stack keeps a pool of layer images, sized in steps (see
 // `layer_bucket`) and reused across frames; images unused for a while are
@@ -81,8 +82,10 @@ Layer_Window :: struct {
 Layer_Target :: struct {
 	target:   Render_Target,
 	origin:   [2]i32,
-	// The layer stack's size to restore when this offscreen image ends.
+	// The layer stack's size and format to restore when this offscreen
+	// image ends.
 	outer:    [2]u32,
+	outer_format: Pixel_Format,
 	// It keeps a velocity twin (render_target_set).
 	velocity: bool,
 }
@@ -151,6 +154,9 @@ Layer_Stack :: struct {
 	targets:   [dynamic]Layer_Target,
 	width:     u32,
 	height:    u32,
+	// The format layers are made in: RGBA8, or the offscreen image's they
+	// are drawn in.
+	format:    Pixel_Format,
 	// The window of the layer being popped; its effects work at its size.
 	window:    Layer_Window,
 	// Counts `layer_stack_begin` calls.
@@ -211,9 +217,10 @@ layer_stack_destroy :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // the target.
 layer_stack_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, width, height: u32, target: Render_Target = nil, root_layer := false) {
 	ls.width, ls.height = width, height
+	ls.format = .RGBA8
 	ls.frame += 1
 	clear(&ls.targets)
-	append(&ls.targets, Layer_Target{target, {}, {}, target == nil})
+	append(&ls.targets, Layer_Target{target = target, velocity = target == nil})
 	clear(&ls.frames)
 	layer_pool_reset(c, &ls.pool, ls.frame)
 	layer_pool_reset(c, &ls.tiles, ls.frame)
@@ -254,7 +261,7 @@ layer_stack_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // Tiles sample nearest-neighbour (as resvg's pattern shader), so tile edges
 // stay sharp. Tiles are pooled with the layers.
 layer_pattern_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32) -> Image_Id {
-	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest, .Transient})
+	return layer_offscreen_begin(ls, c, &ls.tiles, w, h, .RGBA8, {.Premultiplied, .Repeat_X, .Repeat_Y, .Nearest, .Transient})
 }
 
 layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
@@ -264,23 +271,30 @@ layer_pattern_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // A transparent `w x h` image (edges clamped) to draw into until
 // `layer_image_end`; it holds what was drawn for the rest of the frame
 // (commands run in order, so later commands of the frame can sample it, as
-// a shader child). Pooled like the layers; nests.
-layer_image_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32) -> Image_Id {
-	return layer_offscreen_begin(ls, c, &ls.images, w, h, {.Premultiplied, .Transient})
+// a shader child). Pooled like the layers, by size and format; nests.
+// `format` is RGBA8 or RGBA16F: an RGBA16F image holds what RGBA8 would
+// (premultiplied, sRGB-encoded) in half floats, so faint levels an 8-bit
+// texel rounds away survive, and layers pushed inside it are RGBA16F too.
+// Values past 1, which only a composite that adds makes (`.Lighter`, or
+// blend factors that add), are kept, not clamped.
+layer_image_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, format := Pixel_Format.RGBA8) -> Image_Id {
+	assert(format == .RGBA8 || format == .RGBA16F, "an offscreen image is RGBA8 or RGBA16F")
+	return layer_offscreen_begin(ls, c, &ls.images, w, h, format, {.Premultiplied, .Transient})
 }
 
 layer_image_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	layer_offscreen_end(ls, c)
 }
 
-// An image of `pool` free this frame (exact size), else a new one, made
-// the render target. Layers pushed until `layer_offscreen_end` work in it:
-// a blend reads it as the backdrop, so its layers must be its size.
+// An image of `pool` free this frame (exact size and format), else a new
+// one, made the render target. Layers pushed until `layer_offscreen_end`
+// work in it: a blend reads it as the backdrop, so its layers must be its
+// size, and they keep its precision.
 @(private = "file")
-layer_offscreen_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, pool: ^[dynamic]Pooled_Layer, w, h: u32, flags: Image_Flags) -> Image_Id {
+layer_offscreen_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, pool: ^[dynamic]Pooled_Layer, w, h: u32, format: Pixel_Format, flags: Image_Flags) -> Image_Id {
 	id := Image_Id{}
 	for &t in pool {
-		if !t.in_use && t.w == w && t.h == h {
+		if !t.in_use && t.w == w && t.h == h && t.format == format {
 			t.in_use = true
 			t.last_used = ls.frame
 			id = t.id
@@ -288,19 +302,20 @@ layer_offscreen_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, pool: ^[dynamic]Pool
 		}
 	}
 	if !image_id_valid(id) {
-		id, _ = create_image_empty(c, w, h, .RGBA8, flags)
-		append(pool, Pooled_Layer{id, w, h, .RGBA8, true, ls.frame, 0})
+		id, _ = create_image_empty(c, w, h, format, flags)
+		append(pool, Pooled_Layer{id, w, h, format, true, ls.frame, 0})
 	}
 	layer_target_begin(ls, c, id)
-	ls.targets[len(ls.targets) - 1].outer = {ls.width, ls.height}
-	ls.width, ls.height = w, h
+	top := &ls.targets[len(ls.targets) - 1]
+	top.outer, top.outer_format = {ls.width, ls.height}, ls.format
+	ls.width, ls.height, ls.format = w, h, format
 	return id
 }
 
 @(private = "file")
 layer_offscreen_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
-	outer := ls.targets[len(ls.targets) - 1].outer
-	ls.width, ls.height = outer.x, outer.y
+	top := ls.targets[len(ls.targets) - 1]
+	ls.width, ls.height, ls.format = top.outer.x, top.outer.y, top.outer_format
 	layer_target_end(ls, c)
 }
 
@@ -845,9 +860,10 @@ layer_bucket :: proc "contextless" (n, limit: u32) -> u32 {
 	return min((n + step - 1) / step * step, limit)
 }
 
-// A transparent `w x h` layer image of `format` from the pool, one not
-// released after release number `released_by`.
-layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := max(u32), format := Pixel_Format.RGBA8) -> Image_Id {
+// A transparent `w x h` layer image of `format` (nil: the stack's) from
+// the pool, one not released after release number `released_by`.
+layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := max(u32), format: Maybe(Pixel_Format) = nil) -> Image_Id {
+	format := format.? or_else ls.format
 	for &l in ls.pool {
 		if !l.in_use && l.w == w && l.h == h && l.format == format && l.released <= released_by {
 			l.in_use = true
@@ -946,7 +962,7 @@ layer_draw_image :: proc(ls: ^Layer_Stack, c: ^Canvas, dst: Image_Id, dw, dh: u3
 // unless `keep`), with a velocity twin if `velocity`.
 @(private)
 layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep := false, origin := [2]i32{}, velocity := false) {
-	append(&ls.targets, Layer_Target{layer, origin, {}, velocity})
+	append(&ls.targets, Layer_Target{target = layer, origin = origin, velocity = velocity})
 	render_target_set(c, layer, origin, velocity)
 	if !keep {
 		info, _ := image_info(c, layer)

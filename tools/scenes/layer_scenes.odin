@@ -446,3 +446,43 @@ scene_backdrop_blur :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_backdrop_blur(ls, c, p, 3)
 	vg.layer_stack_end(ls, c)
 }
+
+// Faint content in an RGBA16F offscreen image, as a 3D panel's flare: a
+// low-alpha radial gradient, a blurred and clipped layer at a low opacity,
+// text, and two adds past 1 (`.Lighter`). Left, its alpha scaled by 12
+// shows levels an 8-bit image would round away; right, drawn at half
+// opacity, the adds' overlap is brighter than one add alone.
+scene_layer_image :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H)
+	vg.clear_rect(c, 0, 0, W, H, vg.rgb(10, 10, 20))
+	p := &r.path
+	img := vg.layer_image_begin(ls, c, 128, 96, .RGBA16F)
+	vg.path_reset(p)
+	vg.path_rect(p, 0, 0, 128, 96)
+	vg.fill_path(c, p, vg.paint_radial_gradient(64, 48, 2, 60, vg.rgba(255, 230, 180, 12), vg.rgba(255, 230, 180, 0)))
+	vg.path_reset(&r.scratch)
+	vg.path_circle(&r.scratch, 36, 36, 26)
+	vg.layer_push(ls, c, {opacity = 0.25, blur = 3, clip_path = &r.scratch})
+	rect(c, r, 8, 8, 60, 40, vg.rgba(120, 200, 255, 40))
+	vg.layer_pop(ls, c)
+	f, g, em := lay(r, "faint", 10, 86, 22)
+	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgba(255, 255, 255, 6)), &r.scratch)
+	vg.set_composite_operation(c, .Lighter)
+	circle(c, r, 88, 40, 20, vg.rgba(255, 140, 60, 200))
+	circle(c, r, 104, 52, 20, vg.rgba(255, 140, 60, 200))
+	vg.set_composite_operation(c, .Source_Over)
+	vg.layer_image_end(ls, c)
+	scaled := vg.layer_image_begin(ls, c, 128, 96)
+	vg.layer_image_end(ls, c)
+	m := vg.COLOR_MATRIX_IDENTITY
+	m.m[18] = 12
+	vg.filter_image(c, scaled, m, img)
+	vg.path_reset(p)
+	vg.path_rect(p, 0, 48, 128, 96)
+	vg.fill_path(c, p, vg.paint_image(scaled, 0, 48, 128, 96, 0))
+	vg.path_reset(p)
+	vg.path_rect(p, 128, 48, 128, 96)
+	vg.fill_path(c, p, vg.paint_image(img, 128, 48, 128, 96, 0, 0.5))
+	vg.layer_stack_end(ls, c)
+}

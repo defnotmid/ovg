@@ -718,6 +718,60 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 	}
 }
 
+// An RGBA16F offscreen image keeps levels an RGBA8 one rounds away, in the
+// layers pushed inside it too: white at 0.4/255 alpha through a clipped
+// layer at half opacity, its alpha then scaled by 64, shows at 13/255 (0
+// from RGBA8). Two adds of 0.75 (`.Lighter`) keep 1.5, which draws at half
+// opacity as 0.75 (0.5 from RGBA8, clamped at 1).
+@(test)
+test_layer_image_rgba16f :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 16, 16)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 16, 16)
+	for format in ([2]Pixel_Format{.RGBA8, .RGBA16F}) {
+		deep := format == .RGBA16F
+		clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
+		layer_stack_begin(&ls, c, 16, 16)
+		faint := layer_image_begin(&ls, c, 16, 16, format)
+		layer_push(&ls, c, {opacity = 0.5, clip_path = &p})
+		fill_path(c, &p, paint_color({1, 1, 1, 0.4 / 255}))
+		layer_pop(&ls, c)
+		layer_image_end(&ls, c)
+		scaled := layer_image_begin(&ls, c, 16, 16)
+		layer_image_end(&ls, c)
+		m := COLOR_MATRIX_IDENTITY
+		m.m[18] = 64
+		filter_image(c, scaled, m, faint)
+		fill_path(c, &p, paint_image(scaled, 0, 0, 16, 16, 0))
+		layer_stack_end(&ls, c)
+		flush(c)
+		want: u8 = 13 if deep else 0
+		got := px(&s, 8, 8)
+		testing.expectf(t, got == {want, want, want, want}, "%v: got %v, want %d", format, got, want)
+
+		clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
+		layer_stack_begin(&ls, c, 16, 16)
+		sum := layer_image_begin(&ls, c, 16, 16, format)
+		set_composite_operation(c, .Lighter)
+		fill_path(c, &p, paint_color({1, 1, 1, 0.75}))
+		fill_path(c, &p, paint_color({1, 1, 1, 0.75}))
+		set_composite_operation(c, .Source_Over)
+		layer_image_end(&ls, c)
+		fill_path(c, &p, paint_image(sum, 0, 0, 16, 16, 0, 0.5))
+		layer_stack_end(&ls, c)
+		flush(c)
+		want = 191 if deep else 128
+		got = px(&s, 8, 8)
+		testing.expectf(t, got == {want, want, want, want}, "%v: got %v, want %d", format, got, want)
+	}
+}
+
 @(test)
 test_sw_screenshot :: proc(t: ^testing.T) {
 	s: Sw

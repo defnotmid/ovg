@@ -300,7 +300,8 @@ earlier results, computed in linear RGB unless `srgb`; component transfer
 tables and convolution kernels live in `Filter.values`. A linear RGB
 filter's images are RGBA16F (8-bit linear light keeps 9 of sRGB's first 49
 levels), each released after the last primitive reading it; an sRGB
-filter's are RGBA8. feTurbulence is the
+filter's are the layer's (RGBA8, or RGBA16F in an RGBA16F offscreen
+image). feTurbulence is the
 spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
 seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
 row bands as resvg on the software backend (on the caller's
@@ -857,6 +858,16 @@ every part follows:
   shapes near it. Each layer was a render pass, a few microseconds of GPU
   time however small: a Lottie repeater's 49 fading copies (720p, RADV) took
   1.09 ms, now 0.14 ms (M4 8.4 -> 0.6 ms).
+- **Offscreen images can keep more than 8 bits**
+  (`layer_image_begin(ls, c, w, h, .RGBA16F)`): what is drawn into one is
+  stored as an RGBA8 image would store it (premultiplied, sRGB-encoded) in
+  half floats, so a faint gradient keeps the levels an 8-bit texel rounds
+  away (a low-alpha flare bands once the sRGB curve spreads each 8-bit
+  step over many output codes). Layers pushed inside it are made in its
+  format. Values pass 1 only where a composite adds (`.Lighter`, or blend
+  factors that add), and stay: a GPU's blend unit clamps a unorm target's
+  source and result but nothing on a float target, and the software
+  backend blends the same way.
 - **Backdrop blur** (`layer_backdrop_blur(ls, c, path, sigma)`, CSS
   backdrop-filter: blur()): in draw order, what the target holds under the
   path is copied out (grown by the blur's reach, into a pooled image),

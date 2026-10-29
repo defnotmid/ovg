@@ -733,8 +733,7 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 				continue
 			}
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			dst := load_texel(r.target, tx, ty)
-			store_texel(r.target, tx, ty, apply_blend(r.blend, a * t, dst))
+			blend_texel(r.target, tx, ty, r.blend, a * t)
 			when twinned {
 				twin_composite(&r.twin.pixels[ty * r.twin.width + tx], vacc[int(y - y0) * w + int(x - x0)], a[3], t[3])
 			}
@@ -814,8 +813,7 @@ raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shape
 				continue
 			}
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			dst := load_texel(r.target, tx, ty)
-			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
+			blend_texel(r.target, tx, ty, r.blend, src)
 			when twinned {
 				if moves {
 					twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
@@ -851,8 +849,7 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Boun
 				continue
 			}
 			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			dst := load_texel(r.target, tx, ty)
-			store_texel(r.target, tx, ty, apply_blend(r.blend, src, dst))
+			blend_texel(r.target, tx, ty, r.blend, src)
 			when moves {
 				twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
 			}
@@ -1175,13 +1172,21 @@ factor_alpha :: #force_inline proc "contextless" (f: Blend_Factor, sa, da: f32) 
 	return 0
 }
 
+// Blends `src` onto the target's texel as a GPU's blend unit does: a unorm
+// target clamps the source to [0, 1] first and the result as it stores it
+// (store_texel); an RGBA16F target clamps neither.
 @(private = "file")
-apply_blend :: proc "contextless" (s: Composite_Operation_State, src, dst: [4]f32) -> [4]f32 {
+blend_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, s: Composite_Operation_State, src: [4]f32) {
+	src := src
+	if t.format != .RGBA16F {
+		src = {clamp(src[0], 0, 1), clamp(src[1], 0, 1), clamp(src[2], 0, 1), clamp(src[3], 0, 1)}
+	}
+	dst := load_texel(t, x, y)
 	sf := factor_rgb(s.src_rgb, src, dst)
 	df := factor_rgb(s.dst_rgb, src, dst)
 	rgb := src.rgb * sf + dst.rgb * df
 	a := src.a * factor_alpha(s.src_alpha, src.a, dst.a) + dst.a * factor_alpha(s.dst_alpha, src.a, dst.a)
-	return {clamp(rgb.r, 0, 1), clamp(rgb.g, 0, 1), clamp(rgb.b, 0, 1), clamp(a, 0, 1)}
+	store_texel(t, x, y, {rgb.r, rgb.g, rgb.b, a})
 }
 
 // ---- image filters -------------------------------------------------------------------

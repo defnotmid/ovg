@@ -90,6 +90,7 @@ ALL := [?]Scene {
 	{"layer_blend", scene_layer_blend},
 	{"layer_groups", scene_layer_groups},
 	{"backdrop_blur", scene_backdrop_blur},
+	{"layer_image", scene_layer_image},
 	{"svg", scene_svg},
 	{"lottie", scene_lottie},
 	{"lottie_text_fx", scene_lottie_text_fx},

@@ -10,7 +10,8 @@ Pixel_Format :: enum u8 {
 	// deep planes, e.g. 10- and 12-bit video, for custom programs.
 	Gray16,
 	// Half-float RGBA (four f16 per pixel), stored and sampled unclamped:
-	// for custom program targets and channels (feedback buffers).
+	// for custom program targets and channels (feedback buffers), and
+	// offscreen images that keep more than 8 bits (`layer_image_begin`).
 	RGBA16F,
 }
 

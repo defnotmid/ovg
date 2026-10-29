@@ -261,8 +261,8 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 
 	// Linear light needs about 12 bits to keep sRGB's dark levels (8 bits
 	// keep 9 of sRGB's first 49), so a linearRGB filter's images are half
-	// floats.
-	format := Pixel_Format.RGBA8 if f.srgb else .RGBA16F
+	// floats; an sRGB filter's are the layer's.
+	format := ls.format if f.srgb else .RGBA16F
 	graphic := source
 	if !f.srgb {
 		graphic = layer_acquire(ls, c, w, h, format = format)
