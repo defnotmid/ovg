@@ -1,5 +1,5 @@
 // The ovg mascot: a 32x32 pixel-art chameleon on a branch, in the family of
-// onimite's Pip, odecs' turntable and ottis' Ottis. A chameleon because ovg
+// onimite's Pip, oicut's hedgehog and ottis' Ottis. A chameleon because ovg
 // is fills, gradients and curves: its colour changes, its tail is a spiral
 // path and its tongue is a curve. Writes an SVG whose parts are groups a
 // script shows or hides by id (onimite: svg{ overrides = { tongue = { visible = true } } }):
@@ -28,7 +28,7 @@ import "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 W :: 32
 H :: 32

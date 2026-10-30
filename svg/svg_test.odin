@@ -6,7 +6,7 @@ import "core:slice"
 import "core:strings"
 import "core:testing"
 
-import common "deps:odecs/common"
+import common "deps:oicut/common"
 import vg ".."
 import cv "deps:ocurves"
 
@@ -537,7 +537,7 @@ test_svg_clip_text_fill_none :: proc(t: ^testing.T) {
 	testing.expectf(t, blue > 100, "clipped area: %d blue pixels", blue)
 }
 
-// Bands on the caller's pool (odecs' Work_Pool) draw what one thread draws:
+// Bands on the caller's pool (oicut's Work_Pool) draw what one thread draws:
 // a frame's runs, a group, a two-pass blur and feTurbulence.
 @(test)
 test_sw_pool_bands_match :: proc(t: ^testing.T) {

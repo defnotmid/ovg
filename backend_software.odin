@@ -4,7 +4,7 @@ import "base:runtime"
 import "core:math"
 import "core:mem"
 import "core:slice"
-import common "deps:odecs/common"
+import common "deps:oicut/common"
 import cv "deps:ocurves"
 
 // CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
@@ -30,10 +30,10 @@ Software_Backend :: struct {
 	// `.Transient` images' pixels, one block carved in order for a render
 	// (sw_lend) and kept at the largest render's size.
 	transient: []u8,
-	// The caller's pool a frame's row bands run on (odecs' Work_Pool: one
+	// The caller's pool a frame's row bands run on (oicut's Work_Pool: one
 	// band a range); nil runs them all on the calling thread. A band takes
 	// a group's scratch from context.temp_allocator, so each of the pool's
-	// threads must have its own (an Odin thread's default, as odecs'
+	// threads must have its own (an Odin thread's default, as oicut's
 	// Static_Pool's workers do).
 	pool:      ^common.Work_Pool,
 	// Motion blur (Frame.motion): the velocity twins of the screen and of

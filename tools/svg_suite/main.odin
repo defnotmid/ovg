@@ -21,7 +21,7 @@ import "core:slice"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 import "../../svg"
 import vg "../.."

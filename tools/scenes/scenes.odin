@@ -9,7 +9,7 @@ import "core:mem"
 import "../../svg"
 import "../../lottie"
 import vg "../.."
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 W :: 256
 H :: 192

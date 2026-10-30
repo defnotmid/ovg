@@ -2,9 +2,9 @@ package ovg
 
 import "core:mem"
 import "core:os"
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
-// Decodes a PNG/JPEG/GIF/BMP/TGA/QOI/WebP (anything odecs' image reads) and
+// Decodes a PNG/JPEG/GIF/BMP/TGA/QOI/WebP (anything oicut's image reads) and
 // uploads it as an RGBA8 image.
 load_image_mem :: proc(c: ^Canvas, data: []u8, flags: Image_Flags = {}) -> (Image_Id, Error) {
 	img, err := image.decode(data)

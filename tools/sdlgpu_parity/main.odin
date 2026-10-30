@@ -14,7 +14,7 @@ import "core:fmt"
 import "core:os"
 import sdl "vendor:sdl3"
 
-import image "deps:odecs/image"
+import image "deps:oicut/image"
 
 import vg "../.."
 import vgsdl "../../sdlgpu"

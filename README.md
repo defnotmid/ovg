@@ -56,14 +56,14 @@ Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Fonts are
 read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), shapes'
 coverage and path booleans computed by
 [ocurves](https://github.com/defnotmid/ocurves), images decoded and PNGs
-written by [odecs](https://github.com/defnotmid/odecs) (all Odin, MIT), read
+written by [oicut](https://github.com/defnotmid/oicut) (all Odin, MIT), read
 through the `deps` collection: clone them next to ovg and build with
 `-collection:deps=..` (the directory holding all four). The other
 dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.12), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.6), `deps:odecs/image`, `deps:odecs/common` ([odecs](https://github.com/defnotmid/odecs) v0.0.8) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.12), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.6), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.21) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -73,12 +73,12 @@ dependencies are Odin's own `vendor` packages:
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.12 https://github.com/defnotmid/oglyph
 git clone -b v0.0.6 https://github.com/defnotmid/ocurves
-git clone -b v0.0.8 https://github.com/defnotmid/odecs
+git clone -b v0.0.21 https://github.com/defnotmid/oicut
 ```
 
 ```odin
-import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph, ocurves and odecs)
-import image "deps:odecs/image"
+import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph, ocurves and oicut)
+import image "deps:oicut/image"
 
 sw: vg.Software_Backend
 vg.software_backend_init(&sw)
@@ -489,7 +489,7 @@ vg.layer_stack_end(&ls, &c)
   Liberation Serif and Sans) break where Inkscape breaks them, every
   baseline within 0.0012 px of its plain-SVG export. Images: data:
   URIs and other hrefs through `svg.Parse_Options.load_file`; raster
-  (odecs' image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
+  (oicut's image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
 - `svg.draw(c, ls, r, doc, transform, overrides)` draws in the document's
   `width x height` space. Effects map to one layer (opacity, path clip or
   clip-as-mask, mask, filter, blend), two when a non-path clip meets a mask;
@@ -828,7 +828,7 @@ every part follows:
   externals are a run, each instance is binned once into the bands it
   reaches (counted, summed, filled), and each band draws its own in order,
   so every pixel gets the same draws in the same order on any number of
-  threads. Bands run on the caller's `Software_Backend.pool` (odecs'
+  threads. Bands run on the caller's `Software_Backend.pool` (oicut's
   `Work_Pool`; nil draws them all on the calling thread), as do blurs and
   morphology (two banded passes) and the other filters. Images flagged
   `.Transient`, which the layer stack's layers, tiles and offscreen images
@@ -1095,7 +1095,7 @@ every part follows:
 ## Test
 
 ```sh
-# with oglyph, ocurves and odecs cloned next to ovg (see Use); every build takes -collection:deps=..
+# with oglyph, ocurves and oicut cloned next to ovg (see Use); every build takes -collection:deps=..
 # (fonts and shaping are tested in oglyph: odin test font / shape there; shapes' words and booleans in ocurves)
 odin test . -collection:deps=.. -vet -strict-style    # core + software backend
 odin test svg -collection:deps=.. -vet -strict-style  # SVG import: parsing, drawing, hostile files

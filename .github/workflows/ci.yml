@@ -16,9 +16,9 @@ env:
   ODIN_VERSION: dev-2026-10
 
 # ovg reads oglyph (fonts and shaping), ocurves (shapes' coverage and path
-# booleans) and odecs (image decoding and PNG writing) through
+# booleans) and oicut (image decoding and PNG writing) through
 # `-collection:deps=..`, so the job checks them out side by side:
-#   $GITHUB_WORKSPACE/{ovg,oglyph,ocurves,odecs}
+#   $GITHUB_WORKSPACE/{ovg,oglyph,ocurves,oicut}
 # All are pinned to the tags onimite builds with. The core package with the
 # software backend, svg and lottie are tested; the SDL_GPU backend
 # (sdlgpu/) is type-checked only, since hosted runners have no GPU and
@@ -51,9 +51,9 @@ jobs:
           path: ocurves
       - uses: actions/checkout@v4
         with:
-          repository: defnotmid/odecs
-          ref: v0.0.8
-          path: odecs
+          repository: defnotmid/oicut
+          ref: v0.0.21
+          path: oicut
 
       - name: Cache Odin
         id: odin-cache
