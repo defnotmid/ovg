@@ -635,11 +635,18 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 		return
 	}
 	// Indices into `group_words` (it grows below): the grid's size, its
-	// starts, then lists.
+	// starts, then lists. A frame's groups all append to it, so it grows
+	// geometrically.
+	grow :: proc(a: ^[dynamic]u32, n: int) {
+		if n > cap(a) {
+			reserve(a, max(n, 2 * cap(a)))
+		}
+		resize(a, n)
+	}
 	head := len(b.group_words)
 	at := head + 1
 	lists := at + nx * ny + 1
-	resize(&b.group_words, lists)
+	grow(&b.group_words, lists)
 	words := &b.group_words
 	words[head] = u32(nx) | u32(ny) << 16
 	for k in at ..< lists {
@@ -660,7 +667,7 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	for k in at ..< lists - 1 {
 		words[k + 1] += words[k]
 	}
-	resize(words, lists + int(words[lists - 1]))
+	grow(words, lists + int(words[lists - 1]))
 	fill := make([]u32, nx * ny, context.temp_allocator)
 	copy(fill, words[at:lists - 1])
 	for sp, k in spans {

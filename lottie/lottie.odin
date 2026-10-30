@@ -1038,7 +1038,12 @@ parse_shapes :: proc(p: ^Parser, arr: json.Array) -> vg.Range {
 			n += 1
 		}
 	}
+	// Every group's run appends to the document's shapes: they grow
+	// geometrically.
 	start := u32(len(doc.shapes))
+	if need := len(doc.shapes) + n; need > cap(doc.shapes) {
+		reserve(&doc.shapes, max(need, 2 * cap(doc.shapes)))
+	}
 	resize(&doc.shapes, len(doc.shapes) + n)
 	i := start
 	for v in arr {

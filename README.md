@@ -63,7 +63,7 @@ dependencies are Odin's own `vendor` packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.12), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.6), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.21) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.12), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.9), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.21) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -72,7 +72,7 @@ dependencies are Odin's own `vendor` packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.12 https://github.com/defnotmid/oglyph
-git clone -b v0.0.6 https://github.com/defnotmid/ocurves
+git clone -b v0.0.9 https://github.com/defnotmid/ocurves
 git clone -b v0.0.21 https://github.com/defnotmid/oicut
 ```
 

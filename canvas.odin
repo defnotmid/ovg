@@ -224,7 +224,7 @@ push_motions :: proc(c: ^Canvas, n: int) {
 		return
 	}
 	at := len(c.motions)
-	resize(&c.motions, at + n)
+	scratch_size(&c.motions, at + n)
 	m := state(c).motion
 	for &row in c.motions[at:] {
 		row = m
