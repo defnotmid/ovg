@@ -719,6 +719,80 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 	}
 }
 
+// A layer composites under the scissor of its push: a blur spreading past
+// it and a flood filling the filter region stop at its edge (onib's
+// report: a box scissored to x < 50 showed alpha 26 at x 52 after a blur,
+// and the flood covered the box's right half). At a fractional edge
+// (x < 50.5) the pixel the edge cuts keeps the coverage its drawing had:
+// the composite cuts at whole pixels, so the scissor applies once.
+@(test)
+test_layer_scissor :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 100, 100)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p, all: Path
+	defer path_destroy(&p)
+	defer path_destroy(&all)
+	path_rect(&p, 10, 10, 80, 80)
+	path_rect(&all, 0, 0, 100, 100)
+	prims := [?]Filter_Primitive{{op = .Flood, color = rgb(0, 0, 255)}}
+	flood := Filter{primitives = prims[:], srgb = true}
+	Case :: struct {
+		name:   string,
+		params: Layer_Params,
+		inside: [4]u8,
+	}
+	white := [4]u8{255, 255, 255, 255}
+	cases := [?]Case {
+		{"opacity", {opacity = 0.5}, {128, 128, 128, 128}},
+		{"blur", {blur = 2}, white},
+		{"flood", {filter = &flood}, {0, 0, 255, 255}},
+	}
+	for k in cases {
+		clear_rect(c, 0, 0, 100, 100, TRANSPARENT)
+		layer_stack_begin(&ls, c, 100, 100)
+		save(c)
+		intersect_scissor(c, 0, 0, 50, 100)
+		layer_push(&ls, c, k.params)
+		fill_path(c, &p, paint_color(WHITE))
+		layer_pop(&ls, c)
+		restore(c)
+		layer_stack_end(&ls, c)
+		flush(c)
+		got := px(&s, 25, 50)
+		for i in 0 ..< 4 {
+			testing.expectf(t, abs(int(got[i]) - int(k.inside[i])) <= 1, "%s inside: got %v, want %v", k.name, got, k.inside)
+		}
+		for x in ([2]u32{52, 75}) {
+			testing.expectf(t, px(&s, x, 50) == {}, "%s at x %d: got %v, want nothing past the scissor", k.name, x, px(&s, x, 50))
+		}
+	}
+	// A clipped layer (no group) drawn at a fractional scissor edge, then
+	// the same fill without a layer.
+	edge: [2][4]u8
+	for layered, i in ([2]bool{true, false}) {
+		clear_rect(c, 0, 0, 100, 100, TRANSPARENT)
+		layer_stack_begin(&ls, c, 100, 100)
+		save(c)
+		intersect_scissor(c, 0, 0, 50.5, 100)
+		if layered {
+			layer_push(&ls, c, {clip_path = &all})
+		}
+		fill_path(c, &p, paint_color(WHITE))
+		if layered {
+			layer_pop(&ls, c)
+		}
+		restore(c)
+		layer_stack_end(&ls, c)
+		flush(c)
+		edge[i] = px(&s, 50, 50)
+	}
+	testing.expectf(t, edge[0] == edge[1] && edge[1][3] > 0 && edge[1][3] < 255, "the cut pixel: layered %v, drawn %v", edge[0], edge[1])
+}
+
 // An RGBA16F offscreen image keeps levels an RGBA8 one rounds away, in the
 // layers and pattern tiles made inside it too: white at 0.4/255 alpha, its
 // alpha then scaled by 64, shows at 13/255 through a clipped layer at half

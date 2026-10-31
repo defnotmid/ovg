@@ -79,7 +79,7 @@ scene_layers :: proc(c: ^vg.Canvas, r: ^Resources) {
 	sp.stroke.line_join = .Miter
 	vg.stroke_path(c, p, sp)
 	vg.layer_pop(ls, c)
-	// Scissored content in a blurred layer.
+	// A blurred layer under a scissor: the blur stops at its edge.
 	vg.save(c)
 	vg.scissor(c, 20, 140, 50, 30)
 	vg.layer_push(ls, c, {blur = 4})

@@ -852,7 +852,10 @@ every part follows:
   can sit at an origin (`set_render_target(c, img, origin)`), so the layer is
   still drawn in canvas coordinates and pixels match a full-frame layer.
   Layers with nothing to show drop their commands; a layer a child blends
-  with covers the whole canvas. A layer with only an opacity over shapes
+  with covers the whole canvas. A layer composites under the scissor of
+  its push, cut at the whole pixels it covers, so a blur's spread or a
+  flood stops at a scissored box's edge; a scissor set inside the layer
+  cuts only its drawing. A layer with only an opacity over shapes
   (one image and scissor, source-over) needs no image: it becomes a group
   (`Cmd_Draw_Shapes.group`), whose pixels composite its shapes in order and
   take the opacity once, as the layer would. On the GPU a group is a grid

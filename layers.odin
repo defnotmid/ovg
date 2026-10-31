@@ -21,6 +21,12 @@ import "core:math"
 // and pattern tiles are made in its format (an RGBA16F image's keep its
 // precision).
 //
+// A layer composites under the scissor current at its push, as drawing
+// does: what its filter or blur makes past it (a blur's spread, a flood) is
+// cut there. Its drawing was cut by the scissor already, so the composite
+// cuts at the whole pixels the scissor covers (a rotated scissor's bounding
+// box), which leaves every pixel it drew as it was.
+//
 // The stack keeps a pool of layer images, sized in steps (see
 // `layer_bucket`) and reused across frames; images unused for a while are
 // freed. Commands run in order at flush, so a layer released mid-frame can
@@ -122,6 +128,9 @@ Layer_Frame :: struct {
 	mask_invert: bool,
 	// The content keeps a velocity twin, as the target under it does.
 	velocity:   bool,
+	// The whole pixels of the scissor at the push (drawing coordinates),
+	// which the pop composites under; nil without one.
+	scissor:    Maybe(Rect),
 }
 
 @(private)
@@ -340,6 +349,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	f.mask_alpha = params.mask_alpha
 	f.mask_invert = params.mask_invert
 	f.velocity = ls.targets[len(ls.targets) - 1].velocity
+	f.scissor = scissor_pixels(state(c).scissor)
 	if params.blend != .Normal {
 		// Blending reads the target as an image of the canvas size.
 		f.full = true
@@ -395,12 +405,12 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	drawn := len(c.commands)
 	layer_target_end(ls, c)
 	si := ls.stand_ins[depth]
-	win, visible := layer_window(ls, c, &f, si, depth)
+	win, bounds, visible := layer_window(ls, c, &f, si, depth)
 	if !visible {
 		canvas_truncate(c, f.mark)
 		return
 	}
-	if layer_group(c, &f, c.commands[f.content:drawn]) {
+	if layer_group(c, &f, c.commands[f.content:drawn], bounds) {
 		return
 	}
 	// The global alpha applied to the draws recorded into the layer; the
@@ -441,6 +451,10 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		keep := layer_acquire(ls, c, w, h)
 		layer_target_begin(ls, c, keep, origin = {i32(win.x), i32(win.y)})
 		save(c)
+		// The content was cut by the scissor and the composite cuts what
+		// spreads past it, so the clip is drawn whole (cutting it too would
+		// count the scissor's edge twice).
+		reset_scissor(c)
 		if f.has_clip {
 			set_transform(c, f.clip_xform)
 			p := paint_color(WHITE)
@@ -471,12 +485,26 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		content = keep
 	}
 	if f.blend != .Normal {
-		layer_blend_onto_target(ls, c, content, f.opacity, f.blend)
+		layer_blend_onto_target(ls, c, content, f.opacity, f.blend, f.scissor)
 	} else {
-		layer_blit(ls, c, content, x, y, w, h, f.opacity)
+		layer_blit(ls, c, content, x, y, w, h, f.opacity, f.scissor)
 	}
 	layer_composite_velocity(c, drew, content, x, y, w, h, f.opacity)
 	layer_release(ls, content)
+}
+
+// The whole pixels a scissor covers, in drawing coordinates (a rotated
+// one's bounding box); nil for no scissor.
+@(private = "file")
+scissor_pixels :: proc "contextless" (s: Scissor) -> Maybe(Rect) {
+	if !s.has_extent {
+		return nil
+	}
+	m := s.transform
+	hx := s.extent[0] * abs(m[0]) + s.extent[1] * abs(m[2])
+	hy := s.extent[0] * abs(m[1]) + s.extent[1] * abs(m[3])
+	x0, y0 := math.floor(m[4] - hx), math.floor(m[5] - hy)
+	return Rect{x0, y0, math.ceil(m[4] + hx) - x0, math.ceil(m[5] + hy) - y0}
 }
 
 // Motion blur: the motion `source` drew (its twin) composited onto the
@@ -490,12 +518,16 @@ layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32,
 }
 
 // Draws the layer `f` as a group of its shapes (`Cmd_Draw_Shapes.group`)
-// when it has only an opacity and drew (`drawn`) one shape draw,
-// source-over: shapes sharing an image, blend and scissor record as one
+// when it has only an opacity and drew (`drawn`, within `bounds`) one shape
+// draw, source-over, inside its scissor (so the composite would cut
+// nothing): shapes sharing an image, blend and scissor record as one
 // (`push_shape`), so that is every layer of plain shapes.
 @(private = "file")
-layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command) -> bool {
+layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bounds) -> bool {
 	if f.filter != nil || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
+		return false
+	}
+	if r, ok := f.scissor.?; ok && (bounds.minx < r.x || bounds.miny < r.y || bounds.maxx > r.x + r.w || bounds.maxy > r.y + r.h) {
 		return false
 	}
 	cmd := drawn[0]
@@ -511,18 +543,20 @@ layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command) -> bool {
 	return true
 }
 
-// The window of the layer `f` ending at `depth`, false when nothing of it
-// would show.
+// The window of the layer `f` ending at `depth` and the bounds of what it
+// drew (empty for a whole-canvas layer), false when nothing of it would
+// show.
 @(private = "file")
-layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_Stand_In, depth: int) -> (win: Layer_Window, visible: bool) {
+layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_Stand_In, depth: int) -> (win: Layer_Window, drawn: Bounds, visible: bool) {
 	cw, ch := ls.width, ls.height
 	if cw == 0 || ch == 0 {
-		return {}, false
+		return {}, EMPTY_BOUNDS, false
 	}
 	if f.full {
-		return {0, 0, cw, ch}, true
+		return {0, 0, cw, ch}, EMPTY_BOUNDS, true
 	}
-	drawn, mask := layer_scan(c, f.mark.commands, si)
+	mask: Bounds
+	drawn, mask = layer_scan(c, f.mark.commands, si)
 	// How far the effects move or spread a pixel; a pixel of the result
 	// depends only on what was drawn that close to it.
 	reach: Vec2
@@ -554,7 +588,7 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	x1 := min(math.ceil(area.maxx), f32(cw))
 	y1 := min(math.ceil(area.maxy), f32(ch))
 	if x1 <= x0 || y1 <= y0 {
-		return {}, false
+		return {}, drawn, false
 	}
 	// A bucket-sized image, moved back inside the canvas where it would
 	// stick out (so it never holds what lies beyond the canvas edge).
@@ -562,7 +596,7 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	win.h = layer_bucket(u32(y1 - y0), ch)
 	win.x = min(u32(x0), cw - win.w)
 	win.y = min(u32(y0), ch - win.h)
-	return win, true
+	return win, drawn, true
 }
 
 // Bounds (device pixels) of what the commands since `start` drew into the
@@ -670,15 +704,15 @@ layer_relocate :: proc(c: ^Canvas, start: int, si: Layer_Stand_In, content, mask
 	}
 }
 
-// Blends `src` onto the current target, which must be a layer image. The
-// layer covers the whole canvas (see `Layer_Frame.full`).
+// Blends `src` onto the current target within `clip`, which must be a layer
+// image. The layer covers the whole canvas (see `Layer_Frame.full`).
 @(private = "file")
-layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opacity: f32, mode: Blend_Mode) {
+layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opacity: f32, mode: Blend_Mode, clip: Maybe(Rect)) {
 	w, h := ls.window.w, ls.window.h
 	backdrop, is_image := ls.targets[len(ls.targets) - 1].target.(Image_Id)
 	if !is_image {
 		// No backdrop image to read: composite normally.
-		layer_blit(ls, c, src, 0, 0, w, h, opacity)
+		layer_blit(ls, c, src, 0, 0, w, h, opacity, clip)
 		return
 	}
 	source := src
@@ -694,7 +728,7 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opa
 	filter_image(c, blended, Blend{mode, backdrop}, source)
 	save(c)
 	set_composite_operation(c, .Copy)
-	layer_blit(ls, c, blended, 0, 0, w, h, 1)
+	layer_blit(ls, c, blended, 0, 0, w, h, 1, clip)
 	restore(c)
 	layer_release(ls, blended)
 	if image_id_valid(faded) {
@@ -703,15 +737,19 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opa
 }
 
 // Draws a `w x h` layer image at (x, y) on the current target, untransformed
-// and unclipped, at `opacity` times the global alpha. It writes no motion:
-// a layer's goes by its velocity twin (layer_pop).
-layer_blit :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, x, y: f32, w, h: u32, opacity: f32) {
+// and clipped only to `clip` (drawing coordinates), at `opacity` times the
+// global alpha. It writes no motion: a layer's goes by its velocity twin
+// (layer_pop).
+layer_blit :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, x, y: f32, w, h: u32, opacity: f32, clip: Maybe(Rect) = nil) {
 	alpha := opacity * state(c).alpha
 	save(c)
 	state(c).motion = {}
 	set_global_alpha(c, 1)
 	reset_transform(c)
 	reset_scissor(c)
+	if r, ok := clip.?; ok {
+		scissor(c, r.x, r.y, r.w, r.h)
+	}
 	fw, fh := f32(w), f32(h)
 	path_reset(&ls.scratch)
 	path_rect(&ls.scratch, x, y, fw, fh)
