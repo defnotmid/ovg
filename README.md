@@ -990,9 +990,13 @@ every part follows:
   Every call shapes what it is given: a `Text_Layout` is data out, kept
   by the caller and drawn again while its text is unchanged.
   `Text_Layout.advances` gives each glyph's pen step (its advance, plus
-  letter spacing after a base), to cut a line short (an ellipsis) or
-  place a caret: a glyph ends at its pen plus its advance, and a mark
-  doesn't step. A collection
+  letter spacing after a base), to place a caret: a glyph ends at its pen
+  plus its advance, and a mark doesn't step.
+  `text_layout_fit(&layout, line, width)` cuts a line short for an
+  ellipsis: it keeps the text before `cut`, as much as fits `width`, in
+  text order and only between clusters (never inside a grapheme, ligature
+  or syllable), its glyphs (those whose cluster is below `cut`) `kept`
+  wide; it reads the layout and allocates nothing. A collection
   names its faces by `Face_Id` (runs, `font_collection_find`,
   `font_collection_glyph`), and `font_collection_face` /
   `font_collection_font` give a face's record or font for immediate use:

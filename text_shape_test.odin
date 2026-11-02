@@ -310,8 +310,97 @@ test_text_layout_advances :: proc(t: ^testing.T) {
 	}
 }
 
+// A line cut for an ellipsis keeps the clusters before the cut, in text
+// order: at every width the cut is the last boundary between clusters that
+// fits. A combining mark stays with its base; the kept glyphs are a left to
+// right line's first and a right to left line's last, and on a line that
+// mixes directions they can lie apart.
+@(test)
+test_text_layout_fit :: proc(t: ^testing.T) {
+	s: Shape_Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	testing.expect(t, font_collection_add(&s.fonts, #load("demo/media/JetBrainsMono-Regular.ttf")) > 0)
+	Kept :: enum {
+		First,
+		Last,
+		Apart,
+	}
+	// Checks line 0 at the width of each boundary and just under it, and
+	// whether its kept glyphs were ever apart.
+	sweep :: proc(t: ^testing.T, l: ^Text_Layout, want_kept: Kept, loc := #caller_location) -> (cuts: [dynamic]i32) {
+		cuts = make([dynamic]i32, context.temp_allocator)
+		ln := l.lines[0]
+		clusters := l.clusters[ln.first:][:ln.count]
+		advances := l.advances[ln.first:][:ln.count]
+		before :: proc(clusters: []i32, advances: []f32, c: i32) -> (w: f32) {
+			for k, i in clusters {
+				if k < c {
+					w += advances[i]
+				}
+			}
+			return
+		}
+		boundary :: proc(ln: Text_Line, clusters: []i32, b: i32) -> bool {
+			return b == ln.text_start || b == ln.text_end || slice.contains(clusters, b)
+		}
+		apart := false
+		for b in ln.text_start ..= ln.text_end {
+			if !boundary(ln, clusters, b) {
+				continue
+			}
+			for width in ([2]f32{before(clusters, advances, b), before(clusters, advances, b) - 0.01}) {
+				cut, kept := text_layout_fit(l, 0, width)
+				want := ln.text_start
+				for c in ln.text_start ..= ln.text_end {
+					if boundary(ln, clusters, c) && before(clusters, advances, c) <= width {
+						want = c
+					}
+				}
+				testing.expectf(t, cut == want, "at %v: cut %d, want %d", width, cut, want, loc = loc)
+				testing.expectf(t, kept == before(clusters, advances, cut), "at %v: kept %v", width, kept, loc = loc)
+				append(&cuts, cut)
+				// The kept glyphs: the first ones, the last ones, or apart.
+				// Where a kept glyph follows a cut one, and the other way.
+				rises, falls := 0, 0
+				for i in 1 ..< len(clusters) {
+					was, is := clusters[i - 1] < cut, clusters[i] < cut
+					rises += int(is && !was)
+					falls += int(was && !is)
+				}
+				switch {
+				case rises + falls > 1:
+					apart = true
+				case want_kept == .First:
+					testing.expectf(t, rises == 0, "cut %d keeps the line's last glyphs", cut, loc = loc)
+				case want_kept == .Last:
+					testing.expectf(t, falls == 0, "cut %d keeps the line's first glyphs", cut, loc = loc)
+				}
+			}
+		}
+		testing.expectf(t, apart == (want_kept == .Apart), "kept glyphs apart: %v", apart, loc = loc)
+		return
+	}
+	l := &s.layout
+	fx_layout(&s, "office AVAy, tail", "Bitstream Vera Sans", 2)
+	sweep(t, l, .First)
+	all, _ := text_layout_fit(l, 0, 1e9)
+	none, _ := text_layout_fit(l, 0, -1)
+	testing.expect(t, all == 17 && none == 0)
+	// x, e with U+0301 (one cluster), x: never cut between e and its mark.
+	fx_layout(&s, "xéx", "JetBrains Mono")
+	cuts := sweep(t, l, .First)
+	testing.expect(t, slice.contains(cuts[:], 1) && slice.contains(cuts[:], 3) && !slice.contains(cuts[:], 2))
+	if fx_add_noto(t, &s, "NotoSansArabic-Regular.ttf") {
+		fx_layout(&s, "مرحبا بالعالم", "Noto Sans Arabic")
+		sweep(t, l, .Last)
+		fx_layout(&s, "abc مرحبا", "Bitstream Vera Sans")
+		sweep(t, l, .Apart)
+	}
+}
+
 // Once warm, laying out text allocates nothing: shaped segments come from
-// the cache, fallback and bidi included.
+// the cache, fallback and bidi included. Cutting a line never allocates.
 @(test)
 test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
 	s: Shape_Fx
@@ -335,6 +424,7 @@ test_text_layout_no_allocation_when_warm :: proc(t: ^testing.T) {
 			for line in lines {
 				fx_layout(&s, line, "Bitstream Vera Sans")
 				fx_layout(&s, line, "Bitstream Vera Sans", 2)
+				text_layout_fit(&s.layout, 0, 100)
 			}
 		}
 	}

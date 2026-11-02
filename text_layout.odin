@@ -287,6 +287,47 @@ text_layout_width :: proc(l: ^Text_Layout) -> f32 {
 	return w
 }
 
+// Where line `line` is cut so that what it keeps fits `width` (the room
+// before an ellipsis): the text before `cut` (in `clusters`' indices) is
+// kept, cut only between clusters, so never inside a grapheme, a ligature
+// or a syllable. The kept glyphs, those whose cluster is below `cut`, are
+// `kept` wide: their advances, letter spacing included (a piece's dx
+// aside). The cut follows the text's order, so on a line in one direction
+// the kept glyphs are its first in `glyphs` (left to right) or its last
+// (right to left); on one that mixes directions they can lie apart, and the
+// kept text laid out again places them. `cut` is the line's text_end when
+// all of it fits, its text_start when nothing does.
+text_layout_fit :: proc(l: ^Text_Layout, line: int, width: f32) -> (cut: i32, kept: f32) {
+	ln := l.lines[line]
+	clusters := l.clusters[ln.first:][:ln.count]
+	advances := l.advances[ln.first:][:ln.count]
+	// The width of the clusters before codepoint c. It grows with c, so the
+	// last c it fits at is found by halving, and it is a cluster's first:
+	// the width steps there.
+	before :: proc "contextless" (clusters: []i32, advances: []f32, c: i32) -> f32 {
+		w: f32
+		for k, i in clusters {
+			if k < c {
+				w += advances[i]
+			}
+		}
+		return w
+	}
+	lo, hi := ln.text_start, ln.text_end
+	if w := before(clusters, advances, hi); w <= width {
+		return hi, w
+	}
+	for hi - lo > 1 {
+		mid := lo + (hi - lo) / 2
+		if w := before(clusters, advances, mid); w <= width {
+			lo, kept = mid, w
+		} else {
+			hi = mid
+		}
+	}
+	return lo, kept
+}
+
 // Appends the outlines of the laid-out glyphs to `out`, where drawing the
 // layout puts them (positions, alignment, baseline, letter spacing and
 // fallback faces as laid out). Fill them with the non-zero rule. A colour
