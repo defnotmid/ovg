@@ -52,7 +52,8 @@ Layer_Params :: struct {
 	clip_path: ^Path,
 	clip_rule: Fill_Rule,
 	// SVG filter effects, applied before the clip and mask (SVG order:
-	// filter, clipping, masking, opacity). Must stay valid until the pop.
+	// filter, clipping, masking, opacity). Copied at the push, as the clip
+	// path is.
 	filter:    ^Filter,
 	// The mask (`layer_mask_begin`) counts by its alpha instead of its
 	// luminance times alpha (SVG mask-type="alpha"; luminance is SVG's
@@ -121,7 +122,7 @@ Layer_Frame :: struct {
 	masked:     bool,
 	// A child blends with the layer, which then covers the whole canvas.
 	full:       bool,
-	filter:     ^Filter,
+	has_filter: bool,
 	xform:      Transform2D,
 	blend:      Blend_Mode,
 	mask_alpha: bool,
@@ -131,6 +132,17 @@ Layer_Frame :: struct {
 	// The whole pixels of the scissor at the push (drawing coordinates),
 	// which the pop composites under; nil without one.
 	scissor:    Maybe(Rect),
+}
+
+// A layer's filter, copied at its push (`layer_filter` views it).
+@(private)
+Layer_Filter :: struct {
+	srgb:       bool,
+	region:     Filter_Region,
+	primitives: [dynamic]Filter_Primitive,
+	merge_refs: [dynamic]Filter_Ref,
+	values:     [dynamic]f32,
+	images:     [dynamic]Image_Id,
 }
 
 @(private)
@@ -147,6 +159,8 @@ Layer_Stack :: struct {
 	stand_ins: [dynamic]Layer_Stand_In,
 	// Clip path copies, one per depth, reused across frames.
 	clips:     [dynamic]Path,
+	// Filter copies, one per depth, reused across frames.
+	filters:   [dynamic]Layer_Filter,
 	// Repeating pattern tiles.
 	tiles:     [dynamic]Pooled_Layer,
 	// Offscreen images (`layer_image_begin`): shader children.
@@ -214,6 +228,13 @@ layer_stack_destroy :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		path_destroy(&p)
 	}
 	delete(ls.clips)
+	for &lf in ls.filters {
+		delete(lf.primitives)
+		delete(lf.merge_refs)
+		delete(lf.values)
+		delete(lf.images)
+	}
+	delete(ls.filters)
 	delete(ls.pool)
 	delete(ls.frames)
 	delete(ls.targets)
@@ -343,7 +364,6 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	f.opacity = params.opacity if params.opacity > 0 else 1
 	t := current_transform(c)
 	f.blur_px = params.blur * transform_average_scale(t)
-	f.filter = params.filter
 	f.xform = t
 	f.blend = params.blend
 	f.mask_alpha = params.mask_alpha
@@ -367,6 +387,22 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 		f.has_clip = true
 		f.clip_rule = params.clip_rule
 		f.clip_xform = t
+	}
+	if params.filter != nil {
+		for len(ls.filters) <= depth {
+			append(&ls.filters, Layer_Filter{})
+		}
+		lf, src := &ls.filters[depth], params.filter
+		lf.srgb, lf.region = src.srgb, src.region
+		clear(&lf.primitives)
+		append(&lf.primitives, ..src.primitives)
+		clear(&lf.merge_refs)
+		append(&lf.merge_refs, ..src.merge_refs)
+		clear(&lf.values)
+		append(&lf.values, ..src.values)
+		clear(&lf.images)
+		append(&lf.images, ..src.images)
+		f.has_filter = true
 	}
 	for len(ls.stand_ins) <= depth {
 		info := Image_Info{{.Premultiplied}, ls.width, ls.height, .RGBA8}
@@ -431,11 +467,12 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	// The content's twin holds its motion, which composites cut to the
 	// layer's coverage, whatever image that ends in.
 	drew := content
-	if f.filter != nil {
+	if f.has_filter {
+		fl := layer_filter(ls, depth)
 		// The region cuts what the filter sees and what it makes.
-		filter_region_clip(ls, c, f.filter, f.xform, content)
-		content = apply_filter(ls, c, f.filter, content, f.xform)
-		filter_region_clip(ls, c, f.filter, f.xform, content)
+		filter_region_clip(ls, c, &fl, f.xform, content)
+		content = apply_filter(ls, c, &fl, content, f.xform)
+		filter_region_clip(ls, c, &fl, f.xform, content)
 	}
 	if f.blur_px > 0 {
 		content = layer_blur(ls, c, content, f.blur_px)
@@ -524,7 +561,7 @@ layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32,
 // (`push_shape`), so that is every layer of plain shapes.
 @(private = "file")
 layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bounds) -> bool {
-	if f.filter != nil || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
+	if f.has_filter || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
 		return false
 	}
 	if r, ok := f.scissor.?; ok && (bounds.minx < r.x || bounds.miny < r.y || bounds.maxx > r.x + r.w || bounds.maxy > r.y + r.h) {
@@ -541,6 +578,14 @@ layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bound
 	cmd.type = Cmd_Draw_Shapes{d.instances, solid_paint(c, {o, o, o, o}) + 1}
 	append(&c.commands, cmd)
 	return true
+}
+
+// The filter of the layer at `depth`: its copy, valid until the next push
+// at that depth.
+@(private = "file")
+layer_filter :: proc(ls: ^Layer_Stack, depth: int) -> Filter {
+	lf := &ls.filters[depth]
+	return {primitives = lf.primitives[:], merge_refs = lf.merge_refs[:], srgb = lf.srgb, region = lf.region, values = lf.values[:], images = lf.images[:]}
 }
 
 // The window of the layer `f` ending at `depth` and the bounds of what it
@@ -562,9 +607,10 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	reach: Vec2
 	bounded := true
 	region := Bounds{0, 0, f32(cw), f32(ch)}
-	if f.filter != nil {
-		reach, bounded = filter_reach(f.filter, f.xform)
-		if rb, ok := filter_region_device(f.filter, f.xform); ok {
+	if f.has_filter {
+		fl := layer_filter(ls, depth)
+		reach, bounded = filter_reach(&fl, f.xform)
+		if rb, ok := filter_region_device(&fl, f.xform); ok {
 			region = rb
 		}
 	}

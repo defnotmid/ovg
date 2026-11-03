@@ -495,7 +495,7 @@ draw_layer :: proc(d: ^Draw, li: i32, frame: f32, depth: int, blended: bool) {
 	if l.kind == .Null || l.kind == .Other || !vg.budget_take(&d.budget, .Lottie_Layers) {
 		return
 	}
-	// Effects as filter layers, innermost first (stack-held until the pops).
+	// Effects as filter layers, innermost first.
 	fx: [MAX_EFFECTS]Effect_Filter
 	n_fx := 0
 	for ei in l.effects.start ..< l.effects.start + l.effects.count {

@@ -386,6 +386,27 @@ test_svg_css_colors :: proc(t: ^testing.T) {
 	testing.expect(t, !ok)
 }
 
+// An element keeps every attribute in a small file (Odin dev-2026-11's
+// core:encoding/xml kept the first 8 in a file under 2 KB).
+@(test)
+test_svg_many_attributes :: proc(t: ^testing.T) {
+	s: Fx
+	defer fx_close(&s)
+	err := fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+		<rect id="r" x="5" y="5" width="30" height="30" rx="4" ry="4" fill="none" stroke="#0000ff" stroke-width="2" stroke-dasharray="0 6" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="8" stroke-opacity="0.5" stroke-dashoffset="1" data-a="1" data-b="2" data-c="3" data-d="4" data-e="5" data-f="6" data-g="7" data-h="8" data-i="9" data-j="10" fill-rule="evenodd"/>
+	</svg>`)
+	testing.expect_value(t, err, Error.None)
+	st := s.doc.shapes[s.doc.nodes[find(&s.doc, "r")].data].style
+	testing.expect_value(t, st.stroke.color, vg.Color{0, 0, 1, 1})
+	testing.expect_value(t, st.dash.count, 2)
+	testing.expect_value(t, st.cap, vg.Line_Cap.Round)
+	testing.expect_value(t, st.join, vg.Line_Join.Round)
+	testing.expect_value(t, st.miter_limit, 8)
+	testing.expect_value(t, st.stroke_opacity, 0.5)
+	testing.expect_value(t, st.dash_offset, 1)
+	testing.expect_value(t, st.fill_rule, vg.Fill_Rule.Even_Odd)
+}
+
 // display="none" with an id is kept, off: drawn only when an override shows it.
 @(test)
 test_svg_display_none_override :: proc(t: ^testing.T) {

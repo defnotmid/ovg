@@ -1,10 +1,10 @@
 package svg
 
-import "core:encoding/xml"
 import "core:mem"
 import "core:strings"
 
 import vg ".."
+import xml "xml"
 
 // Value syntax for the SVG importer (svg.odin): presentation properties,
 // CSS colors, lengths, number lists and a small CSS stylesheet subset

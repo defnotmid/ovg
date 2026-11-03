@@ -13,7 +13,7 @@ concurrency:
 
 env:
   # The Odin nightly ovg is developed against (same pin as onimite).
-  ODIN_VERSION: dev-2026-10
+  ODIN_VERSION: dev-2026-11a
 
 # ovg reads oglyph (fonts and shaping), ocurves (shapes' coverage and path
 # booleans) and oicut (image decoding and PNG writing) through
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/oicut
-          ref: v0.0.21
+          ref: v0.0.24
           path: oicut
 
       - name: Cache Odin

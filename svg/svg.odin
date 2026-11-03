@@ -2,7 +2,6 @@ package svg
 
 import "base:runtime"
 import "core:encoding/base64"
-import "core:encoding/xml"
 import "core:fmt"
 import "core:math"
 import "core:mem"
@@ -11,6 +10,7 @@ import "core:slice"
 import "core:strings"
 
 import vg ".."
+import xml "xml"
 
 // SVG import: `parse` turns SVG markup into a `Document`, a
 // render-ready, data-oriented copy (like usvg's tree): a `<use>` draws
