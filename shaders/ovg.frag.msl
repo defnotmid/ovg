@@ -414,33 +414,33 @@ float4 morphology_0(int2 p_2, KernelContext_0 thread* kernelContext_11)
 
 #line 370
     int hi_0 = int(_S27) - int(1);
-    if(lo_0 > hi_0)
+    int _S28 = max(c_0 - r_0, lo_0);
+    int _S29 = min(c_0 + r_0, hi_0);
+    if(_S28 > _S29)
     {
 
-#line 371
+#line 373
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-#line 371
+#line 373
     float4 acc_0;
     if(dilate_0)
     {
 
-#line 372
+#line 374
         acc_0 = float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-#line 372
+#line 374
     }
     else
     {
 
-#line 372
+#line 374
         acc_0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
 
-#line 372
+#line 374
     }
-    int _S28 = max(c_0 - r_0, lo_0);
-    int _S29 = min(c_0 + r_0, hi_0);
 
 #line 374
     int i_2 = int(0);

@@ -329,6 +329,8 @@ Document :: struct {
 	id_map:        map[string]i32,
 	// Unsupported features met while parsing (unique).
 	warnings:      [dynamic]string,
+	// The parse options' limits, which bound each draw too.
+	limits:        vg.Limits,
 	// Some node blends with its backdrop (mix-blend-mode): the layer stack
 	// must start with a root layer when drawing onto the screen.
 	uses_blend:    bool,
@@ -493,6 +495,7 @@ parse :: proc(data: []u8, opts: Parse_Options = {}, allocator := context.allocat
 	budget: vg.Budget
 	vg.budget_init(&budget, opts.limits)
 	p.budget = &budget
+	doc.limits = budget.limits
 
 	// The root viewport.
 	root := &p.x.elements[0]
@@ -581,8 +584,21 @@ prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 					depth = max(depth - 1, 0)
 				} else {
 					// <text/> has no content.
-					e := strings.index_byte(rest, '>')
-					if !(e > 0 && rest[e - 1] == '/') {
+					q: u8 = 0
+					e := -1
+					for m := k; m < len(data); m += 1 {
+						if q != 0 {
+							if data[m] == q {
+								q = 0
+							}
+						} else if data[m] == '"' || data[m] == '\'' {
+							q = data[m]
+						} else if data[m] == '>' {
+							e = m
+							break
+						}
+					}
+					if !(e > 0 && data[e - 1] == '/') {
 						depth += 1
 					}
 				}
@@ -592,7 +608,11 @@ prepare_source :: proc(data: []u8, allocator: mem.Allocator) -> []u8 {
 		}
 		if depth > 0 && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			append(&out, ..data[run:i])
-			append(&out, NEWLINE if ch == '\n' else SPACE)
+			if ch == '\r' && i + 1 < len(data) && data[i + 1] == '\n' {
+				i += 1
+				ch = '\n'
+			}
+			append(&out, NEWLINE if ch == '\n' || ch == '\r' else SPACE)
 			run = i + 1
 		}
 	}
@@ -653,7 +673,7 @@ parser_open :: proc(p: ^Parser, doc: ^Document, data: []u8, opts: Parse_Options,
 			}
 			for v in e.value {
 				if s, is_str := v.(string); is_str {
-					css_parse_sheet(&p.sheet, s)
+					css_parse_sheet(&p.sheet, s, tmp)
 				}
 			}
 		}
@@ -1076,34 +1096,23 @@ collect_decls :: proc(p: ^Parser, el: u32, d: ^Decls) {
 			}
 		}
 	}
-	important := false
+	important_prop: [Prop]bool
 	if len(p.sheet.rules) > 0 {
 		for &r in p.sheet.rules {
 			if css_matches(&r.selector, p.x, el, p.budget) {
 				for dc in p.sheet.decls[r.decls.start:][:r.decls.count] {
-					if dc.important {
-						important = true
-					} else {
+					if dc.important || !important_prop[dc.prop] {
 						d[dc.prop] = dc.value
+						if dc.important {
+							important_prop[dc.prop] = true
+						}
 					}
 				}
 			}
 		}
 	}
 	if style != "" {
-		apply_style_attr(d, style, p.tmp)
-	}
-	if important {
-		// !important rules beat the style attribute.
-		for &r in p.sheet.rules {
-			if css_matches(&r.selector, p.x, el, p.budget) {
-				for dc in p.sheet.decls[r.decls.start:][:r.decls.count] {
-					if dc.important {
-						d[dc.prop] = dc.value
-					}
-				}
-			}
-		}
+		apply_style_attr(d, &important_prop, style, p.tmp)
 	}
 }
 
@@ -2114,6 +2123,7 @@ convert_use :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 			// The content once, outside the drawing: this use and the
 			// uses like it draw it.
 			def := new_node(p, .Group, -1)
+			p.doc.nodes[def].flags += {.Fill_Inherited, .Stroke_Inherited, .Visibility_Inherited}
 			used, deepest := p.budget.used[.Svg_Elements], p.deepest
 			p.deepest = p.depth
 			convert_children(p, ref, &sst, def)
@@ -2145,6 +2155,7 @@ convert_use :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32) {
 		// for this use and the uses like it (convert_element makes it a
 		// definition).
 		holder := new_node(p, .Group, -1)
+		p.doc.nodes[holder].flags += {.Fill_Inherited, .Stroke_Inherited, .Visibility_Inherited}
 		count := len(p.use_defs)
 		convert_element(p, ref, &cst, holder)
 		if len(p.use_defs) > count && p.use_defs[len(p.use_defs) - 1].el == ref {
@@ -2545,7 +2556,7 @@ convert_svg_image :: proc(p: ^Parser, el: u32, st: ^Computed, parent: i32, data:
 	vt := view_box_transform(vb, aspect, w, h)
 	inner := new_node(p, .Group, n)
 	doc.nodes[inner].transform = vg.transform_multiply(vt, vg.transform_translation(img.x, img.y))
-	doc.nodes[inner].flags += {.Clip_Rect}
+	doc.nodes[inner].flags += {.Clip_Rect, .Fill_Inherited, .Stroke_Inherited, .Visibility_Inherited}
 	doc.nodes[inner].clip_rect = rect_transform({0, 0, w, h}, vg.transform_inverse(vt))
 	append(&sub.viewports, vg.Vec2{vb.w, vb.h})
 	sst.fill_decl, sst.stroke_decl, sst.visible_decl = false, false, false
@@ -2810,7 +2821,8 @@ text_path :: proc(p: ^Parser, e: ^xml.Element, st: ^Computed) -> i32 {
 		pe := &p.x.elements[el]
 		d, _ := attr(pe, "d")
 		vg.path_svg(path, d)
-		t = element_transform(p, pe, st)
+		pst := style_chain(p, el)
+		t = element_transform(p, pe, &pst)
 	}
 	if vg.path_is_empty(path) {
 		return -1
@@ -3028,11 +3040,12 @@ layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk
 	total_dy: f32
 	for &pc, i in doc.pieces[ch.pieces.start:][:ch.pieces.count] {
 		family := pick_family(fonts, doc, pc.families)
-		append(pieces, vg.Text_Piece{pc.text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
+		text := pc.text if pc.size > 0 else ""
+		append(pieces, vg.Text_Piece{text, {family = family, size = pc.size, weight = pc.weight, italic = pc.italic, letter_spacing = pc.letter_spacing, paint = u32(i)}, pc.dx, pc.dy})
 		total_dy += pc.dy
 	}
 	opts := vg.Text_Options{x = x, y = y, baseline = ch.baseline}
-	if wrap.line_height > 0 && len(pieces) > 0 {
+	if wrap.line_height > 0 && len(pieces) > 0 && pieces[0].style.size > 0 {
 		// In ems of the first piece's size.
 		opts.line_height = wrap.line_height / pieces[0].style.size
 	}
@@ -3082,7 +3095,7 @@ layout_chunk :: proc(fonts: ^vg.Font_Collection, doc: ^Document, ch: ^Text_Chunk
 	}
 	tpd := &doc.text_paths[ch.path]
 	// Segments in proportion to the text, so it sits alike at any scale.
-	segment := doc.pieces[ch.pieces.start].size / 48
+	segment := max(doc.pieces[ch.pieces.start].size / 48, 1e-2)
 	vg.text_path_set_contours(tp, &doc.geometry, int(tpd.contours.start), int(tpd.contours.count), segment)
 	// x = 0 at the anchor, `x` along the path.
 	for &g in l.glyphs {
@@ -3402,12 +3415,17 @@ server :: proc(p: ^Parser, el: u32) -> i32 {
 				break
 			}
 		}
+		if vg.budget_over(p.budget, .Depth, p.depth + 1) {
+			return -1
+		}
 		saved_clip := p.in_clip
 		p.in_clip = false
+		p.depth += 1
 		cst := style_chain(p, content_el)
 		cst.fill_decl, cst.stroke_decl, cst.visible_decl = false, false, false
 		s.content = new_node(p, .Group, -1)
 		convert_children(p, content_el, &cst, s.content)
+		p.depth -= 1
 		p.in_clip = saved_clip
 	case:
 		return -1
@@ -3429,6 +3447,11 @@ clip :: proc(p: ^Parser, el: u32) -> i32 {
 	}
 	idx := i32(-1)
 	defer p.defs[.Clip][el] = idx
+	if vg.budget_over(p.budget, .Depth, p.depth + 1) {
+		return -1
+	}
+	p.depth += 1
+	defer p.depth -= 1
 	doc := p.doc
 	e := &p.x.elements[el]
 	st := style_chain(p, el)
@@ -3440,7 +3463,7 @@ clip :: proc(p: ^Parser, el: u32) -> i32 {
 	units, _ := attr(e, "clipPathUnits")
 	c.bbox_units = units == "objectBoundingBox"
 	if st.clip_path != "" {
-		if ref, ok := ref(p, st.clip_path); ok {
+		if ref, ok := ref(p, st.clip_path); ok && local_name(p.x.elements[ref].ident) == "clipPath" {
 			c.clip = clip(p, ref)
 		}
 	}
@@ -3473,6 +3496,11 @@ mask :: proc(p: ^Parser, el: u32) -> i32 {
 	}
 	idx := i32(-1)
 	defer p.defs[.Mask][el] = idx
+	if vg.budget_over(p.budget, .Depth, p.depth + 1) {
+		return -1
+	}
+	p.depth += 1
+	defer p.depth -= 1
 	doc := p.doc
 	e := &p.x.elements[el]
 	st := style_chain(p, el)
@@ -3507,7 +3535,7 @@ mask :: proc(p: ^Parser, el: u32) -> i32 {
 		}
 	}
 	if st.mask != "" {
-		if ref, ok := ref(p, st.mask); ok && ref != el {
+		if ref, ok := ref(p, st.mask); ok && ref != el && local_name(p.x.elements[ref].ident) == "mask" {
 			m.mask = mask(p, ref)
 		}
 	}
@@ -3581,21 +3609,27 @@ filter_def :: proc(p: ^Parser, el: u32) -> i32 {
 	bitmap_start := len(doc.filter_bitmaps)
 	// Appends a number list to the filter's values: (first, count).
 	number_list :: proc(doc: ^Document, value_start: int, v: string) -> (first, count: u16) {
-		first = u16(len(doc.filter_values) - value_start)
+		first_idx := len(doc.filter_values) - value_start
+		if first_idx >= int(max(u16)) {
+			return 0, 0
+		}
+		first = u16(first_idx)
 		sc := vg.Css_Scanner{s = v}
 		for {
 			x, ok := vg.css_scan_number(&sc)
 			if !ok {
 				break
 			}
-			append(&doc.filter_values, x)
+			if len(doc.filter_values) - value_start - first_idx < int(max(u16)) {
+				append(&doc.filter_values, x)
+			}
 		}
 		vg.css_skip_ws(&sc)
 		if sc.pos < len(sc.s) {
 			// Not a plain number list: none (as usvg).
-			resize(&doc.filter_values, value_start + int(first))
+			resize(&doc.filter_values, value_start + first_idx)
 		}
-		return first, u16(len(doc.filter_values) - value_start) - first
+		return first, u16(len(doc.filter_values) - value_start - first_idx)
 	}
 	first := true
 	ref_of :: proc(p: ^Parser, e: ^xml.Element, name: string, names: map[string]u16) -> vg.Filter_Ref {
@@ -3753,15 +3787,18 @@ filter_def :: proc(p: ^Parser, el: u32) -> i32 {
 			}
 		case "feMerge":
 			prim.op = .Merge
-			prim.merge_first = u16(len(doc.filter_refs) - ref_start)
+			first_ref := min(len(doc.filter_refs) - ref_start, int(max(u16)))
+			prim.merge_first = u16(first_ref)
 			for mv in ce.value {
 				mc, mok := mv.(xml.Element_ID)
 				if !mok || local_name(p.x.elements[mc].ident) != "feMergeNode" {
 					continue
 				}
-				append(&doc.filter_refs, ref_of(p, &p.x.elements[mc], "in", names))
+				if len(doc.filter_refs) - ref_start - first_ref < int(max(u16)) {
+					append(&doc.filter_refs, ref_of(p, &p.x.elements[mc], "in", names))
+				}
 			}
-			prim.merge_count = u16(len(doc.filter_refs) - ref_start) - prim.merge_first
+			prim.merge_count = u16(len(doc.filter_refs) - ref_start - first_ref)
 		case "feComponentTransfer":
 			prim.op = .Component_Transfer
 			prim.transfer = vg.TRANSFER_IDENTITY
@@ -4071,6 +4108,11 @@ finish :: proc(p: ^Parser) {
 		// "objectBoundingBox") and subregions depend on the element: it
 		// gets its own resolved copy.
 		f := doc.filters[n.filter]
+		// Each element's copy of the filter counts as that many elements.
+		if !vg.budget_take(p.budget, .Svg_Elements, int(f.primitives.count)) {
+			n.filter = -1
+			continue
+		}
 		start := len(doc.filter_prims)
 		bw, bh := max(n.bbox.w, 0), max(n.bbox.h, 0)
 		region := f.region
@@ -4085,6 +4127,13 @@ finish :: proc(p: ^Parser) {
 				prim.dy *= bh
 				prim.radius *= {bw, bh}
 				prim.scale *= (bw + bh) / 2
+				if prim.op == .Diffuse_Lighting || prim.op == .Specular_Lighting {
+					if prim.light.kind == .Point || prim.light.kind == .Spot {
+						kz := math.sqrt((bw * bw + bh * bh) / 2)
+						prim.light.position = {n.bbox.x + prim.light.position.x * bw, n.bbox.y + prim.light.position.y * bh, prim.light.position.z * kz}
+						prim.light.points_at = {n.bbox.x + prim.light.points_at.x * bw, n.bbox.y + prim.light.points_at.y * bh, prim.light.points_at.z * kz}
+					}
+				}
 				for k in 0 ..< 4 {
 					if sub.set & (1 << u8(k)) != 0 {
 						origin := n.bbox.x if k == 0 else n.bbox.y

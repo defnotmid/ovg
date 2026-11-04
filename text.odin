@@ -145,6 +145,7 @@ font_shapes :: proc(f: ^Font) -> ^Font_Shapes {
 	if old, won := sync.atomic_compare_exchange_strong_explicit(&f.shapes, nil, fresh, .Acq_Rel, .Acquire); !won {
 		delete(fresh.glyphs)
 		ft.outline_destroy(&fresh.outline)
+		shape_builder_destroy(&fresh.builder)
 		free(fresh, allocator)
 		return old
 	}

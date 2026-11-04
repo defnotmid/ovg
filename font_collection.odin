@@ -44,12 +44,15 @@ Font_Collection :: struct {
 // A collection whose faces' files are `files` (shared with the other
 // collections given it), else a table of its own. It falls back to
 // `fallback_data`'s face (DEFAULT_FONT_DATA when nil), and counts a glyph
-// a face has only as a bitmap as missing: ovg draws outlines.
-font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator, files: ^Font_Files = nil) {
+// a face has only as a bitmap as missing: ovg draws outlines. False when
+// `fallback_data` isn't a font: the collection has no fallback, and can only
+// be destroyed.
+font_collection_init :: proc(c: ^Font_Collection, fallback_data: []u8 = nil, allocator := context.allocator, files: ^Font_Files = nil) -> (ok: bool) {
 	data := fallback_data if fallback_data != nil else DEFAULT_FONT_DATA
-	fc.collection_init(&c.collection, data, allocator, files, outlines_only = true)
+	ok = fc.collection_init(&c.collection, data, allocator, files, outlines_only = true)
 	fc.rows_init(&c.fonts, allocator)
 	collection_fonts(c)
+	return
 }
 
 font_collection_destroy :: proc(c: ^Font_Collection) {

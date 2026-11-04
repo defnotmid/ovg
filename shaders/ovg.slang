@@ -368,10 +368,10 @@ float4 morphology(int2 p) {
     int c = axis == 0 ? p.x : p.y;
     int lo = int(axis == 0 ? vr.x : vr.y);
     int hi = int(axis == 0 ? vr.z : vr.w) - 1;
-    if (lo > hi) return float4(0, 0, 0, 0);
-    float4 acc = dilate ? float4(0, 0, 0, 0) : float4(1, 1, 1, 1);
     int t0 = max(c - r, lo);
     int t1 = min(c + r, hi);
+    if (t0 > t1) return float4(0, 0, 0, 0);
+    float4 acc = dilate ? float4(0, 0, 0, 0) : float4(1, 1, 1, 1);
     for (int i = 0; i <= 2 * MORPHOLOGY_MAX_RADIUS; i++) {
         int t = t0 + i;
         if (t > t1) break;

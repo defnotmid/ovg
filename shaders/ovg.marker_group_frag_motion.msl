@@ -138,77 +138,77 @@ float curves_projected_box_0(float x_0, float a_0, float b_0)
 }
 
 
-#line 589
+#line 591
 float curves_marker_0(bool circle_0, float2 rc_1, float2 u_0, float2 v_0, float outline_0)
 {
 
-#line 590
+#line 592
     float _S9 = u_0.x;
 
-#line 590
+#line 592
     float _S10 = v_0.y;
 
-#line 590
+#line 592
     float _S11 = u_0.y;
 
-#line 590
+#line 592
     float _S12 = v_0.x;
 
-#line 590
+#line 592
     float det_0 = _S9 * _S10 - _S11 * _S12;
     if(det_0 == 0.0f)
     {
 
-#line 591
+#line 593
         return 0.0f;
     }
 
-#line 592
+#line 594
     float _S13 = rc_1.x;
 
-#line 592
+#line 594
     float _S14 = rc_1.y;
 
-#line 592
+#line 594
     float2 d_0 = float2(_S10 * _S13 - _S12 * _S14, _S9 * _S14 - _S11 * _S13) / float2(det_0) ;
     float r_0 = sqrt(_S10 * _S10 + _S11 * _S11) / abs(det_0);
     float h_0 = 0.5f * outline_0;
     if(circle_0)
     {
 
-#line 596
+#line 598
         float dist_0 = sqrt(dot(d_0, d_0));
 
-#line 596
+#line 598
         float2 n_0;
         if(dist_0 > 9.99999997475242708e-07f)
         {
 
-#line 597
+#line 599
             n_0 = d_0 / float2(dist_0) ;
 
-#line 597
+#line 599
         }
         else
         {
 
-#line 597
+#line 599
             n_0 = float2(1.0f, 0.0f);
 
-#line 597
+#line 599
         }
         float _S15 = abs(n_0.x);
 
-#line 598
+#line 600
         float _S16 = abs(n_0.y);
 
-#line 598
+#line 600
         float _S17 = max(_S15, _S16);
         float _S18 = max(min(_S15, _S16), 0.00100000004749745f);
         if(outline_0 > 0.0f)
         {
 
-#line 601
+#line 603
             return clamp(curves_projected_box_0(r_0 + h_0 - dist_0, _S17, _S18) - curves_projected_box_0(r_0 - h_0 - dist_0, _S17, _S18), 0.0f, 1.0f);
         }
         return curves_projected_box_0(r_0 - dist_0, _S17, _S18);
@@ -216,31 +216,31 @@ float curves_marker_0(bool circle_0, float2 rc_1, float2 u_0, float2 v_0, float 
     float _S19 = r_0 + h_0;
     float _S20 = d_0.x;
 
-#line 606
+#line 608
     float _S21 = _S20 + 0.5f;
 
-#line 606
+#line 608
     float _S22 = _S20 - 0.5f;
 
-#line 606
+#line 608
     float _S23 = - _S19;
 
-#line 606
+#line 608
     float ox_0 = clamp(min(_S21, _S19) - max(_S22, _S23), 0.0f, 1.0f);
     float _S24 = d_0.y;
 
-#line 607
+#line 609
     float _S25 = _S24 + 0.5f;
 
-#line 607
+#line 609
     float _S26 = _S24 - 0.5f;
 
-#line 607
+#line 609
     float oy_0 = clamp(min(_S25, _S19) - max(_S26, _S23), 0.0f, 1.0f);
     if(outline_0 > 0.0f)
     {
 
-#line 609
+#line 611
         float _S27 = max(r_0 - h_0, 0.0f);
         float _S28 = - _S27;
 

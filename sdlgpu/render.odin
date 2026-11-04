@@ -205,6 +205,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		drop(cmd, owned)
 		return
 	}
+	clear(&b.shapes.pending)
 	record_rows(b, cmd, images, frame)
 
 	if !owned {
@@ -306,6 +307,10 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 	clear(&b.verts)
 	clear(&b.paints)
 	clear(&b.rows)
+	clear(&b.groups)
+	clear(&b.group_words)
+	clear(&b.twin_of)
+	b.motion_frame = frame.motion
 	p := Planner {
 		b      = b,
 		images = images,
@@ -313,10 +318,9 @@ plan_frame :: proc(b: ^SDL_Backend, images: ^vg.Image_Store, frame: vg.Frame, sc
 		screen = screen,
 		target = screen,
 	}
-	clear(&b.groups)
-	clear(&b.group_words)
-	clear(&b.twin_of)
-	b.motion_frame = frame.motion
+	if frame.motion {
+		p.twin = plan_twin(&p, screen)
+	}
 	resize(&b.shape_clips, len(frame.shapes))
 	for &cmd in frame.commands {
 		switch &c in cmd.type {
@@ -611,7 +615,8 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) {
 	b := p.b
 	n := int(c.instances.count)
-	bounds := make([]vg.Bounds, n, context.temp_allocator)
+	resize(&b.group_bounds, n)
+	bounds := b.group_bounds[:]
 	area := vg.EMPTY_BOUNDS
 	for inst, k in p.frame.shapes[c.instances.start:][:n] {
 		bounds[k] = vg.instance_bounds(inst, p.frame.shape_words)
@@ -654,7 +659,8 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	}
 	// Each member's cells, counted, then listed: the spans are clamped to the
 	// grid and the lists sized by the counts, so the indices need no checks.
-	spans := make([][4]i32, n, context.temp_allocator)
+	resize(&b.group_spans, n)
+	spans := b.group_spans[:]
 	for ib, k in bounds {
 		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
 		spans[k] = {i32(i0), i32(j0), i32(i1), i32(j1)}
@@ -668,7 +674,8 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 		words[k + 1] += words[k]
 	}
 	grow(words, lists + int(words[lists - 1]))
-	fill := make([]u32, nx * ny, context.temp_allocator)
+	resize(&b.group_fill, nx * ny)
+	fill := b.group_fill[:]
 	copy(fill, words[at:lists - 1])
 	for sp, k in spans {
 		for j in int(sp[1]) ..= int(sp[3]) {
@@ -781,7 +788,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		passes := [2]Pass {
 			{lookup(p, cmd.image), mid, {1, 0}, sx, vg.tex_type_for(src_info)},
 			// The intermediate already holds premultiplied color.
-			{mid, lookup(p, c.target_image), {0, 1}, sy, 2 if src_info.format == .Gray8 else 0},
+			{mid, lookup(p, c.target_image), {0, 1}, sy, 2 if src_info.format == .Gray8 || src_info.format == .Gray16 else 0},
 		}
 		for pass in passes {
 			coeff, taps := vg.blur_pass_coefficients(pass.sigma)
@@ -806,7 +813,7 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		}
 		srcs := [2]^Image{lookup(p, cmd.image), mid}
 		dsts := [2]^Image{mid, lookup(p, c.target_image)}
-		tts := [2]f32{vg.tex_type_for(src_info), 2 if src_info.format == .Gray8 else 0}
+		tts := [2]f32{vg.tex_type_for(src_info), 2 if src_info.format == .Gray8 || src_info.format == .Gray16 else 0}
 		for axis in 0 ..< 2 {
 			frag: Paint
 			frag[0] = {m.radius[axis], 1 if m.dilate else 0, f32(axis), 0}

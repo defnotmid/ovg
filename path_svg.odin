@@ -22,7 +22,7 @@ path_svg :: proc(p: ^Path, d: string) -> bool {
 		if is_command(c) {
 			cmd = c
 			s.pos += 1
-		} else if cmd == 0 {
+		} else if cmd == 0 || cmd == 'Z' || cmd == 'z' {
 			return false
 		} else if cmd == 'M' {
 			// Coordinates after a moveto are implicit linetos.
@@ -219,8 +219,13 @@ read_number :: proc(s: ^Path_Scanner) -> (f32, bool) {
 		if s.pos < len(s.src) && (s.src[s.pos] == '-' || s.src[s.pos] == '+') {
 			s.pos += 1
 		}
+		exp_digits := false
 		for s.pos < len(s.src) && s.src[s.pos] >= '0' && s.src[s.pos] <= '9' {
+			exp_digits = true
 			s.pos += 1
+		}
+		if !exp_digits {
+			return 0, false
 		}
 	}
 	if !digits {

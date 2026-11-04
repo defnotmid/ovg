@@ -1,6 +1,7 @@
 package svg
 
 import "core:mem"
+import "core:slice"
 import "core:strings"
 
 import vg ".."
@@ -90,28 +91,32 @@ prop_from_name :: proc(name: string) -> (Prop, bool) {
 	return {}, false
 }
 
+@(private)
+strip_css_comments :: proc(s: string, scratch: mem.Allocator) -> string {
+	if !strings.contains(s, "/*") {
+		return s
+	}
+	b := make([]u8, len(s), scratch)
+	n := 0
+	for i := 0; i < len(s); {
+		if strings.has_prefix(s[i:], "/*") {
+			end := strings.index(s[i + 2:], "*/")
+			i = len(s) if end < 0 else i + 2 + end + 2
+			continue
+		}
+		b[n] = s[i]
+		n += 1
+		i += 1
+	}
+	return string(b[:n])
+}
+
 // Applies `prop: value; ...` declarations (a style attribute) to `d`; a
 // copy without its comments, which the values point into, comes from
 // `scratch` (the parse's).
 @(private)
-apply_style_attr :: proc(d: ^Decls, style: string, scratch: mem.Allocator) {
-	rest := style
-	if strings.contains(style, "/*") {
-		// Strip comments.
-		b := make([]u8, len(style), scratch)
-		n := 0
-		for i := 0; i < len(style); {
-			if strings.has_prefix(style[i:], "/*") {
-				end := strings.index(style[i + 2:], "*/")
-				i = len(style) if end < 0 else i + 2 + end + 2
-				continue
-			}
-			b[n] = style[i]
-			n += 1
-			i += 1
-		}
-		rest = string(b[:n])
-	}
+apply_style_attr :: proc(d: ^Decls, important_prop: ^[Prop]bool, style: string, scratch: mem.Allocator) {
+	rest := strip_css_comments(style, scratch)
 	for decl in strings.split_iterator(&rest, ";") {
 		colon := strings.index_byte(decl, ':')
 		if colon < 0 {
@@ -119,11 +124,18 @@ apply_style_attr :: proc(d: ^Decls, style: string, scratch: mem.Allocator) {
 		}
 		name := strings.trim_space(decl[:colon])
 		value := strings.trim_space(decl[colon + 1:])
+		important := false
 		if strings.has_suffix(value, "!important") {
 			value = strings.trim_space(value[:len(value) - len("!important")])
+			important = true
 		}
 		if p, ok := prop_from_name(name); ok {
-			d[p] = value
+			if important || !important_prop[p] {
+				d[p] = value
+				if important {
+					important_prop[p] = true
+				}
+			}
 		}
 	}
 }
@@ -275,10 +287,11 @@ Css_Sheet :: struct {
 	skipped: int,
 }
 
-// Adds the rules of a `<style>` element's text. Strings point into `text`.
+// Adds the rules of a `<style>` element's text. Strings point into `text`
+// (or `scratch` when comments are stripped).
 @(private)
-css_parse_sheet :: proc(sheet: ^Css_Sheet, text: string) {
-	s := text
+css_parse_sheet :: proc(sheet: ^Css_Sheet, text: string, scratch: mem.Allocator) {
+	s := strip_css_comments(text, scratch)
 	i := 0
 	for i < len(s) {
 		// Skip whitespace, comments and CDATA / HTML comment markers.
@@ -362,17 +375,12 @@ css_parse_sheet :: proc(sheet: ^Css_Sheet, text: string) {
 // rules win.
 @(private)
 css_sort_rules :: proc(sheet: ^Css_Sheet) {
-	rules := sheet.rules[:]
-	// Insertion sort: sheets are small and mostly sorted already.
-	for i in 1 ..< len(rules) {
-		r := rules[i]
-		j := i
-		for j > 0 && (rules[j - 1].specificity > r.specificity || (rules[j - 1].specificity == r.specificity && rules[j - 1].order > r.order)) {
-			rules[j] = rules[j - 1]
-			j -= 1
+	slice.sort_by(sheet.rules[:], proc(a, b: Css_Rule) -> bool {
+		if a.specificity != b.specificity {
+			return a.specificity < b.specificity
 		}
-		rules[j] = r
-	}
+		return a.order < b.order
+	})
 }
 
 @(private)

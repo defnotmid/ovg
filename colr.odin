@@ -1,7 +1,7 @@
 package ovg
 
-import "base:runtime"
 import "core:math"
+import "core:mem"
 import "core:sync"
 
 import ft "deps:oglyph/font"
@@ -86,6 +86,7 @@ Colr :: struct {
 	// (Colr_Paints).
 	glyph_first:              int,
 	budget:                   Budget,
+	allocator:                mem.Allocator,
 }
 
 @(private = "file")
@@ -106,7 +107,9 @@ colr_open :: proc(f: ^Font) -> ^Colr {
 		return nil
 	}
 	colr, cpal := colr_span.at, cpal_span.at
-	cl := new(Colr, runtime.heap_allocator())
+	alloc := font_allocator(f)
+	cl := new(Colr, alloc)
+	cl.allocator = alloc
 	cl.data = d
 	cl.version = int(ft.read_u16(d, colr))
 	cl.v0_base_count = int(ft.read_u16(d, colr + 2))
@@ -126,12 +129,11 @@ colr_open :: proc(f: ^Font) -> ^Colr {
 		records := cpal + int(ft.read_u32(d, cpal + 8))
 		cl.palette = records + int(ft.read_u16(d, cpal + 12)) * 4
 	}
-	heap := runtime.heap_allocator()
-	cl.glyphs.allocator = heap
-	cl.fills.allocator = heap
-	cl.stops.allocator = heap
-	cl.ramp.allocator = heap
-	path_init(&cl.path, heap)
+	cl.glyphs.allocator = alloc
+	cl.fills.allocator = alloc
+	cl.stops.allocator = alloc
+	cl.ramp.allocator = alloc
+	path_init(&cl.path, alloc)
 	return cl
 }
 
@@ -140,7 +142,7 @@ colr_destroy :: proc(cl: ^Colr) {
 	if cl == nil {
 		return
 	}
-	context.allocator = runtime.heap_allocator()
+	context.allocator = cl.allocator
 	delete(cl.glyphs)
 	delete(cl.fills)
 	delete(cl.stops)
@@ -172,8 +174,8 @@ colr_draw_glyph :: proc(c: ^Canvas, f: ^Font, g: Positioned_Glyph, em: f32, fg: 
 	if !info.colour {
 		return false
 	}
-	// The shared scratch path's buffers live on the heap.
-	context.allocator = runtime.heap_allocator()
+	// The shared scratch path's buffers live on the font's allocator.
+	context.allocator = cl.allocator
 	t0 := current_transform(c)
 	place := Transform2D{em, 0, 0, -em, g.x, g.y}
 	base := transform_multiply(place, t0)
@@ -337,7 +339,7 @@ colr_glyph :: proc(cl: ^Colr, g: Glyph_Index) -> Colr_Glyph {
 	if hit, ok := cl.glyphs[g]; ok {
 		return hit
 	}
-	context.allocator = runtime.heap_allocator()
+	context.allocator = cl.allocator
 	out := Colr_Glyph {
 		first = i32(len(cl.fills)),
 	}
@@ -349,8 +351,13 @@ colr_glyph :: proc(cl: ^Colr, g: Glyph_Index) -> Colr_Glyph {
 		out.clip, out.has_clip = colr_clip_box(cl, g)
 	} else if first, count, ok := colr_v0_layers(cl, g); ok {
 		out.colour = true
-		for i in first ..< first + count {
+		budget_init(&cl.budget)
+		limit := min(count, COLR_MAX_FILLS)
+		for i in first ..< first + limit {
 			rec := cl.v0_layers + i * 4
+			if rec < 0 || rec + 4 > len(cl.data) || !budget_take(&cl.budget, .Colr_Paints) {
+				break
+			}
 			append(&cl.fills, Colr_Fill{glyph = i32(ft.read_u16(cl.data, rec)), shape = TRANSFORM_IDENTITY, paint = TRANSFORM_IDENTITY, palette = ft.read_u16(cl.data, rec + 2), alpha = 1})
 		}
 	}
@@ -538,6 +545,9 @@ colr_walk :: proc(cl: ^Colr, p: int, m: Transform2D, shape: Colr_Shape, over: ^C
 		}
 		n, first := int(d[p + 1]) if p + 1 < len(d) else 0, int(ft.read_u32(d, p + 2))
 		for i in first ..< first + n {
+			if len(cl.fills) - cl.glyph_first > COLR_MAX_FILLS || .Colr_Paints in cl.budget.hit {
+				break
+			}
 			colr_walk(cl, cl.layer_list + int(ft.read_u32(d, cl.layer_list + 4 + i * 4)), m, shape, over, depth + 1)
 		}
 	case 2 ..= 9:

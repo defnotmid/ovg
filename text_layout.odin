@@ -250,8 +250,8 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		}
 		if line.count > 0 {
 			y := l.glyphs[line.first].y
-			l.min = {min(l.min.x, opts.x + dx), min(l.min.y, y - asc)}
-			l.max = {max(l.max.x, opts.x + dx + line.width), max(l.max.y, y + desc)}
+			l.min = {min(l.min.x, opts.x + dx), min(l.min.y, y - line.above)}
+			l.max = {max(l.max.x, opts.x + dx + line.width), max(l.max.y, y + line.below)}
 		}
 	}
 	if len(l.glyphs) == 0 {
@@ -413,6 +413,8 @@ layout_paragraph :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Tex
 			}
 			if hang > start {
 				w += trailing - pieces[s.chars[hang - 1].piece].style.letter_spacing
+			} else {
+				w += trailing
 			}
 		}
 		if end < b {

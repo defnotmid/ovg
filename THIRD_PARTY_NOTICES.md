@@ -10,7 +10,7 @@ separate file in [LICENSES/](LICENSES).
 | resvg test suite | `tools/svg_suite/tests` (dual MIT OR Apache-2.0, used under MIT) | `LICENSES/resvg-MIT.txt` |
 | Skia skottie resources | `tools/lottie_suite/tests` | `LICENSES/Skia-BSD-3-Clause.txt` |
 | lottie-web test animations | `tools/lottie_suite/tests` | `LICENSES/lottie-web-MIT.txt` |
-| Odin's `core:encoding/xml` | `svg/xml`: a copy from Odin dev-2026-11a with one fix (zlib) | `LICENSES/Odin-Zlib.txt` |
+| Odin's `core:encoding/xml` | `svg/xml`: a copy from Odin dev-2026-11a with two fixes (zlib) | `LICENSES/Odin-Zlib.txt` |
 | Bitstream Vera Sans | `assets/Vera.ttf`, `DEFAULT_FONT_DATA`: the tests' font and the fallback face a `Font_Collection` gets when none is passed (linked only when used) | `LICENSES/Bitstream-Vera.txt` |
 | demo fonts | `demo/media` (SIL Open Font License 1.1) | `LICENSES/OFL-1.1.txt` |
 | Noto Color Emoji (COLRv1 build, v2.057, Copyright 2022 Google Inc.) | `assets/Noto-COLRv1.ttf`, `EMOJI_FONT_DATA`; linked only when used (SIL Open Font License 1.1) | `LICENSES/OFL-1.1.txt` |

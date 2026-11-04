@@ -188,6 +188,9 @@ Draw :: struct {
 // Frees the paints' shapes (drawn frames must have been rendered).
 @(private)
 drop_shapes :: proc(r: ^Renderer) {
+	if r.shapes.allocator.procedure != nil {
+		context.allocator = r.shapes.allocator
+	}
 	for &s in r.shapes {
 		vg.shape_destroy(&s)
 	}
@@ -207,11 +210,11 @@ has_layer :: proc(doc: ^Document, name: string) -> bool {
 
 @(private)
 override :: proc(d: ^Draw, li: i32) -> ^Override {
-	if len(d.overrides) == 0 {
+	if len(d.overrides) == 0 || li < 0 || int(li) >= len(d.r.override_of) {
 		return nil
 	}
 	k := d.r.override_of[li]
-	return &d.overrides[k] if k >= 0 else nil
+	return &d.overrides[k] if k >= 0 && int(k) < len(d.overrides) else nil
 }
 
 // ---- evaluation --------------------------------------------------------------------
@@ -299,7 +302,7 @@ segment :: proc "contextless" (keys: []Key, t: f32) -> (int, f32) {
 
 @(private)
 key_ease :: proc(doc: ^Document, k: ^Key, dim: int, u: f32) -> f32 {
-	if k.ease == NONE {
+	if k.ease == NONE || k.ease_dims == 0 {
 		return u
 	}
 	e := doc.values[k.ease + 4 * u32(min(dim, int(k.ease_dims) - 1)):][:4]
@@ -506,7 +509,10 @@ draw_layer :: proc(d: ^Draw, li: i32, frame: f32, depth: int, blended: bool) {
 	// Layer properties key in comp frames (lottie-web); the start time
 	// shifts only a precomp's content.
 	lt := frame
-	_, opacity := transform_matrix(doc, l.transform, lt)
+	opacity: f32 = 1
+	if l.transform >= 0 {
+		opacity = clamp(eval1(doc, doc.transforms[l.transform].opacity, lt, 100) / 100, 0, 1)
+	}
 	ov := override(d, li)
 	if ov != nil {
 		if o, ok := ov.opacity.?; ok {
@@ -572,7 +578,8 @@ draw_layer :: proc(d: ^Draw, li: i32, frame: f32, depth: int, blended: bool) {
 		draw_image(d, l)
 	case .Precomp:
 		if l.ref > 0 {
-			child := (frame - l.start) / l.stretch
+			stretch := l.stretch if l.stretch != 0 else 1
+			child := (frame - l.start) / stretch
 			if l.time_remap >= 0 {
 				child = eval1(doc, l.time_remap, lt, 0) * doc.fps
 			}
@@ -1363,7 +1370,11 @@ repeat_eval :: proc(d: ^Draw, sh: ^Shape, t: f32) -> (rep: Repeat, ok: bool) {
 	if tr := sh.transform; tr >= 0 {
 		x := &doc.transforms[tr]
 		rep.anchor = eval2(doc, x.anchor, t, {})
-		rep.pos = eval2(doc, x.position, t, {})
+		if x.position >= 0 {
+			rep.pos = eval2(doc, x.position, t, {})
+		} else {
+			rep.pos = {eval1(doc, x.position_x, t, 0), eval1(doc, x.position_y, t, 0)}
+		}
 		rep.sc = eval2(doc, x.scale, t, {100, 100}) / 100
 		rep.rot = eval1(doc, x.rotation, t, 0) * math.RAD_PER_DEG
 		rep.so = eval1(doc, x.start_opacity, t, 100) / 100
@@ -1381,10 +1392,23 @@ repeat_copy :: proc "contextless" (rep: ^Repeat, n: int) -> vg.Transform2D {
 	a, s := rep.anchor, rep.sc
 	whole := math.trunc(rep.offset)
 	k := f32(n) + rep.offset
-	sc := vg.Vec2{math.pow(s.x, whole + f32(n)), math.pow(s.y, whole + f32(n))}
+	e := whole + f32(n)
+	sc := vg.Vec2{
+		0 if s.x == 0 && e < 0 else math.pow(s.x, e),
+		0 if s.y == 0 && e < 0 else math.pow(s.y, e),
+	}
 	if f := rep.offset - whole; f != 0 {
 		part := s + (1 - s) * (1 - abs(f))
-		sc = sc * part if f > 0 else sc / part
+		if f > 0 {
+			sc *= part
+		} else {
+			if part.x != 0 {
+				sc.x /= part.x
+			}
+			if part.y != 0 {
+				sc.y /= part.y
+			}
+		}
 	}
 	m := vg.transform_multiply(vg.transform_translation(-a.x, -a.y), vg.transform_rotation(rep.rot * k))
 	m = vg.transform_multiply(m, vg.transform_scaling(sc.x, sc.y))
@@ -1397,6 +1421,10 @@ repeat_copy :: proc "contextless" (rep: ^Repeat, n: int) -> vg.Transform2D {
 @(private)
 repeat :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, lo, k: u32, t: f32) {
 	doc, c := d.doc, d.c
+	paints := count_paints(doc, {items.start + lo, k - lo})
+	if paints == 0 {
+		return
+	}
 	rep, ok := repeat_eval(d, sh, t)
 	if !ok {
 		return
@@ -1404,7 +1432,7 @@ repeat :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, lo, k: u32, t: f32) {
 	copies, so, eo := rep.copies, rep.so, rep.eo
 	below := .Repeat_Below in sh.flags
 	// A copy with overlapping paints fades as one.
-	group := count_paints(doc, {items.start + lo, k - lo}) > 1
+	group := paints > 1
 	for j in 0 ..< copies {
 		// Above: copy 0 on top; below: copy 0 at the bottom. The opacity
 		// ramps from the top copy (start) to the bottom one (end).
@@ -1471,6 +1499,8 @@ gather_copies :: proc(d: ^Draw, sh: ^Shape, first: int, rel: vg.Transform2D, t: 
 		vg.path_truncate(p, first)
 		return
 	}
+	contours := max(len(p.contours) - first, 1)
+	rep.copies = vg.budget_take_up_to(&d.budget, .Repeater_Contours, rep.copies * contours) / contours
 	vg.path_reset(&r.copied)
 	vg.path_append_contours(&r.copied, p, first, len(p.contours) - first)
 	vg.path_truncate(p, first)
@@ -1503,10 +1533,6 @@ paint :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, k: u32, t: f32) {
 	} else if sh.kind == .Fill || sh.kind == .Stroke {
 		col := [4]f32{0, 0, 0, 1}
 		eval(doc, sh.props[COLOR], t, col[:])
-		if col[0] > 1 || col[1] > 1 || col[2] > 1 {
-			// 0..255 components (old exports).
-			col.rgb /= 255
-		}
 		paint = vg.paint_color({clamp(col[0], 0, 1), clamp(col[1], 0, 1), clamp(col[2], 0, 1), opacity})
 	} else {
 		has: bool
@@ -1529,11 +1555,12 @@ paint :: proc(d: ^Draw, sh: ^Shape, items: vg.Range, k: u32, t: f32) {
 	if r.shaped[i] > 0 && owned.data == nil {
 		vg.path_reset(&r.path)
 		gather(d, items, k, vg.TRANSFORM_IDENTITY, t)
+		alloc := r.shapes.allocator if r.shapes.allocator.procedure != nil else context.allocator
 		ok: bool
 		if stroke {
-			owned^, ok, _ = vg.shape_from_stroke(&r.path, paint.stroke, search = false, scratch = &r.scratch)
+			owned^, ok, _ = vg.shape_from_stroke(&r.path, paint.stroke, allocator = alloc, search = false, scratch = &r.scratch)
 		} else {
-			owned^, ok = vg.shape_from_path(&r.path, search = false, scratch = &r.scratch)
+			owned^, ok = vg.shape_from_path(&r.path, allocator = alloc, search = false, scratch = &r.scratch)
 		}
 		if !ok {
 			r.shaped[i] = -1

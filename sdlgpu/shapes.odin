@@ -186,7 +186,6 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	}
 	sdl.UploadToGPUBuffer(pass, {transfer_buffer = st.transfer}, {buffer = st.buffer, offset = first * 4, size = total * 4}, false)
 	sdl.EndGPUCopyPass(pass)
-	clear(&st.pending)
 	return true
 }
 

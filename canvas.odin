@@ -201,6 +201,14 @@ render_target_set :: proc(c: ^Canvas, target: Render_Target, origin: [2]i32, vel
 canvas_motion_blur :: proc(c: ^Canvas, on: bool) {
 	assert(len(c.shapes) == 0, "motion blur is switched between frames")
 	c.motion_blur = on
+	if c.current_render_target == nil {
+		c.current_render_velocity = on
+	}
+	for &cmd in c.commands {
+		if rt, ok := &cmd.type.(Cmd_Set_Render_Target); ok && rt.target == nil {
+			rt.velocity = on
+		}
+	}
 }
 
 // Motion blur: what is drawn from here on (until a restore) moves as
@@ -530,8 +538,15 @@ draw_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, fill, 
 		return
 	}
 	image :: proc(p: Paint) -> bool {
-		_, ok := p.flavor.(Paint_Image)
-		return ok
+		if _, ok := p.flavor.(Paint_Image); ok {
+			return true
+		}
+		fl := p.flavor
+		if gc := flavor_gradient_colors(&fl); gc != nil {
+			_, ok := gc.(Multi_Stop_Gradient)
+			return ok
+		}
+		return false
 	}
 	if filled && stroked && image(fp) && image(sp) {
 		draw_markers(c, kind, radius, outline, fill, nil, points)
@@ -828,6 +843,11 @@ canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
 canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	// Shrinking keeps the capacity.
 	resize(&c.commands, m.commands)
+	if m.commands > 0 {
+		if d, ok := &c.commands[m.commands - 1].type.(Cmd_Draw_Shapes); ok {
+			d.instances.count = min(d.instances.count, u32(max(m.shapes - int(d.instances.start), 0)))
+		}
+	}
 	resize(&c.paints, m.paints)
 	resize(&c.bytes, m.bytes)
 	resize(&c.filters, m.filters)
@@ -937,10 +957,10 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	swap_clear(&c.shape_words, &out.shape_words)
 	swap_clear(&c.motions, &out.motions)
 	out.motion = c.motion_blur
+	frame_end(c)
 	swap_clear(&c.images.ops, &out.image_ops)
 	swap_clear(&c.images.pixels, &out.pixels)
 	swap_clear(&c.program_ops, &out.program_ops)
-	frame_end(c)
 }
 
 // Copy of the screen as RGBA8, top-down. Call after `flush`.
@@ -984,7 +1004,6 @@ params_from_paint :: proc(
 		p.inner_col = pm
 		p.outer_col = pm
 		p.shader_type = .Fill_Color
-		inv = transform_inverse(global_transform)
 	case Paint_Image:
 		info, ok := image_store_info(images, f.id)
 		if !ok {

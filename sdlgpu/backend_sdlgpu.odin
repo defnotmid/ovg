@@ -187,6 +187,9 @@ SDL_Backend :: struct {
 	// (render.odin, plan_group).
 	groups:           [dynamic]Gpu_Shape_Instance,
 	group_words:      [dynamic]u32,
+	group_bounds:     [dynamic]vg.Bounds,
+	group_spans:      [dynamic][4]i32,
+	group_fill:       [dynamic]u32,
 	// What the last `render` recorded.
 	stats:            Frame_Stats,
 }
@@ -227,6 +230,9 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		shape_clips = make([dynamic][4]f32, allocator),
 		groups = make([dynamic]Gpu_Shape_Instance, allocator),
 		group_words = make([dynamic]u32, allocator),
+		group_bounds = make([dynamic]vg.Bounds, allocator),
+		group_spans = make([dynamic][4]i32, allocator),
+		group_fill = make([dynamic]u32, allocator),
 		twins = make([dynamic]Cached_Texture, allocator),
 		twin_of = make([dynamic]Twin_Of, allocator),
 	}
@@ -326,6 +332,9 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.shape_clips)
 		delete(b.groups)
 		delete(b.group_words)
+		delete(b.group_bounds)
+		delete(b.group_spans)
+		delete(b.group_fill)
 		delete(b.twins)
 		delete(b.twin_of)
 		b^ = {}
@@ -384,6 +393,9 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.shape_clips)
 	delete(b.groups)
 	delete(b.group_words)
+	delete(b.group_bounds)
+	delete(b.group_spans)
+	delete(b.group_fill)
 
 	if b.owns_device {
 		sdl.DestroyGPUDevice(b.device)
@@ -805,6 +817,9 @@ read_texture :: proc(b: ^SDL_Backend, img: Image, allocator := context.allocator
 sdl_read_image :: proc(data: rawptr, image: vg.Backend_Image, info: vg.Image_Info, allocator: mem.Allocator) -> ([]u8, vg.Error) {
 	b := (^SDL_Backend)(data)
 	img := (^Image)(image.user)
+	if .Transient in info.flags {
+		return nil, .Unsupported_Operation
+	}
 	if img == nil || (info.format != .RGBA8 && info.format != .RGBA16F) {
 		return nil, .Unsupported_Format
 	}

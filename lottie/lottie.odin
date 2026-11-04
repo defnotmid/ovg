@@ -690,7 +690,7 @@ json_too_deep :: proc(data: []u8, limit: int) -> bool {
 				return true
 			}
 		case ']', '}':
-			depth -= 1
+			depth = max(depth - 1, 0)
 		}
 	}
 	return false
@@ -869,7 +869,7 @@ parse_layers :: proc(p: ^Parser, comp: i32, arr: json.Array) {
 			continue
 		}
 		if matte_parents[i] != min(i32) {
-			if mi, ok := by_ind[matte_parents[i]]; ok {
+			if mi, ok := by_ind[matte_parents[i]]; ok && mi != i32(first) + i32(i) {
 				l.matte_layer = mi
 				doc.layers[mi].matte_source = true
 			}
@@ -1127,10 +1127,10 @@ parse_shape :: proc(p: ^Parser, o: json.Object) -> (sh: Shape) {
 			sh.flags += {.Even_Odd}
 		}
 		if ty == "fl" || ty == "st" {
-			sh.props[COLOR] = parse_prop(p, o["c"], .Number)
+			sh.props[COLOR] = parse_prop(p, o["c"], .Color)
 		} else {
 			g := lj_obj(o, "g")
-			sh.stops = u16(lj_num(g, "p", 0))
+			sh.stops = u16(clamp(lj_num(g, "p", 0), 0, f32(max(u16))))
 			sh.props[COLOR] = parse_prop(p, g["k"], .Number)
 			sh.props[START] = parse_prop(p, o["s"], .Number)
 			sh.props[END] = parse_prop(p, o["e"], .Number)
@@ -1429,6 +1429,7 @@ lj_vec_num :: proc(arr: json.Array, i: int) -> f32 {
 @(private)
 Prop_Type :: enum u8 {
 	Number,
+	Color,
 	Path,
 }
 
@@ -1550,11 +1551,24 @@ parse_value :: proc(p: ^Parser, v: json.Value, type: Prop_Type) -> (idx: u32, di
 		return idx, 1
 	}
 	if arr, is_arr := v.(json.Array); is_arr {
-		for e in arr {
-			n, _ := lj_value_num(e)
-			append(&doc.values, n)
+		n := min(len(arr), int(max(u16)))
+		scale: f32 = 1
+		if type == .Color && n >= 3 {
+			for e in arr[:3] {
+				if num, _ := lj_value_num(e); num > 1 {
+					scale = 1.0 / 255.0
+					break
+				}
+			}
 		}
-		return idx, u16(len(arr))
+		for e, i in arr[:n] {
+			num, _ := lj_value_num(e)
+			if i < 3 {
+				num *= scale
+			}
+			append(&doc.values, num)
+		}
+		return idx, u16(n)
 	}
 	return NONE, 0
 }
@@ -1589,6 +1603,7 @@ parse_ease :: proc(p: ^Parser, kf: json.Object) -> (idx: u32, dims: u16) {
 			n = max(n, len(arr))
 		}
 	}
+	n = min(n, int(max(u16)))
 	doc := p.doc
 	idx = u32(len(doc.values))
 	for d in 0 ..< n {

@@ -277,7 +277,7 @@ sw_twins :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame) {
 	for cmd in frame.commands {
 		rt, is_target := cmd.type.(Cmd_Set_Render_Target)
 		id, is_image := rt.target.(Image_Id)
-		if !is_target || !is_image || !rt.velocity || b.twin_at[id.key.idx] >= 0 {
+		if !is_target || !is_image || !rt.velocity || int(id.key.idx) >= len(b.twin_at) || b.twin_at[id.key.idx] >= 0 {
 			continue
 		}
 		if e := image_store_get(images, id); e != nil {
@@ -490,7 +490,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
 					}
 					ib := b.bounds[i]
-					sw_bin(&run, fill, {u32(k), i}, max(r.y0, i32(math.floor(ib.miny))), min(r.y1, i32(math.ceil(ib.maxy))))
+					sw_bin(&run, fill, {u32(k), i}, clamp_i32(math.floor(ib.miny), r.y0, r.y1), clamp_i32(math.ceil(ib.maxy), r.y0, r.y1))
 				}
 			}
 		}
@@ -565,6 +565,11 @@ Raster :: struct {
 
 // The command's drawable area on the run's target (its scissor applied).
 @(private = "file")
+clamp_i32 :: #force_inline proc "contextless" (v: f32, lo, hi: i32) -> i32 {
+	return i32(clamp(v, f32(lo), f32(hi)))
+}
+
+@(private = "file")
 sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 	r := Raster {
 		target  = run.target,
@@ -578,10 +583,10 @@ sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 		twin    = run.twin,
 	}
 	if sr, ok := cmd.scissor_rect.?; ok {
-		r.x0 = max(r.x0, i32(math.floor(sr.x)))
-		r.y0 = max(r.y0, i32(math.floor(sr.y)))
-		r.x1 = min(r.x1, i32(math.ceil(sr.x + sr.w)))
-		r.y1 = min(r.y1, i32(math.ceil(sr.y + sr.h)))
+		r.x0 = clamp_i32(math.floor(sr.x), r.x0, r.x1)
+		r.y0 = clamp_i32(math.floor(sr.y), r.y0, r.y1)
+		r.x1 = clamp_i32(math.ceil(sr.x + sr.w), r.x0, r.x1)
+		r.y1 = clamp_i32(math.ceil(sr.y + sr.h), r.y0, r.y1)
 	}
 	return r
 }
@@ -653,10 +658,10 @@ sw_items_area :: proc(run: ^Sw_Run, r: ^Raster, items: []Sw_Binned) -> (x0, y0, 
 		ib := run.b.bounds[it.inst]
 		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
 	}
-	x0 = max(r.x0, i32(math.floor(area.minx)))
-	y0 = max(r.y0, i32(math.floor(area.miny)))
-	x1 = min(r.x1, i32(math.ceil(area.maxx)))
-	y1 = min(r.y1, i32(math.ceil(area.maxy)))
+	x0 = clamp_i32(math.floor(area.minx), r.x0, r.x1)
+	y0 = clamp_i32(math.floor(area.miny), r.y0, r.y1)
+	x1 = clamp_i32(math.ceil(area.maxx), r.x0, r.x1)
+	y1 = clamp_i32(math.ceil(area.maxy), r.y0, r.y1)
 	return
 }
 
@@ -688,8 +693,8 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 			row = inst.paint
 		}
 		ib := run.b.bounds[it.inst]
-		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
-		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
+		ix0, iy0 := clamp_i32(math.floor(ib.minx), x0, x1), clamp_i32(math.floor(ib.miny), y0, y1)
+		ix1, iy1 := clamp_i32(math.ceil(ib.maxx), x0, x1), clamp_i32(math.ceil(ib.maxy), y0, y1)
 		inv := transform_inverse(inst.transform)
 		u, v := instance_footprint(inst)
 		words := instance_words(inst, frame.shape_words)
@@ -763,8 +768,8 @@ raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shape
 	for it in items {
 		inst := frame.shapes[it.inst]
 		ib := run.b.bounds[it.inst]
-		ix0, iy0 := max(x0, i32(math.floor(ib.minx))), max(y0, i32(math.floor(ib.miny)))
-		ix1, iy1 := min(x1, i32(math.ceil(ib.maxx))), min(y1, i32(math.ceil(ib.maxy)))
+		ix0, iy0 := clamp_i32(math.floor(ib.minx), x0, x1), clamp_i32(math.floor(ib.miny), y0, y1)
+		ix1, iy1 := clamp_i32(math.ceil(ib.maxx), x0, x1), clamp_i32(math.ceil(ib.maxy), y0, y1)
 		inv := transform_inverse(inst.transform)
 		u, v := instance_footprint(inst)
 		circle := inst.marker == .Circle
@@ -828,10 +833,10 @@ raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shape
 // and if it `moves` its motion `m` on the twin.
 @(private = "file")
 raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Bounds, frame_words: []u32, $moves: bool) {
-	x0 := max(r.x0, i32(math.floor(ib.minx)))
-	y0 := max(r.y0, i32(math.floor(ib.miny)))
-	x1 := min(r.x1, i32(math.ceil(ib.maxx)))
-	y1 := min(r.y1, i32(math.ceil(ib.maxy)))
+	x0 := clamp_i32(math.floor(ib.minx), r.x0, r.x1)
+	y0 := clamp_i32(math.floor(ib.miny), r.y0, r.y1)
+	x1 := clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
+	y1 := clamp_i32(math.ceil(ib.maxy), r.y0, r.y1)
 	inv := transform_inverse(inst.transform)
 	u, v := instance_footprint(inst)
 	words := instance_words(inst, frame_words)
@@ -881,10 +886,26 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	y0 := max(r.y0, i32(c.y))
 	x1 := min(r.x1, i32(c.x + c.w))
 	y1 := min(r.y1, i32(c.y + c.h))
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
 	col := color_to_array(premultiplied(c.color))
-	for y in y0 ..< y1 {
-		for x in x0 ..< x1 {
-			store_texel(r.target, u32(x - r.ox), u32(y - r.oy), col)
+	if r.target.format == .RGBA8 {
+		packed := transmute(u32)[4]u8{to_unorm8(col[0]), to_unorm8(col[1]), to_unorm8(col[2]), to_unorm8(col[3])}
+		px := slice.reinterpret([]u32, r.target.pixels)
+		w := int(r.target.width)
+		tx0, tx1 := int(x0 - r.ox), int(x1 - r.ox)
+		for y in y0 ..< y1 {
+			row := px[int(y - r.oy) * w + tx0 : int(y - r.oy) * w + tx1]
+			for &p in row {
+				p = packed
+			}
+		}
+	} else {
+		for y in y0 ..< y1 {
+			for x in x0 ..< x1 {
+				store_texel(r.target, u32(x - r.ox), u32(y - r.oy), col)
+			}
 		}
 	}
 	// What a clear leaves is still and farthest, at its alpha.
@@ -1181,6 +1202,12 @@ blend_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, s: Com
 	if t.format != .RGBA16F {
 		src = {clamp(src[0], 0, 1), clamp(src[1], 0, 1), clamp(src[2], 0, 1), clamp(src[3], 0, 1)}
 	}
+	if s.src_rgb == .One && s.src_alpha == .One {
+		if (s.dst_rgb == .Zero && s.dst_alpha == .Zero) || (s.dst_rgb == .One_Minus_Src_Alpha && s.dst_alpha == .One_Minus_Src_Alpha && src[3] >= 1) {
+			store_texel(t, x, y, src)
+			return
+		}
+	}
 	dst := load_texel(t, x, y)
 	sf := factor_rgb(s.src_rgb, src, dst)
 	df := factor_rgb(s.dst_rgb, src, dst)
@@ -1227,7 +1254,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		// The intermediate already holds premultiplied color.
 		job.src = {tmp, src.width, src.height, src.format, src.flags}
 		job.dst = dst
-		job.dir, job.sigma, job.tex_type = {0, 1}, sy, 2 if src.format == .Gray8 else 0
+		job.dir, job.sigma, job.tex_type = {0, 1}, sy, 2 if src.format == .Gray8 || src.format == .Gray16 else 0
 		sw_bands(b, rows, &job, sw_blur_band)
 		return
 	}
@@ -1240,7 +1267,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		sw_bands(b, rows, &job, sw_morphology_band)
 		job.src = {tmp, src.width, src.height, src.format, src.flags}
 		job.dst = dst
-		job.axis, job.tex_type = 1, 2 if src.format == .Gray8 else 0
+		job.axis, job.tex_type = 1, 2 if src.format == .Gray8 || src.format == .Gray16 else 0
 		sw_bands(b, rows, &job, sw_morphology_band)
 		return
 	}
@@ -1417,8 +1444,13 @@ morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: in
 		for x in 0 ..< dst.width {
 			p := [2]i32{i32(x), i32(y)}
 			c := p[axis]
+			t0, t1 := max(c - r, lo), min(c + r, hi)
+			if t0 > t1 {
+				store_texel(dst, x, y, {})
+				continue
+			}
 			acc: [4]f32 = 0 if m.dilate else 1
-			for t in max(c - r, lo) ..= min(c + r, hi) {
+			for t in t0 ..= t1 {
 				q := p
 				q[axis] = t
 				acc = op(acc, fetch(src, u32(q.x), u32(q.y)), m.dilate)
@@ -1432,9 +1464,6 @@ morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: in
 					ring = op(ring, fetch(src, u32(q.x), u32(q.y)), m.dilate)
 				}
 				acc += (ring - acc) * frac
-			}
-			if lo > hi {
-				acc = {}
 			}
 			store_texel(dst, x, y, apply_tex_type(acc, tex_type))
 		}

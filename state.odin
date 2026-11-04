@@ -8,17 +8,17 @@ Scissor :: struct {
 	has_extent: bool,
 }
 
-// The equivalent screen rectangle if the scissor is axis-aligned and
-// unscaled. With no scissor this is the whole target.
+// The equivalent screen rectangle if the scissor is axis-aligned.
+// With no scissor this is the whole target.
 scissor_as_rect :: proc "contextless" (s: Scissor, canvas_w, canvas_h: f32) -> (Rect, bool) {
 	if !s.has_extent {
 		return {0, 0, canvas_w, canvas_h}, true
 	}
 	m := s.transform
-	if m[1] != 0 || m[2] != 0 || m[0] != 1 || m[3] != 1 {
+	if m[1] != 0 || m[2] != 0 || m[0] == 0 || m[3] == 0 {
 		return {}, false
 	}
-	hw, hh := s.extent[0], s.extent[1]
+	hw, hh := s.extent[0] * abs(m[0]), s.extent[1] * abs(m[3])
 	return {m[4] - hw, m[5] - hh, hw * 2, hh * 2}, true
 }
 

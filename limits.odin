@@ -26,6 +26,11 @@ Limit :: enum u8 {
 	Svg_Elements,
 	// Selector match steps of one SVG document's CSS cascade.
 	Css_Steps,
+	// Nodes drawn by one `svg.draw`: masks, clips and patterns draw their
+	// content again at each use, and uses nest.
+	Svg_Nodes_Drawn,
+	// Offscreen passes of one `svg.draw`: masks, clips that need one, patterns.
+	Svg_Effect_Passes,
 	// Primitives of one SVG filter (each is a pass over the layer).
 	Filter_Primitives,
 	// feTurbulence numOctaves.
@@ -34,6 +39,9 @@ Limit :: enum u8 {
 	Star_Points,
 	// Repeater copies drawn by one `lottie.draw`, nested repeaters multiplied.
 	Repeater_Copies,
+	// Contours repeaters copy into one path, by one `lottie.draw`: repeaters
+	// above a paint multiply them.
+	Repeater_Contours,
 	// Layers drawn by one `lottie.draw`, every precomp instance's included.
 	Lottie_Layers,
 	// Dashes of one stroke.
@@ -64,10 +72,13 @@ LIMIT_INFO :: [Limit]Limit_Info {
 	.Depth              = {"nesting depth", .Max},
 	.Svg_Elements       = {"SVG elements", .Total},
 	.Css_Steps          = {"CSS selector steps", .Total},
+	.Svg_Nodes_Drawn    = {"SVG nodes per draw", .Total},
+	.Svg_Effect_Passes  = {"SVG effect passes per draw", .Total},
 	.Filter_Primitives  = {"filter primitives", .Max},
 	.Turbulence_Octaves = {"feTurbulence octaves", .Max},
 	.Star_Points        = {"star points", .Max},
 	.Repeater_Copies    = {"repeater copies per draw", .Total},
+	.Repeater_Contours  = {"repeated contours per draw", .Total},
 	.Lottie_Layers      = {"Lottie layers per draw", .Total},
 	.Dash_Segments      = {"dashes per stroke", .Total},
 	.Colr_Paints        = {"COLR paints per glyph", .Total},
@@ -81,10 +92,13 @@ DEFAULT_LIMITS :: Limits {
 	.Depth              = 256,
 	.Svg_Elements       = 250_000,
 	.Css_Steps          = 50_000_000,
+	.Svg_Nodes_Drawn    = 2_000_000,
+	.Svg_Effect_Passes  = 20_000,
 	.Filter_Primitives  = 256,
 	.Turbulence_Octaves = 24,
 	.Star_Points        = 10_000,
 	.Repeater_Copies    = 20_000,
+	.Repeater_Contours  = 100_000,
 	.Lottie_Layers      = 20_000,
 	.Dash_Segments      = 100_000,
 	.Colr_Paints        = 65_536,

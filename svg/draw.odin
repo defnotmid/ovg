@@ -45,6 +45,8 @@ Renderer :: struct {
 	// Canvas images of the bound document's bitmaps, by bitmap: smooth,
 	// then nearest (made only for bitmaps an image draws pixelated).
 	images:      [dynamic][2]vg.Image_Id,
+	// The limits the last `draw` reached.
+	limited:     bit_set[vg.Limit],
 }
 
 // Makes the canvas images of `doc`'s bitmaps for drawing it on `c`,
@@ -322,10 +324,12 @@ draw :: proc(c: ^vg.Canvas, ls: ^vg.Layer_Stack, r: ^Renderer, doc: ^Document, t
 		text      = text,
 		overrides = overrides,
 	}
+	vg.budget_init(&d.budget, &doc.limits)
 	vg.save(c)
 	vg.apply_transform(c, transform)
 	draw_node(&d, 0, {}, false)
 	vg.restore(c)
+	r.limited = d.budget.hit
 }
 
 @(private)
@@ -337,6 +341,8 @@ Draw :: struct {
 	// The document's text laid out (layout); nil draws no text.
 	text:      ^Layout,
 	overrides: []Override,
+	budget:    vg.Budget,
+	depth:     int,
 }
 
 // Fill / stroke overrides that children inheriting from their parent get,
@@ -349,6 +355,11 @@ Inherit :: struct {
 
 @(private)
 draw_node :: proc(d: ^Draw, i: i32, inh: Inherit, clip_mode: bool) {
+	if vg.budget_over(&d.budget, .Depth, d.depth + 1) || !vg.budget_take(&d.budget, .Svg_Nodes_Drawn) {
+		return
+	}
+	d.depth += 1
+	defer d.depth -= 1
 	doc, c := d.doc, d.c
 	n := &doc.nodes[i]
 	hidden := .Hidden in n.flags
@@ -609,6 +620,9 @@ clip_path :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) -> vg.Fill_Rule {
 // Draws a clip's content (white, clip-rule fills) into the current mask.
 @(private)
 draw_clip_content :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) {
+	if !vg.budget_take(&d.budget, .Svg_Effect_Passes) {
+		return
+	}
 	doc, c := d.doc, d.c
 	cl := &doc.clips[idx]
 	nested := 0
@@ -631,6 +645,9 @@ draw_clip_content :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) {
 // Draws mask `idx`'s content into the current mask.
 @(private)
 draw_mask :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) {
+	if !vg.budget_take(&d.budget, .Svg_Effect_Passes) {
+		return
+	}
 	doc, c, ls := d.doc, d.c, d.ls
 	m := &doc.masks[idx]
 	rect := m.rect
@@ -688,10 +705,18 @@ draw_shape :: proc(d: ^Draw, n: ^Node, fill_ov, stroke_ov: Maybe(vg.Color), clip
 		fill.anti_alias = aa
 		vg.fill_shape(c, &sh.fill, fill)
 	}
-	if has_stroke && sh.stroke.data != nil {
-		stroke.fill_rule = .Non_Zero
-		stroke.anti_alias = aa
-		vg.fill_shape(c, &sh.stroke, stroke)
+	if has_stroke {
+		if sh.stroke.data != nil {
+			stroke.fill_rule = .Non_Zero
+			stroke.anti_alias = aa
+			vg.fill_shape(c, &sh.stroke, stroke)
+		} else if sh.contours.count > 0 {
+			stroke.anti_alias = aa
+			stroke_settings(&stroke, s, doc, sh.path_length)
+			vg.path_reset(&d.r.path)
+			vg.path_append_contours(&d.r.path, &doc.geometry, int(sh.contours.start), int(sh.contours.count))
+			vg.stroke_path(c, &d.r.path, stroke)
+		}
 	}
 }
 
@@ -756,6 +781,9 @@ paint :: proc(d: ^Draw, sp: Paint, opacity: f32, ov: Maybe(vg.Color), bbox: vg.R
 // repeating it.
 @(private)
 pattern_paint :: proc(d: ^Draw, s: ^Server, bbox: vg.Rect) -> (vg.Paint, bool) {
+	if !vg.budget_take(&d.budget, .Svg_Effect_Passes) {
+		return {}, false
+	}
 	doc, c, ls := d.doc, d.c, d.ls
 	rect := s.rect
 	if s.bbox_units {

@@ -268,27 +268,26 @@ text_letters :: proc(s: ^Text_Scratch, grouping: u8) {
 	}
 	// Words (2) or lines (3) share an anchor: the group's middle.
 	first := 0
-	size: f32
 	for &lt, i in s.letters {
 		w := 0 if lt.newline else lt.w
-		lt.group_off = size if grouping == 2 || grouping == 3 else 0
+		lt.group_off = 0
 		lt.group_w = w
 		if grouping != 2 && grouping != 3 {
 			continue
 		}
-		size += w
 		last := i == len(s.letters) - 1
 		ends := lt.newline || last || (grouping == 2 && lt.space)
 		if !ends {
 			continue
 		}
-		if lt.newline || lt.space {
-			size -= w
-		}
+		end := i - 1 if (lt.newline || lt.space) && i > first else i
+		group_x := s.letters[first].x
+		group_w := max(s.letters[end].x + (0 if s.letters[end].newline else s.letters[end].w) - group_x, 0)
 		for k in first ..= i {
-			s.letters[k].group_w = size
+			s.letters[k].group_off = s.letters[k].x - group_x
+			s.letters[k].group_w = group_w
 		}
-		first, size = i + 1, 0
+		first = i + 1
 	}
 }
 
@@ -415,6 +414,9 @@ draw_text :: proc(d: ^Draw, l: ^Layer, li: i32, t: f32) {
 		}
 		for g, k in glyphs {
 			ci := lay.clusters[run.first + k]
+			if ci < 0 || int(ci) >= len(s.letter_of) {
+				continue
+			}
 			lt := &s.letters[s.letter_of[ci]]
 			if lt.opacity <= 0 {
 				continue
@@ -649,7 +651,7 @@ text_animate :: proc(d: ^Draw, txt: ^Text, td: ^Text_Doc, s: ^Text_Scratch, t: f
 letter_baseline :: proc(s: ^Text_Scratch, li: int) -> f32 {
 	line := s.letters[li].line
 	lay := &s.layout
-	if int(line) < len(lay.lines) {
+	if line >= 0 && int(line) < len(lay.lines) {
 		ln := lay.lines[line]
 		if ln.count > 0 {
 			return lay.glyphs[ln.first].y

@@ -1,6 +1,5 @@
 package ovg
 
-import "base:runtime"
 import "core:math"
 
 // SVG filter effects on a layer (`Layer_Params.filter`): a list of filter
@@ -218,16 +217,30 @@ filter_rect_device :: proc "contextless" (r: Rect, xform: Transform2D) -> (b: Bo
 	return {x0, y0, x0 + math.ceil(b.maxx - b.minx), y0 + math.ceil(b.maxy - b.miny)}
 }
 
+@(private = "file")
+merge_refs_of :: proc "contextless" (f: ^Filter, p: Filter_Primitive) -> []Filter_Ref {
+	first, count := int(p.merge_first), int(p.merge_count)
+	if first < 0 || count <= 0 || first + count > len(f.merge_refs) {
+		return nil
+	}
+	return f.merge_refs[first : first + count]
+}
+
 // Applies `f` to `source` (released) and returns the filtered layer.
 // `xform` is the canvas transform the lengths are measured in.
 @(private)
 apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id, xform: Transform2D) -> Image_Id {
-	// What this puts on the temp allocator goes when it returns.
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
-	if len(f.primitives) == 0 {
+	n_prims := len(f.primitives)
+	if n_prims == 0 {
 		return source
 	}
-	results := make([]Image_Id, len(f.primitives), context.temp_allocator)
+	resize(&ls.filter_results, n_prims)
+	resize(&ls.filter_rects, n_prims)
+	resize(&ls.filter_last, n_prims)
+	results := ls.filter_results[:]
+	for &r in results {
+		r = {}
+	}
 	w, h := ls.window.w, ls.window.h
 	win := ls.window
 	// Per-axis scale (resvg's Transform::get_scale).
@@ -247,7 +260,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		clamp(region_b.maxy - wy, 0, f32(h)),
 	}
 	// Each result's subregion on the canvas (feTile repeats its input's).
-	rects := make([]Bounds, len(f.primitives), context.temp_allocator)
+	rects := ls.filter_rects[:]
 	ref_rect :: proc(ref: Filter_Ref, i: int, rects: []Bounds, region: Bounds) -> Bounds {
 		switch ref.kind {
 		case .Previous:
@@ -270,21 +283,21 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		layer_release(ls, source)
 	}
 	alpha := Image_Id{}
-	get_alpha :: proc(ls: ^Layer_Stack, c: ^Canvas, graphic: Image_Id, alpha: ^Image_Id) -> Image_Id {
+	get_alpha :: proc(ls: ^Layer_Stack, c: ^Canvas, graphic: Image_Id, alpha: ^Image_Id, format: Pixel_Format) -> Image_Id {
 		if !image_id_valid(alpha^) {
-			alpha^ = layer_acquire(ls, c, ls.window.w, ls.window.h)
+			alpha^ = layer_acquire(ls, c, ls.window.w, ls.window.h, format = format)
 			filter_image(c, alpha^, Color_Matrix{ALPHA_ONLY}, graphic)
 		}
 		return alpha^
 	}
-	resolve :: proc(ls: ^Layer_Stack, c: ^Canvas, ref: Filter_Ref, i: int, results: []Image_Id, graphic: Image_Id, alpha: ^Image_Id) -> Image_Id {
+	resolve :: proc(ls: ^Layer_Stack, c: ^Canvas, ref: Filter_Ref, i: int, results: []Image_Id, graphic: Image_Id, alpha: ^Image_Id, format: Pixel_Format) -> Image_Id {
 		switch ref.kind {
 		case .Previous:
 			return results[i - 1] if i > 0 else graphic
 		case .Source_Graphic:
 			return graphic
 		case .Source_Alpha:
-			return get_alpha(ls, c, graphic, alpha)
+			return get_alpha(ls, c, graphic, alpha, format)
 		case .Result:
 			return results[min(int(ref.index), i - 1)] if i > 0 else graphic
 		}
@@ -299,7 +312,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	}
 	// The last primitive reading each result, which releases it for the
 	// next to reuse (the final result is returned).
-	last := make([]int, len(f.primitives), context.temp_allocator)
+	last := ls.filter_last[:]
 	result_of :: proc(ref: Filter_Ref, i: int) -> int {
 		switch ref.kind {
 		case .Previous:
@@ -313,13 +326,14 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	for p, i in f.primitives {
 		last[i] = i
 		reads := [2]Filter_Ref{p.in1, p.in2}
-		for ref in reads[:2 if p.op == .Composite || p.op == .Blend || p.op == .Displacement_Map else 1] {
+		n_reads := 0 if p.op == .Flood || p.op == .Turbulence || p.op == .Image || p.op == .Merge else (2 if p.op == .Composite || p.op == .Blend || p.op == .Displacement_Map else 1)
+		for ref in reads[:n_reads] {
 			if r := result_of(ref, i); r >= 0 {
 				last[r] = i
 			}
 		}
 		if p.op == .Merge {
-			for ref in f.merge_refs[p.merge_first:][:p.merge_count] {
+			for ref in merge_refs_of(f, p) {
 				if r := result_of(ref, i); r >= 0 {
 					last[r] = i
 				}
@@ -328,7 +342,8 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	}
 	last[len(last) - 1] = len(last)
 	for &p, i in f.primitives {
-		in1 := resolve(ls, c, p.in1, i, results, graphic, &alpha)
+		uses_in1 := p.op != .Flood && p.op != .Turbulence && p.op != .Image && p.op != .Merge
+		in1 := resolve(ls, c, p.in1, i, results, graphic, &alpha, format) if uses_in1 else Image_Id{}
 		// Turbulence is made in the layer's format: rounded to 8 bits as
 		// resvg's in an RGBA8 one, unrounded in an RGBA16F one.
 		out := layer_acquire(ls, c, w, h, format = ls.format if p.op == .Turbulence else format)
@@ -340,17 +355,17 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		case .Flood:
 			filter_flood_into(ls, c, out, working(p.color, f.srgb))
 		case .Composite:
-			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha)
+			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha, format)
 			filter_image(c, out, Composite{p.composite, p.k, in2}, in1)
 		case .Blend:
-			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha)
+			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha, format)
 			filter_image(c, out, Blend{p.blend, in2}, in1)
 		case .Color_Matrix:
 			filter_image(c, out, Color_Matrix{p.color_matrix}, in1)
 		case .Merge:
 			layer_target_begin(ls, c, out)
-			for ref in f.merge_refs[p.merge_first:][:p.merge_count] {
-				layer_blit(ls, c, resolve(ls, c, ref, i, results, graphic, &alpha), 0, 0, w, h, 1)
+			for ref in merge_refs_of(f, p) {
+				layer_blit(ls, c, resolve(ls, c, ref, i, results, graphic, &alpha, format), 0, 0, w, h, 1)
 			}
 			layer_target_end(ls, c)
 		case .Drop_Shadow:
@@ -391,7 +406,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 			t := ref_rect(p.in1, i, rects, region_b)
 			filter_image(c, out, Tile{{t.minx - wx, t.miny - wy, t.maxx - t.minx, t.maxy - t.miny}}, in1)
 		case .Displacement_Map:
-			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha)
+			in2 := resolve(ls, c, p.in2, i, results, graphic, &alpha, format)
 			filter_image(c, out, Displacement_Map{in2, p.scale * axis_scale, p.channels, valid}, in1)
 		case .Image:
 			filter_draw_image(ls, c, f, &p, out, xform)
@@ -637,7 +652,7 @@ filter_reach :: proc "contextless" (f: ^Filter, xform: Transform2D) -> (reach: V
 			}
 		case .Merge:
 			b = true
-			for ref in f.merge_refs[p.merge_first:][:p.merge_count] {
+			for ref in merge_refs_of(f, p) {
 				b &&= is_bounded(ref, i, ok)
 			}
 		}

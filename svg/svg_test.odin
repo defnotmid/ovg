@@ -1,6 +1,7 @@
 package svg
 
 import "base:runtime"
+import "core:fmt"
 import "core:mem"
 import "core:slice"
 import "core:strings"
@@ -619,6 +620,108 @@ test_limits_svg :: proc(t: ^testing.T) {
 	strings.write_string(&b, `</defs><use href="#a7"/></svg>`)
 	testing.expect(t, strings.contains(hostile(t, &s, strings.to_string(b)), "SVG elements"))
 
+	// <mask> DAG fan-out, ten masked rects per level: 10^7 passes asked for.
+	strings.builder_reset(&b)
+	strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><mask id="m0"><rect width="64" height="64" fill="white"/></mask>`)
+	for level in 1 ..= 7 {
+		strings.write_string(&b, `<mask id="m`)
+		strings.write_int(&b, level)
+		strings.write_string(&b, `">`)
+		for _ in 0 ..< 10 {
+			strings.write_string(&b, `<rect width="64" height="64" fill="white" mask="url(#m`)
+			strings.write_int(&b, level - 1)
+			strings.write_string(&b, `)"/>`)
+		}
+		strings.write_string(&b, "</mask>")
+	}
+	strings.write_string(&b, `</defs><rect width="64" height="64" mask="url(#m7)"/></svg>`)
+	// Lower limits than the defaults: what matters is that they hold.
+	low := vg.DEFAULT_LIMITS
+	low[.Svg_Effect_Passes] = 256
+	low[.Svg_Nodes_Drawn] = 5_000
+	limited: bit_set[vg.Limit]
+	hostile(t, &s, strings.to_string(b), &limited, &low)
+	testing.expect(t, .Svg_Effect_Passes in limited)
+
+	// The same with patterns, two per level, 28 levels.
+	strings.builder_reset(&b)
+	strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><pattern id="p0" width="9" height="9" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="red"/></pattern>`)
+	for level in 1 ..< 28 {
+		fmt.sbprintf(&b, `<pattern id="p%d" width="9" height="9" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="url(#p%d)"/><rect x="4" width="4" height="4" fill="url(#p%d)"/></pattern>`, level, level - 1, level - 1)
+	}
+	strings.write_string(&b, `</defs><rect width="64" height="64" fill="url(#p27)"/></svg>`)
+	limited = {}
+	hostile(t, &s, strings.to_string(b), &limited, &low)
+	testing.expect(t, .Svg_Effect_Passes in limited)
+
+	// One big mask at each of many uses: nodes, not passes, run out.
+	strings.builder_reset(&b)
+	strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><mask id="m">`)
+	for _ in 0 ..< 200 {
+		strings.write_string(&b, `<rect width="1" height="1" fill="white"/>`)
+	}
+	strings.write_string(&b, `</mask></defs>`)
+	for _ in 0 ..< 200 {
+		strings.write_string(&b, `<rect width="1" height="1" mask="url(#m)"/>`)
+	}
+	strings.write_string(&b, `</svg>`)
+	limited = {}
+	hostile(t, &s, strings.to_string(b), &limited, &low)
+	testing.expect(t, .Svg_Nodes_Drawn in limited)
+
+	// Chains of definitions: the parser and each draw stop at the depth.
+	for kind in ([?][2]string{{"clipPath", "clip-path"}, {"mask", "mask"}}) {
+		strings.builder_reset(&b)
+		strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs>`)
+		for i in 0 ..< 50_000 {
+			fmt.sbprintf(&b, `<%s id="d%d" %s="url(#d%d)"><rect width="9" height="9"/></%s>`, kind[0], i, kind[1], i + 1, kind[0])
+		}
+		fmt.sbprintf(&b, `</defs><rect width="9" height="9" %s="url(#d0)"/></svg>`, kind[1])
+		testing.expect(t, strings.contains(hostile(t, &s, strings.to_string(b)), "nesting depth"))
+	}
+	strings.builder_reset(&b)
+	strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><mask id="m0"><rect width="9" height="9"/></mask></defs>`)
+	for i in 1 ..< 20 {
+		fmt.sbprintf(&b, `<defs><mask id="m%d">`, i)
+		for _ in 0 ..< 200 {
+			strings.write_string(&b, `<g opacity=".9">`)
+		}
+		fmt.sbprintf(&b, `<rect width="9" height="9" mask="url(#m%d)"/>`, i - 1)
+		for _ in 0 ..< 200 {
+			strings.write_string(&b, `</g>`)
+		}
+		fmt.sbprintf(&b, `</mask></defs><rect width="1" height="1" mask="url(#m%d)"/>`, i)
+	}
+	strings.write_string(&b, `</svg>`)
+	limited = {}
+	hostile(t, &s, strings.to_string(b), &limited)
+	testing.expect(t, .Depth in limited)
+
+	// A filter's copy per element counts: 20 primitives on 100 elements.
+	strings.builder_reset(&b)
+	strings.write_string(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><defs><filter id="f" primitiveUnits="objectBoundingBox">`)
+	for _ in 0 ..< 20 {
+		strings.write_string(&b, `<feOffset dx="0.1"/>`)
+	}
+	strings.write_string(&b, `</filter></defs>`)
+	for _ in 0 ..< 100 {
+		strings.write_string(&b, `<rect width="1" height="1" filter="url(#f)"/>`)
+	}
+	strings.write_string(&b, `</svg>`)
+	few := vg.DEFAULT_LIMITS
+	few[.Svg_Elements] = 1000
+	testing.expect(t, strings.contains(hostile(t, &s, strings.to_string(b), nil, &few), "SVG elements"))
+
+	// Malformed `<![` in element body returns .Xml without hanging.
+	bad_cdata, bad_err := parse(transmute([]u8)string(`<svg xmlns="http://www.w3.org/2000/svg"><![bad</svg>`))
+	destroy(&bad_cdata)
+	testing.expect_value(t, bad_err, Error.Xml)
+	for spaced in ([?]string{`<svg xmlns="http://www.w3.org/2000/svg">< ![<</svg>`, `<svg xmlns="http://www.w3.org/2000/svg"><! [<</svg>`}) {
+		spaced_doc, spaced_err := parse(transmute([]u8)spaced)
+		destroy(&spaced_doc)
+		testing.expect_value(t, spaced_err, Error.Xml)
+	}
+
 	// Dashes too fine to count draw the stroke undashed (dashed when
 	// parsed).
 	testing.expect(t, strings.contains(hostile(t, &s, `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><path d="M0 32 H64" stroke="black" stroke-width="4" stroke-dasharray="1e-7"/></svg>`), "dashes per stroke"))
@@ -801,6 +904,112 @@ test_svg_wrapped_text :: proc(t: ^testing.T) {
 	testing.expect(t, len(l.lines) == 2 && abs(l.lines[1].y - l.lines[0].y - 20) < 0.01)
 }
 
+@(test)
+test_svg_css_and_override_edge_cases :: proc(t: ^testing.T) {
+	// CSS comments in selector/body, inline !important beating stylesheet !important,
+	// Override.fill reaching <symbol> via <use>, Override.stroke on stroke="none",
+	// and font-size="0" producing zero glyphs without NaN.
+	markup := `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+	<style>
+		/* lead */ rect/*mid*/#r1 { /* body */ fill: #0000ff !important; }
+	</style>
+	<defs>
+		<symbol id="sym" viewBox="0 0 20 20">
+			<rect width="20" height="20"/>
+		</symbol>
+	</defs>
+	<rect id="r1" x="0" y="0" width="20" height="20" style="fill: #ff0000 !important"/>
+	<use id="u1" href="#sym" x="20" y="0" width="20" height="20"/>
+	<text x="5" y="15" font-size="0" style="line-height: 10px">Hidden</text>
+</svg>`
+	s: Fx
+	defer fx_close(&s)
+	testing.expect_value(t, fx_open(&s, markup), Error.None)
+	testing.expect_value(t, len(s.text.glyphs), 0)
+
+	overrides := [?]Override{
+		{id = "u1", fill = vg.Color{1, 0, 0, 1}},
+	}
+	fx_draw(&s, overrides[:])
+
+	red := [4]u8{255, 0, 0, 255}
+	testing.expect(t, close_to(px(&s, 10, 10), red))
+	testing.expect(t, close_to(px(&s, 30, 10), red))
+}
+
+// Ordinary files that use a definition many times: every use is drawn. The
+// limits are far above these.
+@(test)
+test_svg_many_uses :: proc(t: ^testing.T) {
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	HEAD :: `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">`
+	defs := [?]string{
+		`<defs><pattern id="d" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="red"/></pattern></defs>`,
+		`<defs><mask id="d"><rect width="64" height="64" fill="white"/></mask></defs>`,
+	}
+	uses := [?]string{`fill="url(#d)"`, `fill="red" mask="url(#d)"`}
+	for def, k in defs {
+		strings.builder_reset(&b)
+		strings.write_string(&b, HEAD)
+		strings.write_string(&b, def)
+		for i in 0 ..< 400 {
+			fmt.sbprintf(&b, `<rect x="%d" y="%d" width="1" height="1" %s/>`, i % 64, i / 64, uses[k])
+		}
+		strings.write_string(&b, `</svg>`)
+		s: Fx
+		defer fx_close(&s)
+		testing.expect_value(t, fx_open(&s, strings.to_string(b)), Error.None)
+		fx_draw(&s)
+		testing.expect_value(t, s.r.limited, bit_set[vg.Limit]{})
+		for i in 0 ..< 400 {
+			testing.expectf(t, close_to(px(&s, i % 64, i / 64), {255, 0, 0, 255}), "%s, rect %d: %v", uses[k], i, px(&s, i % 64, i / 64))
+		}
+	}
+
+	// Parsing only: the elements budget counts elements, not uses.
+	strings.builder_reset(&b)
+	strings.write_string(&b, HEAD)
+	strings.write_string(&b, `<defs><clipPath id="c"><rect width="64" height="64"/></clipPath><mask id="m"><rect width="64" height="64" fill="white"/></mask></defs>`)
+	for _ in 0 ..< 20_000 {
+		strings.write_string(&b, `<rect width="1" height="1" clip-path="url(#c)"/><g mask="url(#m)"/>`)
+	}
+	strings.write_string(&b, `</svg>`)
+	doc, err := parse(b.buf[:])
+	defer destroy(&doc)
+	testing.expect_value(t, err, Error.None)
+	testing.expect_value(t, len(doc.warnings), 0)
+
+	// A filter resolved per element, on ordinary element counts.
+	strings.builder_reset(&b)
+	strings.write_string(&b, HEAD)
+	strings.write_string(&b, `<defs><filter id="f" primitiveUnits="objectBoundingBox"><feOffset dx="0.1" result="a"/><feGaussianBlur stdDeviation="0.05"/><feOffset dy="0.1"/><feBlend in="a"/><feOffset dx="0"/></filter></defs>`)
+	for _ in 0 ..< 1000 {
+		strings.write_string(&b, `<rect width="1" height="1" filter="url(#f)"/>`)
+	}
+	strings.write_string(&b, `</svg>`)
+	fdoc, ferr := parse(b.buf[:])
+	defer destroy(&fdoc)
+	testing.expect_value(t, ferr, Error.None)
+	testing.expect_value(t, len(fdoc.warnings), 0)
+}
+
+// CSS comments: inside a declaration, and between the parts of a selector
+// (they separate nothing).
+@(test)
+test_svg_css_comments :: proc(t: ^testing.T) {
+	s: Fx
+	defer fx_close(&s)
+	testing.expect_value(t, fx_open(&s, `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+	<style>rect/*c*/#a { fill: #00f } #b { /* x */ fill: /* y */ #00f; /* z */ }</style>
+	<rect id="a" width="20" height="20" fill="#f00"/>
+	<rect id="b" x="20" width="20" height="20" fill="#f00"/>
+</svg>`), Error.None)
+	fx_draw(&s)
+	testing.expect(t, close_to(px(&s, 10, 10), {0, 0, 255, 255}))
+	testing.expect(t, close_to(px(&s, 30, 10), {0, 0, 255, 255}))
+}
+
 // Hostile input (limits.odin): each file finishes quickly, cut short with the
 // limit recorded, instead of crashing, hanging or exhausting memory. These
 // documents grow large arrays: the heap allocator, as programs use (the test
@@ -839,11 +1048,11 @@ has_warning :: proc(warnings: []string, part: string) -> bool {
 
 // Parses and draws `markup`; returns its warnings joined (temp allocator).
 @(private = "file")
-hostile :: proc(t: ^testing.T, s: ^Limits_Fx, markup: string, loc := #caller_location) -> string {
+hostile :: proc(t: ^testing.T, s: ^Limits_Fx, markup: string, limited: ^bit_set[vg.Limit] = nil, limits: ^vg.Limits = nil, loc := #caller_location) -> string {
 	fonts: vg.Font_Collection
 	vg.font_collection_init(&fonts)
 	defer vg.font_collection_destroy(&fonts)
-	doc, err := parse(transmute([]u8)markup, {fonts = &fonts})
+	doc, err := parse(transmute([]u8)markup, {fonts = &fonts, limits = limits})
 	defer destroy(&doc)
 	testing.expect_value(t, err, Error.None, loc = loc)
 	r: Renderer
@@ -857,6 +1066,9 @@ hostile :: proc(t: ^testing.T, s: ^Limits_Fx, markup: string, loc := #caller_loc
 	draw(&s.canvas, &s.layers, &r, &doc, &text)
 	vg.layer_stack_end(&s.layers, &s.canvas)
 	vg.flush(&s.canvas)
+	if limited != nil {
+		limited^ = r.limited
+	}
 	return strings.join(doc.warnings[:], "\n", context.temp_allocator)
 }
 

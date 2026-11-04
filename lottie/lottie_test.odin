@@ -842,6 +842,15 @@ test_limits_lottie :: proc(t: ^testing.T) {
 	_, limited = hostile(t, &s, star)
 	testing.expect(t, .Star_Points in limited)
 
+	// Repeaters above a single paint multiply the contours they copy.
+	seq_repeaters := HEAD + `"layers": [{"ty": 4, "ip": 0, "op": 60, "st": 0, "ks": {}, "shapes": [{"ty": "gr", "it": [
+		{"ty": "rc", "p": {"a": 0, "k": [32, 32]}, "s": {"a": 0, "k": [4, 4]}, "r": {"a": 0, "k": 0}},
+		{"ty": "rp", "c": {"a": 0, "k": 1000}, "tr": {}},
+		{"ty": "rp", "c": {"a": 0, "k": 1000}, "tr": {}},
+		{"ty": "fl", "c": {"a": 0, "k": [1, 0, 0, 1]}, "o": {"a": 0, "k": 100}}]}]}]}`
+	_, limited = hostile(t, &s, seq_repeaters)
+	testing.expect(t, .Repeater_Contours in limited)
+
 	// JSON nested past Depth is refused before core:encoding/json recurses.
 	strings.builder_reset(&b)
 	strings.write_string(&b, HEAD + `"layers": [], "x": `)
@@ -855,6 +864,62 @@ test_limits_lottie :: proc(t: ^testing.T) {
 	doc, err := parse(transmute([]u8)strings.to_string(b))
 	destroy(&doc)
 	testing.expect_value(t, err, Error.Too_Deep)
+}
+
+@(test)
+test_lottie_color_overshoot_and_repeater_zero_scale :: proc(t: ^testing.T) {
+	s: Fx
+	defer fx_close(&s)
+	// A [0..1] red color animating from 0.9 to 1.0 with an overshooting ease
+	// handle (y2 = 2.0) must clamp to 1.0 instead of dividing by 255.
+	err := fx_open(&s, `{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 20, "h": 20, "layers": [
+		{"ty": 4, "ind": 1, "ip": 0, "op": 60, "ks": {}, "shapes": [
+			{"ty": "rc", "p": {"a": 0, "k": [10, 10]}, "s": {"a": 0, "k": [20, 20]}, "r": {"a": 0, "k": 0}},
+			{"ty": "fl", "o": {"a": 0, "k": 100}, "c": {"a": 1, "k": [
+				{"t": 0, "s": [0.9, 0, 0, 1], "o": {"x": 0.2, "y": 2.0}, "i": {"x": 0.8, "y": 2.0}},
+				{"t": 10, "s": [1.0, 0, 0, 1]}]}}]}]}`)
+	testing.expect_value(t, err, Error.None)
+	fx_draw(&s, 5)
+	testing.expect(t, near(px(&s, 10, 10), RED))
+
+	// repeat_copy with zero scale and negative fractional offset does not divide by zero.
+	rep := Repeat{copies = 2, offset = -1.0, sc = {0, 0}}
+	m := repeat_copy(&rep, 0)
+	for v in m {
+		testing.expect(t, !math.is_nan(v) && !math.is_inf(v, 0))
+	}
+}
+
+// A track matte's layer above, not flagged td, is drawn too (lottie-web).
+@(test)
+test_lottie_matte_without_td :: proc(t: ^testing.T) {
+	s: Fx
+	defer fx_close(&s)
+	testing.expect_value(t, fx_open(&s, `{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 20, "h": 20, "layers": [
+		{"ty": 1, "ind": 1, "ip": 0, "op": 60, "ks": {}, "sw": 20, "sh": 20, "sc": "#ff0000"},
+		{"ty": 1, "ind": 2, "ip": 0, "op": 60, "ks": {}, "sw": 20, "sh": 20, "sc": "#0000ff", "tt": 1}]}`), Error.None)
+	fx_draw(&s, 0)
+	testing.expect(t, near(px(&s, 10, 10), RED))
+}
+
+// A repeater over many contours, painted twice: ordinary work, under the limits.
+@(test)
+test_lottie_repeater_many_contours :: proc(t: ^testing.T) {
+	b := strings.builder_make()
+	defer strings.builder_destroy(&b)
+	strings.write_string(&b, `{"v": "5.7.0", "fr": 30, "ip": 0, "op": 60, "w": 20, "h": 20, "layers": [{"ty": 4, "ip": 0, "op": 60, "ks": {}, "shapes": [{"ty": "gr", "it": [`)
+	for _ in 0 ..< 100 {
+		strings.write_string(&b, `{"ty": "rc", "p": {"a": 0, "k": [10, 10]}, "s": {"a": 0, "k": [20, 20]}, "r": {"a": 0, "k": 0}},`)
+	}
+	strings.write_string(&b, `{"ty": "rp", "c": {"a": 0, "k": 200}, "tr": {}},
+		{"ty": "st", "c": {"a": 0, "k": [0, 0, 1, 1]}, "o": {"a": 0, "k": 100}, "w": {"a": 0, "k": 1}},
+		{"ty": "fl", "c": {"a": 0, "k": [1, 0, 0, 1]}, "o": {"a": 0, "k": 100}}]}]}]}`)
+	s: Fx
+	defer fx_close(&s)
+	testing.expect_value(t, fx_open(&s, strings.to_string(b)), Error.None)
+	fx_draw(&s, 0)
+	testing.expect_value(t, s.r.limited, bit_set[vg.Limit]{})
+	testing.expect(t, near(px(&s, 10, 10), RED))
 }
 
 // Hostile input (limits.odin): each file finishes quickly, cut short with the

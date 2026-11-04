@@ -1248,3 +1248,168 @@ test_focal_gradient :: proc(t: ^testing.T) {
 	// Concentric with a focal radius: (|p| - fr) / (r - fr).
 	testing.expect(t, abs(focal_gradient_t({6, 0}, 10, 2, {1e-4, 0}) - 0.5) < 1e-3)
 }
+
+@(test)
+test_path_svg_after_close_and_exponent :: proc(t: ^testing.T) {
+	p: Path
+	defer path_destroy(&p)
+	// Numbers directly after Z (invalid per SVG grammar) must stop parsing
+	// cleanly rather than looping forever.
+	path_svg(&p, "M0 0 L10 10 Z 99 100")
+	testing.expect(t, len(p.contours) == 1 && p.contours[0].closed)
+
+	path_reset(&p)
+	// A bare 'e' without exponent digits does not consume 'e' as part of the number.
+	path_svg(&p, "M10 20 L30e 40")
+	testing.expect_value(t, len(p.pts), 1)
+}
+
+@(test)
+test_path_dash_zero_initial_and_extreme_phase :: proc(t: ^testing.T) {
+	p, out: Path
+	flat: Flat_Path
+	defer path_destroy(&p)
+	defer path_destroy(&out)
+	defer flat_path_destroy(&flat)
+	path_move_to(&p, 0, 0)
+	path_line_to(&p, 20, 0)
+
+	// A leading zero-length dash at phase 0 emits a tiny dash at the start (x = 0)
+	// rather than skipping straight to x = 10.
+	ok := path_dash(&p, []f32{0, 10}, 0, 0, &out, &flat)
+	testing.expect(t, ok && len(out.contours) == 2)
+	testing.expect_value(t, out.pts[0], Vec2{0, 0})
+	testing.expect(t, out.pts[1].x < 1e-4)
+
+	// Extreme negative phase terminates without hanging.
+	path_reset(&out)
+	ok = path_dash(&p, []f32{5, 5}, -1e12, 0, &out, &flat)
+	testing.expect(t, ok && len(out.contours) > 0)
+}
+
+@(test)
+test_scissor_as_rect_scaled :: proc(t: ^testing.T) {
+	vb: Void_Backend
+	c: Canvas
+	canvas_init(&c, void_backend(&vb))
+	defer canvas_destroy(&c)
+	set_size(&c, 200, 200)
+	scale(&c, 2, 3)
+	scissor(&c, 5, 4, 10, 8)
+	rect, ok := current_scissor_rect(&c).?
+	testing.expect(t, ok)
+	testing.expect_value(t, rect, Rect{10, 12, 20, 24})
+}
+
+@(test)
+test_canvas_truncate_merged_shapes :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 32, 32)
+	defer sw_close(&s)
+	c := &s.canvas
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 16, 16)
+	fill_path(c, &p, paint_color(rgb(255, 0, 0)))
+	mark := canvas_mark(c)
+	// Second shape merges into the existing Cmd_Draw_Shapes command.
+	path_reset(&p)
+	path_rect(&p, 16, 16, 16, 16)
+	fill_path(c, &p, paint_color(rgb(0, 0, 255)))
+	canvas_truncate(c, mark)
+	flush(c)
+	testing.expect_value(t, px(&s, 8, 8), [4]u8{255, 0, 0, 255})
+	testing.expect_value(t, px(&s, 24, 24), [4]u8{0, 0, 0, 0})
+}
+
+@(test)
+test_morphology_erode_outside_valid :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 16, 16)
+	defer sw_close(&s)
+	c := &s.canvas
+	src_px: [16 * 16 * 4]u8
+	for &b in src_px {
+		b = 255
+	}
+	src_id, _ := create_image(c, image_source_rgba(src_px[:], 16, 16), {.Premultiplied})
+	dst_id, _ := create_image_empty(c, 16, 16, .RGBA8, {.Premultiplied})
+	filter_image(c, dst_id, Morphology{radius = {1, 1}, dilate = false, valid = {4, 4, 8, 8}}, src_id)
+	flush(c)
+	d := image_store_get(&c.images, dst_id).image.pixels
+	// Inside valid and away from its boundary: opaque white.
+	testing.expect_value(t, d[(8 * 16 + 8) * 4 + 3], 255)
+	// Outside valid: eroded to transparent 0, not 1.
+	testing.expect_value(t, d[(1 * 16 + 1) * 4 + 3], 0)
+}
+
+// A feathered fill keeps its soft edge on software, as the shape shader does.
+@(test)
+test_sw_feather :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	c := &s.canvas
+	clear_rect(c, 0, 0, 64, 64, TRANSPARENT)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 20, 20, 24, 24)
+	shape, ok := shape_from_path(&p)
+	testing.expect(t, ok)
+	defer shape_destroy(&shape)
+	paint := paint_color(WHITE)
+	paint.feather = 4
+	fill_shape(c, &shape, paint)
+	flush(c)
+	testing.expectf(t, px(&s, 16, 32)[3] > 10, "outside the edge: %v", px(&s, 16, 32))
+	testing.expectf(t, abs(int(px(&s, 20, 32)[3]) - 128) < 40, "on the edge: %v", px(&s, 20, 32))
+	testing.expectf(t, px(&s, 24, 32)[3] < 250 && px(&s, 24, 32)[3] > 128, "inside the edge: %v", px(&s, 24, 32))
+}
+
+// A layer of hairlines isn't a group (the group shader draws fills); a layer
+// of fills is.
+@(test)
+test_layer_group_hairlines :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 10, 10, 40, 40)
+	shape, ok := shape_from_path(&p, outline = true)
+	testing.expect(t, ok)
+	defer shape_destroy(&shape)
+	groups :: proc(c: ^Canvas) -> (n: int) {
+		for cmd in c.commands {
+			if d, is_draw := cmd.type.(Cmd_Draw_Shapes); is_draw && d.group != 0 {
+				n += 1
+			}
+		}
+		return
+	}
+	layer_stack_begin(&ls, c, 64, 64)
+	layer_push(&ls, c, {opacity = 0.5})
+	hairline_shape(c, &shape, paint_color(WHITE), 1)
+	layer_pop(&ls, c)
+	testing.expect_value(t, groups(c), 0)
+	layer_push(&ls, c, {opacity = 0.5})
+	fill_shape(c, &shape, paint_color(WHITE))
+	fill_shape(c, &shape, paint_color(WHITE), transform_translation(4, 4))
+	layer_pop(&ls, c)
+	testing.expect_value(t, groups(c), 1)
+	layer_stack_end(&ls, c)
+	flush(c)
+}
+
+// A font collection says when its fallback isn't a font.
+@(test)
+test_font_collection_bad_fallback :: proc(t: ^testing.T) {
+	fonts: Font_Collection
+	testing.expect(t, !font_collection_init(&fonts, []u8{1, 2, 3, 4}))
+	font_collection_destroy(&fonts)
+	testing.expect(t, font_collection_init(&fonts))
+	font_collection_destroy(&fonts)
+}

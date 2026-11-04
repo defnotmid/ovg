@@ -188,6 +188,10 @@ Layer_Stack :: struct {
 	// Counts `layer_release` calls.
 	releases:  u32,
 	scratch:   Path,
+	// Scratch arrays for `apply_filter`, reused across filter evaluations.
+	filter_results: [dynamic]Image_Id,
+	filter_rects:   [dynamic]Bounds,
+	filter_last:    [dynamic]int,
 }
 
 // Pooled images and tiles unused for this many frames are freed.
@@ -238,6 +242,9 @@ layer_stack_destroy :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	delete(ls.pool)
 	delete(ls.frames)
 	delete(ls.targets)
+	delete(ls.filter_results)
+	delete(ls.filter_rects)
+	delete(ls.filter_last)
 	path_destroy(&ls.scratch)
 	ls^ = {}
 }
@@ -571,6 +578,12 @@ layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bound
 	d, ok := cmd.type.(Cmd_Draw_Shapes)
 	if !ok || d.group != 0 || cmd.composite_operation != composite_state_from_op(.Source_Over) {
 		return false
+	}
+	// The group shader draws fills; hairlines keep their own.
+	for inst in c.shapes[d.instances.start:][:d.instances.count] {
+		if inst.hairline > 0 {
+			return false
+		}
 	}
 	resize(&c.commands, f.mark.commands)
 	o := f.opacity
@@ -907,6 +920,8 @@ layer_backdrop_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Path, sigma: f32) 
 	// the blur does.
 	w := layer_bucket(u32(x1 - x0), info.width)
 	h := layer_bucket(u32(y1 - y0), info.height)
+	x0 = min(x0, ox + f32(info.width - w))
+	y0 = min(y0, oy + f32(info.height - h))
 	region := layer_acquire(ls, c, w, h)
 	layer_draw_image(ls, c, region, w, h, backdrop, ox - x0, oy - y0, f32(info.width), f32(info.height))
 	blurred := layer_acquire(ls, c, w, h)

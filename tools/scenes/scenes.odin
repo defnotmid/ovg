@@ -82,6 +82,7 @@ ALL := [?]Scene {
 	{"paint_transform", scene_paint_transform},
 	{"program", scene_program},
 	{"layers", scene_layers},
+	{"hairline_group", scene_hairline_group},
 	{"layer_masks", scene_layer_masks},
 	{"layer_filters", scene_layer_filters},
 	{"filters_more", scene_filters_more},
@@ -785,4 +786,23 @@ scene_program :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.path_rounded_rect(p, -75, -30, 150, 60, 10)
 	vg.fill_path(c, p, vg.paint_image(r.prog_out, -75, -30, 150, 60, 0, 0.9))
 	vg.restore(c)
+}
+
+// Hairlines in a layer with opacity: as hairlines, not filled.
+scene_hairline_group :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H)
+	p: vg.Path
+	defer vg.path_destroy(&p)
+	vg.path_rect(&p, 60, 40, 120, 90)
+	vg.path_circle(&p, 120, 85, 30)
+	shape := new(vg.Shape)
+	ok: bool
+	shape^, ok = vg.shape_from_path(&p, outline = true)
+	assert(ok)
+	append(&r.frame_shapes, shape)
+	vg.layer_push(ls, c, {opacity = 0.5})
+	vg.hairline_shape(c, shape, vg.paint_color(vg.WHITE), 2)
+	vg.layer_pop(ls, c)
+	vg.layer_stack_end(ls, c)
 }

@@ -68,11 +68,11 @@ path_dash :: proc(src: ^Path, dashes: []f32, offset: f32, total_length: f32, dst
 			phase += total * scale
 		}
 		d.idx = 0
-		for phase >= dash_length(&d) {
+		for steps := 0; phase > 0 && phase >= dash_length(&d) && steps < n; steps += 1 {
 			phase -= dash_length(&d)
 			d.idx = (d.idx + 1) % n
 		}
-		d.remaining = dash_length(&d) - phase
+		d.remaining = max(dash_length(&d) - phase, 1e-6)
 		d.on = d.idx % 2 == 0
 		if d.on {
 			path_move_to(dst, start.x, start.y)
@@ -245,7 +245,7 @@ path_flatten_contours :: proc(p: ^Path, first, count: int, out: ^Flat_Path, segm
 			}
 			q := s.p
 			approx := vec_len(q[1] - q[0]) + vec_len(q[2] - q[1]) + vec_len(q[3] - q[2])
-			n := clamp(int(approx / segment), 2, 256)
+			n := clamp(int(approx / max(segment, 1e-4)), 2, 256)
 			append(&out.segs, Flat_Segment{u32(len(out.points)), u32(n)})
 			for k in 1 ..= n {
 				append(&out.points, cv.cubic_at(q, f32(k) / f32(n)))

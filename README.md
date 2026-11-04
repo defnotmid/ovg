@@ -64,7 +64,7 @@ packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.12), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.9), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.24) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.10), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.25) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -72,9 +72,9 @@ packages:
 
 ```sh
 git clone https://github.com/defnotmid/ovg
-git clone -b v0.0.12 https://github.com/defnotmid/oglyph
-git clone -b v0.0.9 https://github.com/defnotmid/ocurves
-git clone -b v0.0.24 https://github.com/defnotmid/oicut
+git clone -b v0.0.13 https://github.com/defnotmid/oglyph
+git clone -b v0.0.10 https://github.com/defnotmid/ocurves
+git clone -b v0.0.25 https://github.com/defnotmid/oicut
 ```
 
 ```odin
@@ -424,8 +424,8 @@ for run in layout.runs {
 
 `ovg/svg` parses SVG markup (`svg/svg.odin`, with a copy of
 `core:encoding/xml` in `svg/xml`: Odin dev-2026-11's drops an element's
-attributes past its 8th in a small file, and the copy keeps them until Odin's
-does) into
+attributes past its 8th in a small file and never returns from a `<![` that
+doesn't start CDATA, and the copy fixes both until Odin's does) into
 an `svg.Document`, a render-ready, data-oriented copy in the spirit of usvg:
 flat tables of nodes (parent / first child / next indices, local transform,
 object bounding box, effects by index), shapes (path data stored once in
@@ -555,9 +555,11 @@ vg.layer_stack_end(&ls, &c)
 
 SVG and Lottie files may come from anyone: parsing and drawing are bounded
 by `Limits` (`limits.odin`), one table row per kind of work a small file can
-multiply: nesting depth, SVG elements (what each `<use>` draws included), CSS
-selector steps, filter primitives, feTurbulence octaves, star points,
-repeater copies and layers per Lottie draw, dashes per stroke, COLR paints
+multiply: nesting depth, SVG elements (what each `<use>` draws and each
+element's copy of a filter included), CSS selector steps, nodes and effect
+passes per SVG draw, filter primitives, feTurbulence octaves, star points,
+repeater copies, repeated contours and layers per Lottie draw, dashes per
+stroke, COLR paints
 per glyph and decoded image pixels. Past a limit the work is cut short (a
 stroke with too many dashes draws undashed) and the limit is reported: a
 warning in `doc.warnings`, `lottie.Renderer.limited` after a draw,

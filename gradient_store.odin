@@ -45,7 +45,10 @@ gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient,
 	id = image_store_alloc(images, {{.Repeat_Y}, GRADIENT_RAMP_WIDTH, 1, .RGBA16F}) or_return
 	ramp: [GRADIENT_RAMP_WIDTH][4]f16
 	gradient_synthesize(g, &ramp)
-	image_store_update(images, id, {.RGBA16F, slice.to_bytes(ramp[:]), GRADIENT_RAMP_WIDTH, 1, 0}, 0, 0) or_return
+	if err = image_store_update(images, id, {.RGBA16F, slice.to_bytes(ramp[:]), GRADIENT_RAMP_WIDTH, 1, 0}, 0, 0); err != nil {
+		image_store_remove(images, id)
+		return {}, err
+	}
 	s.this_frame[key] = id
 	return id, nil
 }
@@ -81,6 +84,9 @@ gradient_synthesize :: proc "contextless" (g: Multi_Stop_Gradient, dest: ^[GRADI
 	last := g.stops[len(g.stops) - 1]
 	if last.offset < 1 {
 		gradient_span(dest, last.color, last.color, last.offset, 1)
+	} else {
+		c := last.color
+		dest[GRADIENT_RAMP_WIDTH - 1] = {f16(clamp(c.r * c.a, 0, 1)), f16(clamp(c.g * c.a, 0, 1)), f16(clamp(c.b * c.a, 0, 1)), f16(clamp(c.a, 0, 1))}
 	}
 }
 
