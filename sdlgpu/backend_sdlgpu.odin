@@ -97,6 +97,10 @@ Image :: struct {
 	flags:    vg.Image_Flags,
 	// The caller's texture (image_borrow_texture), never released here.
 	borrowed: bool,
+	// The bytes of its last update, and the transfer buffer of updates that
+	// repeat that size (`update`).
+	update_size: u32,
+	transfer:    ^sdl.GPUTransferBuffer,
 }
 
 // A backend-owned texture kept across frames, with the frame it was last
@@ -528,7 +532,14 @@ image_store_texture :: proc(images: ^vg.Image_Store, id: vg.Image_Id) -> ^sdl.GP
 image_borrow_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id, texture: ^sdl.GPUTexture, width, height: u32, format: vg.Pixel_Format, flags: vg.Image_Flags = {}) -> vg.Image_Id {
 	b := (^SDL_Backend)(c.backend.data)
 	info := vg.Image_Info{flags, width, height, format}
-	img := Image{texture, texture_format(format), width, height, flags, true}
+	img := Image {
+		texture  = texture,
+		format   = texture_format(format),
+		width    = width,
+		height   = height,
+		flags    = flags,
+		borrowed = true,
+	}
 	if entry := vg.image_store_get(&c.images, id); entry != nil && entry.image.user != nil && (^Image)(entry.image.user).borrowed {
 		(^Image)(entry.image.user)^ = img
 		entry.info = info
@@ -597,6 +608,9 @@ release_image :: proc(b: ^SDL_Backend, img: ^Image) {
 	// SDL defers the release until submitted work no longer uses it.
 	if !img.borrowed {
 		sdl.ReleaseGPUTexture(b.device, img.texture)
+	}
+	if img.transfer != nil {
+		sdl.ReleaseGPUTransferBuffer(b.device, img.transfer)
 	}
 	free(img, b.allocator)
 }
@@ -683,33 +697,67 @@ sdl_update_image :: proc(data: rawptr, image: ^vg.Backend_Image, info: vg.Image_
 				d[col * 4 + 3] = 255
 			}
 		}
-		return upload(b, img, px, x, y, src.width, src.height)
+		return update(b, img, px, x, y, src.width, src.height)
 	}
 	if stride == src.width * bpp {
-		return upload(b, img, src.data[:src.width * src.height * bpp], x, y, src.width, src.height)
+		return update(b, img, src.data[:src.width * src.height * bpp], x, y, src.width, src.height)
 	}
 	packed := make([]u8, int(src.width * src.height * bpp), context.temp_allocator)
 	for row in 0 ..< src.height {
 		copy(packed[row * src.width * bpp:][:src.width * bpp], src.data[row * stride:][:src.width * bpp])
 	}
-	return upload(b, img, packed, x, y, src.width, src.height)
+	return update(b, img, packed, x, y, src.width, src.height)
 }
 
-// Copies tightly packed pixels into a region of `img` with its own command
-// buffer, submitted before any later frame.
+// An update of `img`: one of the same size as its last goes through a transfer
+// buffer the image keeps, any other through one made for it. Each transfer
+// buffer is a GPU allocation of its own, too dear for every frame of a video,
+// and most images are filled once and should keep nothing. When its buffers
+// are all in flight SDL adds another of that size, and frees them only with
+// the release; so another size drops them, and an image keeps no more than
+// its updates of this size had in flight at once.
+@(private = "file")
+update :: proc(b: ^SDL_Backend, img: ^Image, pixels: []u8, x, y, w, h: u32) -> vg.Error {
+	size := u32(len(pixels))
+	// A borrowed image's struct is overwritten when it follows a new texture.
+	if size != img.update_size || img.borrowed {
+		img.update_size = size
+		if img.transfer != nil {
+			sdl.ReleaseGPUTransferBuffer(b.device, img.transfer)
+			img.transfer = nil
+		}
+		return upload(b, img, pixels, x, y, w, h)
+	}
+	if img.transfer == nil {
+		img.transfer = sdl.CreateGPUTransferBuffer(b.device, {usage = .UPLOAD, size = size})
+		if img.transfer == nil {
+			return .Out_Of_Memory
+		}
+	}
+	return upload_through(b, img, img.transfer, pixels, x, y, w, h)
+}
+
+// Copies tightly packed pixels into a region of `img` through a transfer buffer
+// made for them.
 @(private)
 upload :: proc(b: ^SDL_Backend, img: ^Image, pixels: []u8, x, y, w, h: u32) -> vg.Error {
-	size := u32(len(pixels))
-	transfer := sdl.CreateGPUTransferBuffer(b.device, {usage = .UPLOAD, size = size})
+	transfer := sdl.CreateGPUTransferBuffer(b.device, {usage = .UPLOAD, size = u32(len(pixels))})
 	if transfer == nil {
 		return .Out_Of_Memory
 	}
 	defer sdl.ReleaseGPUTransferBuffer(b.device, transfer)
-	mapped := sdl.MapGPUTransferBuffer(b.device, transfer, false)
+	return upload_through(b, img, transfer, pixels, x, y, w, h)
+}
+
+// The copy, with its own command buffer, submitted before any later frame. The
+// map cycles, leaving alone what an earlier copy has yet to read.
+@(private = "file")
+upload_through :: proc(b: ^SDL_Backend, img: ^Image, transfer: ^sdl.GPUTransferBuffer, pixels: []u8, x, y, w, h: u32) -> vg.Error {
+	mapped := sdl.MapGPUTransferBuffer(b.device, transfer, true)
 	if mapped == nil {
 		return .Out_Of_Memory
 	}
-	mem.copy(mapped, raw_data(pixels), int(size))
+	mem.copy(mapped, raw_data(pixels), len(pixels))
 	sdl.UnmapGPUTransferBuffer(b.device, transfer)
 
 	cmd := sdl.AcquireGPUCommandBuffer(b.device)

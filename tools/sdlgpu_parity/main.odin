@@ -105,11 +105,48 @@ main :: proc() {
 		delete(b)
 	}
 
-	total := 2 * len(scenes.ALL) + 2
+	if !updates_check(&gpu, &gpu_canvas, tex) {
+		failed += 1
+	}
+
+	total := 2 * len(scenes.ALL) + 3
 	fmt.printfln("%d/%d checks match (images in %s)", total - failed, total, out_dir)
 	if failed > 0 {
 		os.exit(1)
 	}
+}
+
+// What an image keeps of its updates: nothing when filled once, one transfer
+// buffer while they repeat a size, nothing after another size, and nothing for
+// a borrowed texture (whose struct is overwritten when it follows a new one).
+updates_check :: proc(gpu: ^vgsdl.SDL_Backend, c: ^vg.Canvas, tex: ^sdl.GPUTexture) -> bool {
+	px: [16 * 16 * 4]u8
+	whole := vg.image_source_rgba(px[:], 16, 16)
+	part := vg.image_source_rgba(px[:], 8, 8)
+	keeps :: proc(c: ^vg.Canvas, id: vg.Image_Id) -> ^sdl.GPUTransferBuffer {
+		return (^vgsdl.Image)(vg.image_store_get(&c.images, id).image.user).transfer
+	}
+	id, _ := vg.create_image(c, whole)
+	defer vg.delete_image(c, id)
+	filled_once := keeps(c, id)
+	vg.update_image(c, id, whole, 0, 0)
+	repeated := keeps(c, id)
+	vg.update_image(c, id, whole, 0, 0)
+	still := keeps(c, id)
+	vg.update_image(c, id, part, 4, 4)
+	smaller := keeps(c, id)
+	vg.update_image(c, id, part, 0, 8)
+	smaller_repeated := keeps(c, id)
+
+	borrowed := vgsdl.image_borrow_texture(c, {}, tex, scenes.W, scenes.H, .RGBA8)
+	defer vg.delete_image(c, borrowed)
+	vg.update_image(c, borrowed, whole, 0, 0)
+	vg.update_image(c, borrowed, whole, 0, 0)
+	if filled_once != nil || repeated == nil || still != repeated || smaller != nil || smaller_repeated == nil || keeps(c, borrowed) != nil {
+		fmt.printfln("FAIL updates_check: once %v, repeated %v, still %v, smaller %v, smaller repeated %v, borrowed %v", filled_once, repeated, still, smaller, smaller_repeated, keeps(c, borrowed))
+		return false
+	}
+	return true
 }
 
 // The scene's pixels, drawn with or without motion blur.

@@ -136,7 +136,11 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   pass per target run) and waits on a fence, unless
   `gpu.frames_in_flight` (at most 3) lets that many frames keep running while
   the next is recorded; reading a frame back waits for its own copy. Image
-  uploads use their own command buffers, submitted before the frame's.
+  uploads use their own command buffers, submitted before the frame's. An
+  `update_image` of the same size as the image's last goes through transfer
+  buffers the image keeps, as many as such updates had in flight at once (3 to
+  4 at 2 frames in flight), until it is deleted or updated at another size; an
+  image filled once keeps none.
   Filter intermediates and the buffers a frame needs are
   created before its command buffer is recorded: SDL_GPU submits a command
   buffer when it creates a texture, a submit may defragment memory (moving

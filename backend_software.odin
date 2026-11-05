@@ -563,12 +563,12 @@ Raster :: struct {
 	twin:    Sw_Twin,
 }
 
-// The command's drawable area on the run's target (its scissor applied).
 @(private = "file")
 clamp_i32 :: #force_inline proc "contextless" (v: f32, lo, hi: i32) -> i32 {
 	return i32(clamp(v, f32(lo), f32(hi)))
 }
 
+// The command's drawable area on the run's target (its scissor applied).
 @(private = "file")
 sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 	r := Raster {

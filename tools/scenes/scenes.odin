@@ -21,6 +21,8 @@ Scene :: struct {
 
 Resources :: struct {
 	checker:  vg.Image_Id,
+	// Written again each time their scene is drawn.
+	updated:  [3]vg.Image_Id,
 	// Vera, and a layout of text in it (`lay`).
 	fonts:    vg.Font_Collection,
 	layout:   vg.Text_Layout,
@@ -101,6 +103,7 @@ ALL := [?]Scene {
 	{"hairlines", scene_hairlines},
 	{"markers", scene_markers},
 	{"motion", scene_motion},
+	{"image_updates", scene_image_updates},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the
@@ -154,6 +157,9 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 		}
 	}
 	r.checker, _ = vg.create_image(c, vg.image_source_rgba(pix[:], 8, 8))
+	r.updated[0], _ = vg.create_image_empty(c, 64, 64, .RGBA8, {.Nearest})
+	r.updated[1], _ = vg.create_image_empty(c, 32, 32, .RGB8, {.Nearest})
+	r.updated[2], _ = vg.create_image_empty(c, 32, 32, .Gray8, {.Nearest})
 	vg.font_collection_init(&r.fonts, FONT_DATA)
 	vg.font_collection_init(&r.svg_fonts, FONT_DATA)
 	vg.font_collection_init(&r.emoji_fonts, FONT_DATA)
@@ -393,6 +399,55 @@ scene_images :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.path_reset(p)
 	vg.path_circle(p, 70, 150, 36)
 	vg.fill_path(c, p, vg.paint_image_tint(r.checker, 30, 110, 24, 24, 0.2, vg.rgba(255, 200, 200, 220)))
+}
+
+// Images written many times before their frame draws them, so the copies find
+// each other in flight: a size repeated, smaller, larger, the same bytes in
+// another shape, packed and with a stride, through each format's way to the
+// backend. Each texel shows its last write.
+scene_image_updates :: proc(c: ^vg.Canvas, r: ^Resources) {
+	Write :: struct {
+		x, y, w, h, stride, seed: u32,
+	}
+	write :: proc(c: ^vg.Canvas, id: vg.Image_Id, format: vg.Pixel_Format, writes: []Write) {
+		channels := vg.bytes_per_pixel(format)
+		for w in writes {
+			px: [64 * 72 * 4]u8
+			stride := w.stride if w.stride != 0 else w.w * channels
+			for y in 0 ..< w.h {
+				for x in 0 ..< w.w {
+					for k in 0 ..< channels {
+						px[y * stride + x * channels + k] = u8(((x + k * 3) * 7 + y * 11) * w.seed) if k < 3 else 255
+					}
+				}
+			}
+			vg.update_image(c, id, {format, px[:], w.w, w.h, w.stride}, w.x, w.y)
+		}
+	}
+	rgba := [?]Write {
+		{0, 0, 64, 64, 0, 1},
+		{0, 0, 64, 64, 0, 2},
+		{0, 0, 64, 64, 64 * 4 + 12, 3},
+		{8, 8, 32, 32, 0, 4},
+		{24, 24, 32, 32, 0, 5},
+		{48, 0, 16, 64, 0, 6},
+		{0, 48, 64, 16, 0, 7},
+		{20, 4, 24, 24, 24 * 4 + 12, 8},
+		{20, 28, 24, 24, 0, 9},
+	}
+	rgb := [?]Write{{0, 0, 32, 32, 0, 10}, {0, 0, 32, 32, 0, 11}, {4, 4, 16, 16, 0, 12}, {12, 12, 16, 16, 16 * 3 + 5, 13}}
+	gray := [?]Write{{0, 0, 32, 32, 0, 14}, {0, 0, 32, 32, 32 + 7, 15}, {4, 4, 16, 16, 0, 16}, {12, 12, 16, 16, 0, 17}}
+	write(c, r.updated[0], .RGBA8, rgba[:])
+	write(c, r.updated[1], .RGB8, rgb[:])
+	write(c, r.updated[2], .Gray8, gray[:])
+	p := &r.path
+	for id, i in r.updated {
+		x := f32(8 + 72 * i)
+		size: f32 = 64 if i == 0 else 32
+		vg.path_reset(p)
+		vg.path_rect(p, x, 8, size, size)
+		vg.fill_path(c, p, vg.paint_image(id, x, 8, size, size, 0))
+	}
 }
 
 scene_scissor :: proc(c: ^vg.Canvas, r: ^Resources) {
