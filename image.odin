@@ -3,8 +3,8 @@ package ovg
 import "core:math"
 
 Pixel_Format :: enum u8 {
-	RGB8,
-	RGBA8,
+	// From 1: zero is no format, so a source left unset matches no image.
+	RGBA8 = 1,
 	Gray8,
 	// 16-bit single channel (little-endian u16, sampled as value / 65535):
 	// deep planes, e.g. 10- and 12-bit video, for custom programs.
@@ -17,8 +17,6 @@ Pixel_Format :: enum u8 {
 
 bytes_per_pixel :: proc "contextless" (f: Pixel_Format) -> u32 {
 	switch f {
-	case .RGB8:
-		return 3
 	case .RGBA8:
 		return 4
 	case .Gray8:
@@ -64,10 +62,6 @@ image_source_rgba :: proc "contextless" (data: []u8, width, height: u32) -> Imag
 	return {.RGBA8, data, width, height, 0}
 }
 
-image_source_rgb :: proc "contextless" (data: []u8, width, height: u32) -> Image_Source {
-	return {.RGB8, data, width, height, 0}
-}
-
 image_source_gray :: proc "contextless" (data: []u8, width, height: u32) -> Image_Source {
 	return {.Gray8, data, width, height, 0}
 }
@@ -99,7 +93,7 @@ image_id_valid :: #force_inline proc "contextless" (id: Image_Id) -> bool {
 // ---- image filters ------------------------------------------------------------------
 //
 // Filters are recorded by `filter_image` and run in order at flush. They read
-// and write premultiplied images of one size (Gray8 and RGB8 sources are
+// and write premultiplied images of one size (Gray8 and Gray16 sources are
 // read as GPU samplers return them, see `tex_type_for`). The target may be one
 // of the inputs. Color math follows SVG 1.1 Filter Effects / W3C Compositing:
 // matrices and blend functions act on straight (unpremultiplied) color in

@@ -24,8 +24,8 @@ PROGRAM_MAX_CHANNELS :: 4
 
 // Samples input image `channel` at normalized `uv` (origin top-left) and mip
 // level `lod` with GL semantics: bilinear or nearest per the image flags,
-// clamp-to-edge or repeat, texel values as stored (Gray8 and Gray16 are (g, 0, 0, 1),
-// RGB8 has alpha 1). The software backend has no mipmaps; `lod` is ignored.
+// clamp-to-edge or repeat, texel values as stored (Gray8 and Gray16 are (g, 0, 0, 1)).
+// The software backend has no mipmaps; `lod` is ignored.
 Program_Sample_Proc :: #type proc(data: rawptr, channel: int, uv: [2]f32, lod: f32) -> [4]f32
 
 Program_Sampler :: struct {

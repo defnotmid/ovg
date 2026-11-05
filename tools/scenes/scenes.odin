@@ -22,7 +22,7 @@ Scene :: struct {
 Resources :: struct {
 	checker:  vg.Image_Id,
 	// Written again each time their scene is drawn.
-	updated:  [3]vg.Image_Id,
+	updated:  [2]vg.Image_Id,
 	// Vera, and a layout of text in it (`lay`).
 	fonts:    vg.Font_Collection,
 	layout:   vg.Text_Layout,
@@ -158,8 +158,7 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 	}
 	r.checker, _ = vg.create_image(c, vg.image_source_rgba(pix[:], 8, 8))
 	r.updated[0], _ = vg.create_image_empty(c, 64, 64, .RGBA8, {.Nearest})
-	r.updated[1], _ = vg.create_image_empty(c, 32, 32, .RGB8, {.Nearest})
-	r.updated[2], _ = vg.create_image_empty(c, 32, 32, .Gray8, {.Nearest})
+	r.updated[1], _ = vg.create_image_empty(c, 32, 32, .Gray8, {.Nearest})
 	vg.font_collection_init(&r.fonts, FONT_DATA)
 	vg.font_collection_init(&r.svg_fonts, FONT_DATA)
 	vg.font_collection_init(&r.emoji_fonts, FONT_DATA)
@@ -403,8 +402,7 @@ scene_images :: proc(c: ^vg.Canvas, r: ^Resources) {
 
 // Images written many times before their frame draws them, so the copies find
 // each other in flight: a size repeated, smaller, larger, the same bytes in
-// another shape, packed and with a stride, through each format's way to the
-// backend. Each texel shows its last write.
+// another shape, packed and with a stride. Each texel shows its last write.
 scene_image_updates :: proc(c: ^vg.Canvas, r: ^Resources) {
 	Write :: struct {
 		x, y, w, h, stride, seed: u32,
@@ -435,11 +433,9 @@ scene_image_updates :: proc(c: ^vg.Canvas, r: ^Resources) {
 		{20, 4, 24, 24, 24 * 4 + 12, 8},
 		{20, 28, 24, 24, 0, 9},
 	}
-	rgb := [?]Write{{0, 0, 32, 32, 0, 10}, {0, 0, 32, 32, 0, 11}, {4, 4, 16, 16, 0, 12}, {12, 12, 16, 16, 16 * 3 + 5, 13}}
 	gray := [?]Write{{0, 0, 32, 32, 0, 14}, {0, 0, 32, 32, 32 + 7, 15}, {4, 4, 16, 16, 0, 16}, {12, 12, 16, 16, 0, 17}}
 	write(c, r.updated[0], .RGBA8, rgba[:])
-	write(c, r.updated[1], .RGB8, rgb[:])
-	write(c, r.updated[2], .Gray8, gray[:])
+	write(c, r.updated[1], .Gray8, gray[:])
 	p := &r.path
 	for id, i in r.updated {
 		x := f32(8 + 72 * i)

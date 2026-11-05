@@ -615,8 +615,7 @@ release_image :: proc(b: ^SDL_Backend, img: ^Image) {
 	free(img, b.allocator)
 }
 
-// The texture format storing `f`. RGB8 is stored as RGBA8: three-byte
-// formats are not renderable.
+// The texture format storing `f`.
 texture_format :: proc "contextless" (f: vg.Pixel_Format) -> sdl.GPUTextureFormat {
 	switch f {
 	case .Gray8:
@@ -625,7 +624,7 @@ texture_format :: proc "contextless" (f: vg.Pixel_Format) -> sdl.GPUTextureForma
 		return .R16_UNORM
 	case .RGBA16F:
 		return .R16G16B16A16_FLOAT
-	case .RGB8, .RGBA8:
+	case .RGBA8:
 	}
 	return .R8G8B8A8_UNORM
 }
@@ -667,7 +666,7 @@ sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image,
 		}
 	} else {
 		w, h := max(info.width, 1), max(info.height, 1)
-		zero := make([]u8, int(w * h * vg.bytes_per_pixel(info.format if info.format != .RGB8 else .RGBA8)), context.temp_allocator)
+		zero := make([]u8, int(w * h * vg.bytes_per_pixel(info.format)), context.temp_allocator)
 		if uerr := upload(b, img, zero, 0, 0, w, h); uerr != nil {
 			release_image(b, img)
 			return {}, uerr
@@ -684,21 +683,6 @@ sdl_update_image :: proc(data: rawptr, image: ^vg.Backend_Image, info: vg.Image_
 	img := (^Image)(image.user)
 	bpp := vg.bytes_per_pixel(info.format)
 	stride := vg.image_source_stride(src)
-	if info.format == .RGB8 {
-		// Expand to RGBA8 with opaque alpha.
-		px := make([]u8, int(src.width * src.height * 4), context.temp_allocator)
-		for row in 0 ..< src.height {
-			s := src.data[row * stride:]
-			d := px[row * src.width * 4:]
-			for col in 0 ..< src.width {
-				d[col * 4 + 0] = s[col * 3 + 0]
-				d[col * 4 + 1] = s[col * 3 + 1]
-				d[col * 4 + 2] = s[col * 3 + 2]
-				d[col * 4 + 3] = 255
-			}
-		}
-		return update(b, img, px, x, y, src.width, src.height)
-	}
 	if stride == src.width * bpp {
 		return update(b, img, src.data[:src.width * src.height * bpp], x, y, src.width, src.height)
 	}

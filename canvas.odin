@@ -1083,7 +1083,7 @@ tex_type_for :: proc "contextless" (info: Image_Info) -> f32 {
 		return 0 if .Premultiplied in info.flags else 1
 	case .Gray8, .Gray16:
 		return 2
-	case .RGB8, .RGBA16F:
+	case .RGBA16F:
 		return 0
 	}
 	return 0

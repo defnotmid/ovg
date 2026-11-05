@@ -1043,8 +1043,7 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 
 // ---- texels -------------------------------------------------------------------------
 
-// Texel as a GPU sampler returns it: Gray8 and Gray16 are (g, 0, 0, 1), RGB8
-// has alpha 1.
+// Texel as a GPU sampler returns it: Gray8 and Gray16 are (g, 0, 0, 1).
 @(private = "file")
 fetch :: #force_inline proc "contextless" (t: Sw_Texture, x, y: u32) -> [4]f32 {
 	i := int(y * t.width + x)
@@ -1052,9 +1051,6 @@ fetch :: #force_inline proc "contextless" (t: Sw_Texture, x, y: u32) -> [4]f32 {
 	case .RGBA8:
 		p := t.pixels[i * 4:]
 		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])} / 255
-	case .RGB8:
-		p := t.pixels[i * 3:]
-		return {f32(p[0]) / 255, f32(p[1]) / 255, f32(p[2]) / 255, 1}
 	case .Gray8:
 		return {f32(t.pixels[i]) / 255, 0, 0, 1}
 	case .Gray16:
@@ -1130,9 +1126,6 @@ store_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, c: [4]
 	case .RGBA8:
 		p := t.pixels[i * 4:]
 		p[0], p[1], p[2], p[3] = to_unorm8(c[0]), to_unorm8(c[1]), to_unorm8(c[2]), to_unorm8(c[3])
-	case .RGB8:
-		p := t.pixels[i * 3:]
-		p[0], p[1], p[2] = to_unorm8(c[0]), to_unorm8(c[1]), to_unorm8(c[2])
 	case .Gray8:
 		t.pixels[i] = to_unorm8(c[0])
 	case .Gray16:

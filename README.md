@@ -165,7 +165,7 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   twin's, or the resolve's nearness). There is no depth or stencil buffer. Blur
   intermediates are kept per image shape and released after 30 frames
   unused.
-- RGB8 images are stored as RGBA8, Gray8 as R8, RGBA16F as
+- Gray8 images are stored as R8, Gray16 as R16, RGBA16F as
   `R16G16B16A16_FLOAT`. `Generate_Mipmaps` is ignored.
 - Tested on Linux (Vulkan, RADV) and macOS (Metal, Apple M4: tests and
   `tools/sdlgpu_parity` pass). The Windows path compiles
@@ -268,7 +268,7 @@ software and SDL_GPU backends (`filter_math.odin` and `shaders/ovg.slang`).
 
 `filter_image(c, target, filter, source)` records a filter that runs at flush,
 in order with drawing. Inputs and target are images of one size; the target
-may be one of the inputs. Filters read premultiplied color (Gray8/RGB8 as a
+may be one of the inputs. Filters read premultiplied color (Gray8/Gray16 as a
 GPU sampler returns them) and write premultiplied color.
 
 | `Image_Filter` | SVG | semantics |
