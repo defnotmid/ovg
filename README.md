@@ -22,6 +22,9 @@ Added in ovg:
   filled paths, keeping their curves (see Path booleans below).
 - **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
   modes and patterns, each sized to its content.
+- **Bloom**: a filter primitive, `.Bloom`: the light above a threshold, a Gaussian
+  over it, a share of that added, in linear light, with no pass at the layer's size
+  but the add (o3d's `scene.bloom` takes the same numbers and gives the same glow).
 - **SVG filters**: every SVG 1.1 primitive (blur, drop shadow, offset, flood,
   composite, merge, blend, colour matrix, component transfer, morphology,
   turbulence, diffuse / specular lighting, tile, displacement map, convolve

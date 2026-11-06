@@ -144,6 +144,33 @@ scene_layer_masks :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_stack_end(ls, c)
 }
 
+// Bloom: alone, on a small layer with a small and a large radius (the Gaussian on
+// the half-size image, then on a small one), and after a blur, in linear light.
+scene_bloom :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H)
+	background(c, r)
+	small := [1]vg.Filter_Primitive{{op = .Bloom, in1 = {kind = .Source_Graphic}, threshold = 0.5, intensity = 1.2, std = {4, 4}}}
+	f1 := vg.Filter{primitives = small[:]}
+	vg.layer_push(ls, c, {filter = &f1})
+	rect(c, r, 24, 24, 50, 30, vg.rgb(255, 255, 255))
+	vg.layer_pop(ls, c)
+	large := [1]vg.Filter_Primitive{{op = .Bloom, in1 = {kind = .Source_Graphic}, threshold = 0.3, intensity = 1.5, std = {24, 24}}}
+	f2 := vg.Filter{primitives = large[:]}
+	vg.layer_push(ls, c, {filter = &f2})
+	circle(c, r, 180, 60, 20, vg.rgb(255, 180, 40))
+	vg.layer_pop(ls, c)
+	after := [2]vg.Filter_Primitive {
+		{op = .Gaussian_Blur, in1 = {kind = .Source_Graphic}, std = {1, 1}},
+		{op = .Bloom, in1 = {kind = .Previous}, threshold = 0.4, intensity = 1, std = {10, 10}},
+	}
+	f3 := vg.Filter{primitives = after[:]}
+	vg.layer_push(ls, c, {filter = &f3})
+	rect(c, r, 100, 130, 60, 6, vg.rgb(120, 255, 200))
+	vg.layer_pop(ls, c)
+	vg.layer_stack_end(ls, c)
+}
+
 scene_layer_filters :: proc(c: ^vg.Canvas, r: ^Resources) {
 	ls := &r.layers
 	vg.layer_stack_begin(ls, c, W, H)

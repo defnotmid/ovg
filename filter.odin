@@ -43,6 +43,9 @@ Filter_Op :: enum u8 {
 	// feImage: `Filter.images[image]` fitted into the subregion (by
 	// default the filter region) as preserveAspectRatio says.
 	Image,
+	// in1's light above `threshold`, a Gaussian of `std` over it, `intensity` of
+	// that added to in1 (layer_bloom_into).
+	Bloom,
 }
 
 Image_Fit :: enum u8 {
@@ -143,6 +146,9 @@ Filter_Primitive :: struct {
 	image:        u16,
 	image_fit:    Image_Fit,
 	image_align:  Vec2,
+	// Bloom: light above this glows, and how much of the light above it is added.
+	threshold:    f32,
+	intensity:    f32,
 }
 
 Filter_Units :: enum u8 {
@@ -275,9 +281,12 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 	// Linear light needs about 12 bits to keep sRGB's dark levels (8 bits
 	// keep 9 of sRGB's first 49), so a linearRGB filter's images are half
 	// floats; an sRGB filter's are the layer's.
-	format := ls.format if f.srgb else .RGBA16F
+	// A bloom alone reads and writes the layer's encoding, its light linear inside
+	// it: no pass at the layer's size to convert either way.
+	encoded := !f.srgb && n_prims == 1 && f.primitives[0].op == .Bloom
+	format := ls.format if f.srgb || encoded else .RGBA16F
 	graphic := source
-	if !f.srgb {
+	if !f.srgb && !encoded {
 		graphic = layer_acquire(ls, c, w, h, format = format)
 		filter_image(c, graphic, Color_Space_Convert{to_linear = true}, source)
 		layer_release(ls, source)
@@ -350,6 +359,8 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		switch p.op {
 		case .Gaussian_Blur:
 			layer_blur_into(ls, c, out, in1, p.std * axis_scale, BLUR_MAX_EXACT_SIGMA)
+		case .Bloom:
+			layer_bloom_into(ls, c, out, in1, p.threshold, p.intensity, p.std * axis_scale, encoded)
 		case .Offset:
 			filter_offset_into(ls, c, out, in1, offset_px(xform, p.dx, p.dy))
 		case .Flood:
@@ -444,7 +455,7 @@ apply_filter :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Filter, source: Image_Id,
 		layer_release(ls, alpha)
 	}
 	layer_release(ls, graphic)
-	if !f.srgb {
+	if !f.srgb && !encoded {
 		back := layer_acquire(ls, c, w, h)
 		filter_image(c, back, Color_Space_Convert{to_linear = false}, final)
 		layer_release(ls, final)
@@ -609,7 +620,7 @@ filter_reach :: proc "contextless" (f: ^Filter, xform: Transform2D) -> (reach: V
 		b2 := is_bounded(p.in2, i, ok)
 		b := b1
 		switch p.op {
-		case .Gaussian_Blur:
+		case .Gaussian_Blur, .Bloom:
 			reach += blur_reach(p.std * axis, BLUR_MAX_EXACT_SIGMA)
 		case .Offset:
 			d := offset_px(xform, p.dx, p.dy)

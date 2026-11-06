@@ -828,6 +828,26 @@ layer_blur :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, sigma: f32) -> I
 	return dst
 }
 
+// The small image a blur `f` times too wide for its filter runs on: the canvas in
+// gw x gh cells, so that a moving window's blur doesn't shimmer; sw x sh of them,
+// from cell (c0, r0), under the window plus one each side for bilinear filtering.
+@(private = "file")
+layer_blur_cells :: proc(ls: ^Layer_Stack, f: f32) -> (gw, gh, c0, r0, sw, sh: u32) {
+	win := ls.window
+	cw, ch := f32(ls.width), f32(ls.height)
+	gw = max(u32(math.ceil(cw / f)), 1)
+	gh = max(u32(math.ceil(ch / f)), 1)
+	c0 = u32(max(math.floor(f32(win.x) * f32(gw) / cw) - 1, 0))
+	c1 := u32(min(math.ceil(f32(win.x + win.w) * f32(gw) / cw) + 1, f32(gw)))
+	r0 = u32(max(math.floor(f32(win.y) * f32(gh) / ch) - 1, 0))
+	r1 := u32(min(math.ceil(f32(win.y + win.h) * f32(gh) / ch) + 1, f32(gh)))
+	sw = layer_bucket(c1 - c0, gw)
+	sh = layer_bucket(r1 - r0, gh)
+	c0 = min(c0, gw - sw)
+	r0 = min(r0, gh - sh)
+	return
+}
+
 // Blurs `src` into `dst` (both of the window's size) with per-axis sigma in
 // pixels, `edge` beyond `src`. Above `max_exact` the blur runs on a copy
 // downscaled by sigma / max_exact, on the grid a whole-canvas copy would
@@ -841,19 +861,8 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 	}
 	win := ls.window
 	f := s / max_exact
-	// The canvas in gw x gh cells; cells under the window plus one each
-	// side for the bilinear filtering.
+	gw, gh, c0, r0, sw, sh := layer_blur_cells(ls, f)
 	cw, ch := f32(ls.width), f32(ls.height)
-	gw := max(u32(math.ceil(cw / f)), 1)
-	gh := max(u32(math.ceil(ch / f)), 1)
-	c0 := u32(max(math.floor(f32(win.x) * f32(gw) / cw) - 1, 0))
-	c1 := u32(min(math.ceil(f32(win.x + win.w) * f32(gw) / cw) + 1, f32(gw)))
-	r0 := u32(max(math.floor(f32(win.y) * f32(gh) / ch) - 1, 0))
-	r1 := u32(min(math.ceil(f32(win.y + win.h) * f32(gh) / ch) + 1, f32(gh)))
-	sw := layer_bucket(c1 - c0, gw)
-	sh := layer_bucket(r1 - r0, gh)
-	c0 = min(c0, gw - sw)
-	r0 = min(r0, gh - sh)
 	// Cell (i, j) of `small` is cell (c0 + i, r0 + j) of the canvas; the
 	// copies keep dst's precision.
 	info, _ := image_info(c, dst)
@@ -886,6 +895,39 @@ layer_blur_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, sigma:
 		f32(sh) * ch / f32(gh),
 	)
 	layer_release(ls, blurred)
+}
+
+// A bloom (`.Bloom`): `src` plus `intensity` of a Gaussian of `sigma` over its
+// light above `threshold`, as o3d's over a 3D frame, so the same numbers give the
+// same glow: per pixel at half its size, the Gaussian on a small image, added in
+// one pass at its size. `encoded`: `src` and `dst` are sRGB-encoded.
+layer_bloom_into :: proc(ls: ^Layer_Stack, c: ^Canvas, dst, src: Image_Id, threshold, intensity: f32, sigma: [2]f32, encoded: bool) {
+	win := ls.window
+	half_w, half_h := (win.w + 1) / 2, (win.h + 1) / 2
+	bright := layer_acquire(ls, c, half_w, half_h, format = .RGBA16F)
+	filter_image(c, bright, Bloom_Bright{threshold, encoded}, src)
+	s := max(sigma.x, sigma.y)
+	glow: Image_Id
+	uv: [4]f32
+	if s / 2 <= BLUR_MAX_EXACT_SIGMA {
+		glow = layer_acquire(ls, c, half_w, half_h, format = .RGBA16F)
+		filter_image(c, glow, Blur_XY{sigma.x / 2, sigma.y / 2, .Transparent}, bright)
+		uv = {1 / f32(half_w * 2), 1 / f32(half_h * 2), 0, 0}
+	} else {
+		f := s / BLUR_MAX_EXACT_SIGMA
+		gw, gh, c0, r0, sw, sh := layer_blur_cells(ls, f)
+		cw, ch := f32(ls.width), f32(ls.height)
+		scale := [2]f32{f32(gw) / cw, f32(gh) / ch}
+		small := layer_acquire(ls, c, sw, sh, format = .RGBA16F)
+		layer_draw_image(ls, c, small, sw, sh, bright, f32(win.x) * scale.x - f32(c0), f32(win.y) * scale.y - f32(r0), f32(win.w) * scale.x, f32(win.h) * scale.y)
+		glow = layer_acquire(ls, c, sw, sh, format = .RGBA16F)
+		filter_image(c, glow, Blur_XY{sigma.x / f, sigma.y / f, .Transparent}, small)
+		layer_release(ls, small)
+		uv = {scale.x / f32(sw), scale.y / f32(sh), (f32(win.x) * scale.x - f32(c0)) / f32(sw), (f32(win.y) * scale.y - f32(r0)) / f32(sh)}
+	}
+	layer_release(ls, bright)
+	filter_image(c, dst, Bloom_Add{glow, intensity, uv, encoded}, src)
+	layer_release(ls, glow)
 }
 
 // Blurs what the current target holds under `p` (current units and

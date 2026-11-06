@@ -770,7 +770,8 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		plan_filter_pass(p, lookup(p, cmd.image), nil, lookup(p, c.target_image), frag)
 		return
 	}
-	if src_info.width != dst_info.width || src_info.height != dst_info.height {
+	_, is_bright := filter.(vg.Bloom_Bright)
+	if !is_bright && (src_info.width != dst_info.width || src_info.height != dst_info.height) {
 		return
 	}
 
@@ -829,7 +830,8 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 	if vg.image_id_valid(backdrop) {
 		back_info, back_ok := vg.image_store_info(p.images, backdrop)
 		_, is_lut := filter.(vg.Component_Transfer)
-		if !back_ok || (!is_lut && (back_info.width != src_info.width || back_info.height != src_info.height)) {
+		_, is_glow := filter.(vg.Bloom_Add)
+		if !back_ok || (!is_lut && !is_glow && (back_info.width != src_info.width || back_info.height != src_info.height)) {
 			return
 		}
 		back_tt = vg.tex_type_for(back_info)
@@ -883,6 +885,13 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 		frag[11] = {f32(v.order.x), f32(v.order.y), f32(v.target.x), f32(v.target.y)}
 		frag[12] = {v.divisor, v.bias, f32(v.edge), 1 if v.preserve_alpha else 0}
 		set_valid(&frag, v.valid)
+	case vg.Bloom_Bright:
+		frag[10].w = f32(vg.Shader_Type.Filter_Bloom_Bright)
+		frag[0] = {v.threshold, 1 if v.encoded else 0, f32(src_info.width), f32(src_info.height)}
+	case vg.Bloom_Add:
+		frag[10].w = f32(vg.Shader_Type.Filter_Bloom_Add)
+		frag[0] = v.uv
+		frag[1] = {v.intensity, 1 if v.encoded else 0, 0, 0}
 	case vg.Gaussian_Blur, vg.Blur_XY, vg.Morphology, vg.Turbulence:
 		return
 	}

@@ -1026,7 +1026,7 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 	case .Texture_Copy_Unclipped:
 		result = apply_tex_type(sample(f.tex, u, v), p.tex_type) * p.inner_col if f.has_tex else p.inner_col
 		return result, true
-	case .Fill_Color, .Fill_Color_Unclipped, .Filter_Image, .Filter_Color_Matrix, .Filter_Blend, .Filter_Composite, .Filter_Color_Space, .Filter_Component_Transfer, .Filter_Morphology, .Filter_Lighting, .Filter_Tile, .Filter_Displacement, .Filter_Convolve, .Filter_Turbulence:
+	case .Fill_Color, .Fill_Color_Unclipped, .Filter_Image, .Filter_Color_Matrix, .Filter_Blend, .Filter_Composite, .Filter_Color_Space, .Filter_Component_Transfer, .Filter_Morphology, .Filter_Lighting, .Filter_Tile, .Filter_Displacement, .Filter_Convolve, .Filter_Turbulence, .Filter_Bloom_Bright, .Filter_Bloom_Add:
 		result = p.inner_col
 	}
 
@@ -1231,12 +1231,17 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		}
 		return
 	}
-	if dst.width != src.width || dst.height != src.height {
+	_, is_bright := filter.(Bloom_Bright)
+	if !is_bright && (dst.width != src.width || dst.height != src.height) {
 		return
 	}
 	src_tt := tex_type_for({src.flags, src.width, src.height, src.format})
 	job := Sw_Filter{src = src, src_tt = src_tt, dst = dst, filter = filter}
 	rows := int(dst.height)
+	if is_bright {
+		sw_bands(b, rows, &job, sw_bloom_bright_band)
+		return
+	}
 
 	if sx, sy, edge, is_blur := blur_params(filter); is_blur {
 		tmp := sw_blur_tmp(b, len(src.pixels))
@@ -1269,7 +1274,8 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 		ok: bool
 		job.back, ok = lookup_texture(images, id)
 		_, is_lut := filter.(Component_Transfer)
-		if !ok || (!is_lut && (job.back.width != src.width || job.back.height != src.height)) {
+		_, is_glow := filter.(Bloom_Add)
+		if !ok || (!is_lut && !is_glow && (job.back.width != src.width || job.back.height != src.height)) {
 			return
 		}
 		job.back_tt = tex_type_for({job.back.flags, job.back.width, job.back.height, job.back.format})
@@ -1334,6 +1340,26 @@ sw_morphology_band :: proc(data: rawptr, y0, y1: int) {
 
 // The filters that read only the pixel under them (and the backdrop's).
 @(private = "file")
+sw_bloom_bright_band :: proc(data: rawptr, y0, y1: int) {
+	j := (^Sw_Filter)(data)
+	v := j.filter.(Bloom_Bright)
+	above :: proc "contextless" (t: Sw_Texture, tt: f32, v: Bloom_Bright, x, y: u32) -> [4]f32 {
+		c := apply_tex_type(fetch(t, x, y), tt)
+		if v.encoded {
+			c = color_space_pixel(c, true)
+		}
+		return {max(c.r - v.threshold, 0), max(c.g - v.threshold, 0), max(c.b - v.threshold, 0), max(c.a - v.threshold, 0)}
+	}
+	for y in u32(y0) ..< u32(y1) {
+		for x in 0 ..< j.dst.width {
+			ax, ay := min(x * 2, j.src.width - 1), min(y * 2, j.src.height - 1)
+			bx, by := min(ax + 1, j.src.width - 1), min(ay + 1, j.src.height - 1)
+			sum := above(j.src, j.src_tt, v, ax, ay) + above(j.src, j.src_tt, v, bx, ay) + above(j.src, j.src_tt, v, ax, by) + above(j.src, j.src_tt, v, bx, by)
+			store_texel(j.dst, x, y, sum * 0.25)
+		}
+	}
+}
+
 sw_pixel_filter_band :: proc(data: rawptr, y0, y1: int) {
 	j := (^Sw_Filter)(data)
 	src, src_tt, back, back_tt, dst := j.src, j.src_tt, j.back, j.back_tt, j.dst
@@ -1350,6 +1376,13 @@ sw_pixel_filter_band :: proc(data: rawptr, y0, y1: int) {
 				out = blend_pixel(v.mode, s, apply_tex_type(fetch(back, x, y), back_tt))
 			case Composite:
 				out = composite_pixel(v.op, v.k, s, apply_tex_type(fetch(back, x, y), back_tt))
+			case Bloom_Add:
+				glow := apply_tex_type(sample(back, (f32(x) + 0.5) * v.uv.x + v.uv.z, (f32(y) + 0.5) * v.uv.y + v.uv.w), back_tt)
+				light := color_space_pixel(s, true) if v.encoded else s
+				out = composite_pixel(.Arithmetic, {0, 1, v.intensity, 0}, light, glow)
+				if v.encoded {
+					out = color_space_pixel(out, false)
+				}
 			case Component_Transfer:
 				us := unpremultiply(s)
 				for k in 0 ..< 4 {

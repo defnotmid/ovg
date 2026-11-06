@@ -34,6 +34,8 @@ static const int FILTER_TILE = 17;
 static const int FILTER_DISPLACEMENT = 18;
 static const int FILTER_CONVOLVE = 19;
 static const int FILTER_TURBULENCE = 20;
+static const int FILTER_BLOOM_BRIGHT = 21;
+static const int FILTER_BLOOM_ADD = 22;
 static const int TURBULENCE_MAX_OCTAVES = 24;
 static const int MORPHOLOGY_MAX_RADIUS = 256;
 static const int CONVOLVE_MAX_KERNEL = 36;
@@ -629,6 +631,31 @@ float4 turbulence(int2 p) {
     return float4(floor(c.xyz * (c.w / 255.0) + 0.5), c.w) / 255.0;
 }
 
+float4 space_converted(float4 s, bool to_linear) {
+    float4 us = unpremultiply(s);
+    for (int k = 0; k < 3; k++) {
+        us[k] = to_linear ? srgb_to_linear(us[k]) : linear_to_srgb(us[k]);
+    }
+    return premultiply(us);
+}
+
+// Bloom (layer_bloom_into): one source pixel's light above the threshold, at
+// half the source's size four of them averaged; P(0): the threshold, whether the
+// source is encoded, its size.
+float4 bloom_above(int2 q) {
+    float4 c = apply_tex_type(tex.SampleLevel((float2(q) + 0.5) / P(0).zw, 0));
+    if (P(0).y != 0.0) {
+        c = space_converted(c, true);
+    }
+    return max(c - P(0).x, float4(0.0));
+}
+
+float4 bloom_bright(int2 p) {
+    int2 a = p * 2;
+    int2 b = min(a + 1, int2(P(0).zw) - 1);
+    return (bloom_above(a) + bloom_above(int2(b.x, a.y)) + bloom_above(int2(a.x, b.y)) + bloom_above(b)) * 0.25;
+}
+
 // The single-pass filters: full-target quads reading the source (`tex`)
 // and, for two-input filters, the backdrop (`glyphtex`) at the same pixel.
 float4 render_filter(int type, float2 fpos) {
@@ -639,8 +666,18 @@ float4 render_filter(int type, float2 fpos) {
     if (type == FILTER_DISPLACEMENT) return displacement(p);
     if (type == FILTER_CONVOLVE) return convolve(p);
     if (type == FILTER_TURBULENCE) return turbulence(p);
+    if (type == FILTER_BLOOM_BRIGHT) return bloom_bright(p);
     float2 uv = fpos / extent();
     float4 s = apply_tex_type(tex.SampleLevel(uv, 0));
+    if (type == FILTER_BLOOM_ADD) {
+        // P(0): where the glow is read; P(1): how much, whether encoded.
+        float4 glow = apply_tt(glyphtex.SampleLevel(fpos * P(0).xy + P(0).zw, 0), backdrop_tex_type());
+        bool encoded = P(1).y != 0.0;
+        float4 o = (encoded ? space_converted(s, true) : s) + glow * P(1).x;
+        float a = clamp(o.a, 0.0, 1.0);
+        o = float4(clamp(o.rgb, float3(0.0), float3(a)), a);
+        return encoded ? space_converted(o, false) : o;
+    }
     if (type == FILTER_COMPONENT_TRANSFER) {
         float4 us = unpremultiply(s);
         float4 o;
@@ -659,12 +696,7 @@ float4 render_filter(int type, float2 fpos) {
         return premultiply(o);
     }
     if (type == FILTER_COLOR_SPACE) {
-        float4 us = unpremultiply(s);
-        bool to_linear = filter_op() == 1;
-        for (int k = 0; k < 3; k++) {
-            us[k] = to_linear ? srgb_to_linear(us[k]) : linear_to_srgb(us[k]);
-        }
-        return premultiply(us);
+        return space_converted(s, filter_op() == 1);
     }
     float4 b = apply_tt(glyphtex.SampleLevel(uv, 0), backdrop_tex_type());
     if (type == FILTER_BLEND) return blend_pixel(filter_op(), s, b);

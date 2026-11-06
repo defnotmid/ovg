@@ -401,3 +401,65 @@ test_filter_region_layer :: proc(t: ^testing.T) {
 	testing.expect_value(t, at(&sw, 24, 24), 0)
 	testing.expect_value(t, at(&sw, 40, 40), 0)
 }
+
+// A bloom is what its parts spelled out give: the light above the threshold, a
+// Gaussian, an add, in linear light; a thin line glows though its average at half
+// size wouldn't pass the threshold; and light below it adds nothing.
+@(test)
+test_filter_bloom :: proc(t: ^testing.T) {
+	SIZE :: 128
+	draw :: proc(prims: []Filter_Primitive, line: bool, out: []u8) {
+		sw: Software_Backend
+		software_backend_init(&sw)
+		defer software_backend_destroy(&sw)
+		c: Canvas
+		canvas_init(&c, software_backend(&sw))
+		defer canvas_destroy(&c)
+		ls: Layer_Stack
+		defer layer_stack_destroy(&ls, &c)
+		set_size(&c, SIZE, SIZE)
+		clear_rect(&c, 0, 0, SIZE, SIZE, BLACK)
+		layer_stack_begin(&ls, &c, SIZE, SIZE)
+		f := Filter {
+			primitives = prims,
+		}
+		layer_push(&ls, &c, {filter = &f})
+		p: Path
+		defer path_destroy(&p)
+		if line {
+			path_rect(&p, 64, 8, 1, 112)
+		} else {
+			path_rect(&p, 48, 48, 32, 32)
+		}
+		fill_path(&c, &p, paint_color(WHITE))
+		layer_pop(&ls, &c)
+		layer_stack_end(&ls, &c)
+		flush(&c)
+		copy(out, sw.pixels)
+	}
+	bloom := [?]Filter_Primitive{{op = .Bloom, in1 = {kind = .Source_Graphic}, threshold = 0.5, intensity = 0.6, std = {6, 6}}}
+	spelled := [?]Filter_Primitive {
+		{op = .Composite, in1 = {kind = .Source_Graphic}, in2 = {kind = .Source_Graphic}, composite = .Arithmetic, k = {0, 1, 0, -0.5}},
+		{op = .Gaussian_Blur, in1 = {kind = .Previous}, std = {6, 6}},
+		{op = .Composite, in1 = {kind = .Source_Graphic}, in2 = {kind = .Previous}, composite = .Arithmetic, k = {0, 1, 0.6, 0}},
+	}
+	a, b: [SIZE * SIZE * 4]u8
+	draw(bloom[:], false, a[:])
+	draw(spelled[:], false, b[:])
+	worst := 0
+	sum := 0
+	for i in 0 ..< len(a) {
+		d := abs(int(a[i]) - int(b[i]))
+		worst = max(worst, d)
+		sum += d * d
+	}
+	testing.expectf(t, worst <= 12, "bloom against its parts: %d levels at worst", worst)
+	testing.expectf(t, sum / len(a) <= 2, "bloom against its parts: mean square %d", sum / len(a))
+	testing.expect(t, a[(64 * SIZE + 88) * 4] > 0, "it glows past the square")
+	draw(bloom[:], true, a[:])
+	testing.expect(t, a[(64 * SIZE + 72) * 4] > 0, "a thin line glows")
+	dim := [?]Filter_Primitive{{op = .Bloom, in1 = {kind = .Source_Graphic}, threshold = 1, intensity = 1, std = {6, 6}}}
+	draw(dim[:], false, a[:])
+	testing.expect_value(t, a[(64 * SIZE + 88) * 4], 0)
+	testing.expect_value(t, a[(64 * SIZE + 64) * 4], 255)
+}

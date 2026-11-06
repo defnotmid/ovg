@@ -152,6 +152,24 @@ blur_pass_coefficients :: proc "contextless" (sigma: f32) -> (coeff: [3]f32, tap
 	return
 }
 
+// Bloom (`.Bloom` in a filter, `layer_bloom_into`): the source's light above
+// `threshold` per channel, its alpha too, per pixel of it, into a target half its
+// size. `encoded`: the source is sRGB-encoded, its light read linear.
+Bloom_Bright :: struct {
+	threshold: f32,
+	encoded:   bool,
+}
+
+// The source plus `intensity` of the glow, read bilinearly at (x, y) * uv.xy + uv.zw
+// (the pixel's centre, in the target's pixels) so that it can be smaller, in
+// linear light. `encoded`: the source and the target are sRGB-encoded.
+Bloom_Add :: struct {
+	glow:      Image_Id,
+	intensity: f32,
+	uv:        [4]f32,
+	encoded:   bool,
+}
+
 // SVG feColorMatrix: rows R, G, B, A of [r g b a 1] coefficients (the fifth
 // column is an offset in 0..1 units), applied to straight color, clamped,
 // then premultiplied.
@@ -361,6 +379,8 @@ Image_Filter :: union {
 	Displacement_Map,
 	Convolve_Matrix,
 	Turbulence,
+	Bloom_Bright,
+	Bloom_Add,
 }
 
 // Filters run as two passes through an intermediate image (besides blurs).
@@ -381,6 +401,8 @@ filter_backdrop :: proc "contextless" (f: Image_Filter) -> Image_Id {
 		return v.lut
 	case Displacement_Map:
 		return v.displacement
+	case Bloom_Add:
+		return v.glow
 	}
 	return {}
 }

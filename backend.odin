@@ -56,6 +56,8 @@ Shader_Type :: enum u8 {
 	Filter_Displacement       = 18,
 	Filter_Convolve           = 19,
 	Filter_Turbulence         = 20,
+	Filter_Bloom_Bright       = 21,
+	Filter_Bloom_Add          = 22,
 }
 
 // A draw's paint (a row of `Frame.paints`). GPU backends upload these

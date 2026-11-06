@@ -87,6 +87,7 @@ ALL := [?]Scene {
 	{"hairline_group", scene_hairline_group},
 	{"layer_masks", scene_layer_masks},
 	{"layer_filters", scene_layer_filters},
+	{"bloom", scene_bloom},
 	{"filters_more", scene_filters_more},
 	{"filter_darks", scene_filter_darks},
 	{"turbulence", scene_turbulence},
