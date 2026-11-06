@@ -733,7 +733,7 @@ plan_filter_pass :: proc(p: ^Planner, src, backdrop, dst: ^Image, paint: Paint) 
 	append(&p.b.rows, Row {
 		kind     = .Draw,
 		target   = dst^,
-		key      = {blend = vg.composite_state_from_op(.Copy), format = dst.format},
+		key      = {blend = vg.composite_state_from_op(.Copy), format = dst.format, frag = .Filter},
 		textures = {texture_binding(p.b, src), texture_binding(p.b, backdrop)},
 		scissor  = {0, 0, i32(dst.width), i32(dst.height)},
 		verts    = {extra_base(p), 6},

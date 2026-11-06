@@ -20,8 +20,10 @@ SHAPE_VERT_MSL :: #load("../shaders/ovg.shape_vert.msl")
 // The fragment shaders, each (but the last two) with a motion-blur variant
 // that writes its target's velocity twin beside the colour (render.odin).
 Frag :: enum {
-	// Quads: clears, filters, images.
+	// Quads: clears, images.
 	Main,
+	// Quads of image filters, apart so that the draws' shader doesn't carry them.
+	Filter,
 	// Shape instances (shapes.odin).
 	Shape,
 	// Instances whose pixel footprint is a box (no rotation or skew).
@@ -53,6 +55,10 @@ FRAG_CODE := [Frag][2]Frag_Code {
 	.Main = {
 		{#load("../shaders/ovg.frag.spv"), #load("../shaders/ovg.frag.msl"), "fs_main", 2, 1},
 		{#load("../shaders/ovg.frag_motion.spv"), #load("../shaders/ovg.frag_motion.msl"), "fs_main_motion", 2, 1},
+	},
+	.Filter = {
+		{#load("../shaders/ovg.filter_frag.spv"), #load("../shaders/ovg.filter_frag.msl"), "fs_filter", 2, 1},
+		{},
 	},
 	.Shape = {
 		{#load("../shaders/ovg.shape_frag.spv"), #load("../shaders/ovg.shape_frag.msl"), "fs_shape", 2, 3},

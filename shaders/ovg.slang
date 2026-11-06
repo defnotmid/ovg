@@ -725,9 +725,6 @@ float4 fill_color(int type, float2 fpos) {
 float4 main_color(VS_Out i) {
     paint_index = i.paint;
     int type = shader_type();
-    if (type >= FILTER_COLOR_MATRIX) {
-        return render_filter(type, i.fpos);
-    }
     float stroke_alpha = 1.0;
     if (type != TEXTURE_COPY_UNCLIPPED) {
         stroke_alpha = stroke_mask(i.ftcoord);
@@ -741,21 +738,24 @@ float4 main_color(VS_Out i) {
     float4 result;
     if (type == TEXTURE_COPY_UNCLIPPED) {
         return apply_tex_type(tex.SampleLevel(i.ftcoord, 0)) * inner_col();
-    } else if (type == FILTER_IMAGE) {
-        result = render_filtered_image(i.fpos);
-    } else {
-        result = fill_color(type, i.fpos);
     }
-
-    if (type != FILTER_IMAGE) {
-        result *= stroke_alpha * scissor_mask(i.fpos);
-    }
+    result = fill_color(type, i.fpos);
+    result *= stroke_alpha * scissor_mask(i.fpos);
     return result;
 }
 
 [shader("fragment")]
 float4 fs_main(VS_Out i) : SV_Target {
     return main_color(i);
+}
+
+// The filters, in passes of their own: apart, so that the shader every draw uses
+// doesn't carry them.
+[shader("fragment")]
+float4 fs_filter(VS_Out i) : SV_Target {
+    paint_index = i.paint;
+    int type = shader_type();
+    return type == FILTER_IMAGE ? render_filtered_image(i.fpos) : render_filter(type, i.fpos);
 }
 
 // ---- motion blur (ovg canvas_motion_blur) -----------------------------------

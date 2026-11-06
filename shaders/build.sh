@@ -23,7 +23,7 @@ for unit in frag shape_frag shape_box_frag shape_group_frag shape_hairline_frag 
 	entry=$(printf '%s\n' "${UNITS[@]}" | sed -n "s/^$unit://p")
 	UNITS+=("${unit}_motion:${entry}_motion")
 done
-UNITS+=(composite_velocity_frag:fs_composite_velocity resolve_velocity_frag:fs_resolve_velocity)
+UNITS+=(filter_frag:fs_filter composite_velocity_frag:fs_composite_velocity resolve_velocity_frag:fs_resolve_velocity)
 for unit in "${UNITS[@]}"; do
 	IFS=: read -r suffix entry <<<"$unit"
 	slangc ovg.slang "${FLAGS[@]}" -entry "$entry" -target spirv -o "ovg.$suffix.spv"
