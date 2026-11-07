@@ -59,9 +59,7 @@ store_init :: proc(b: ^SDL_Backend) {
 @(private)
 store_destroy :: proc(b: ^SDL_Backend) {
 	st := &b.shapes
-	if st.buffer != nil {
-		sdl.ReleaseGPUBuffer(b.device, st.buffer)
-	}
+	retire_buffer(b.device, b.retired, st.buffer)
 	if st.transfer != nil {
 		sdl.ReleaseGPUTransferBuffer(b.device, st.transfer)
 	}
@@ -141,9 +139,7 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 		if buffer == nil {
 			return false
 		}
-		if st.buffer != nil {
-			sdl.ReleaseGPUBuffer(b.device, st.buffer)
-		}
+		retire_buffer(b.device, b.retired, st.buffer)
 		st.buffer, st.capacity = buffer, capacity
 	}
 	total: u32

@@ -252,9 +252,7 @@ stream_reserve :: proc(b: ^SDL_Backend, s: ^Stream, size: int, usage: sdl.GPUBuf
 
 @(private)
 stream_release :: proc(b: ^SDL_Backend, s: ^Stream) {
-	if s.buffer != nil {
-		sdl.ReleaseGPUBuffer(b.device, s.buffer)
-	}
+	retire_buffer(b.device, b.retired, s.buffer)
 	if s.transfer != nil {
 		sdl.ReleaseGPUTransferBuffer(b.device, s.transfer)
 	}
@@ -1193,7 +1191,7 @@ evict_textures :: proc(b: ^SDL_Backend, cache: ^[dynamic]Cached_Texture) {
 	for i := 0; i < len(cache); {
 		if b.frame - cache[i].last_used > TEXTURE_KEEP_FRAMES {
 			// SDL defers the release until submitted work no longer uses it.
-			sdl.ReleaseGPUTexture(b.device, cache[i].image.texture)
+			retire_texture(b.device, b.retired, cache[i].image.texture)
 			unordered_remove(cache, i)
 			continue
 		}

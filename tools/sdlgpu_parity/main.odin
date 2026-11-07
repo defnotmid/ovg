@@ -12,6 +12,7 @@ package sdlgpu_parity
 
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import sdl "vendor:sdl3"
 
 import image "deps:oicut/image"
@@ -108,8 +109,11 @@ main :: proc() {
 	if !updates_check(&gpu, &gpu_canvas, tex) {
 		failed += 1
 	}
+	if !retired_check(&gpu, &gpu_canvas, &gpu_res) {
+		failed += 1
+	}
 
-	total := 2 * len(scenes.ALL) + 3
+	total := 2 * len(scenes.ALL) + 4
 	fmt.printfln("%d/%d checks match (images in %s)", total - failed, total, out_dir)
 	if failed > 0 {
 		os.exit(1)
@@ -147,6 +151,53 @@ updates_check :: proc(gpu: ^vgsdl.SDL_Backend, c: ^vg.Canvas, tex: ^sdl.GPUTextu
 		return false
 	}
 	return true
+}
+
+// A backend with a release table draws the same pixels as one without, emptying
+// the table between frames. Its destroy leaves what it held in the table, on a
+// shared device, and gives it back before destroying a device of its own.
+retired_check :: proc(gpu: ^vgsdl.SDL_Backend, c: ^vg.Canvas, res: ^scenes.Resources) -> bool {
+	table: vgsdl.Retired
+	defer vgsdl.retired_destroy(&table)
+	shared: vgsdl.SDL_Backend
+	if err := vgsdl.init(&shared, gpu.device, retired = &table); err != nil {
+		fmt.println("FAIL retired_check: init", err)
+		return false
+	}
+	shared_canvas: vg.Canvas
+	vg.canvas_init(&shared_canvas, vgsdl.backend(&shared))
+	shared_res: scenes.Resources
+	scenes.setup(&shared_canvas, &shared_res)
+	differ := 0
+	for scene in scenes.ALL {
+		a := draw(c, scene, res, false)
+		b := draw(&shared_canvas, scene, &shared_res, false)
+		if !slice.equal(a, b) {
+			fmt.println("FAIL retired_check: pixels of", scene.name)
+			differ += 1
+		}
+		delete(a)
+		delete(b)
+		vgsdl.retired_release(gpu.device, &table)
+	}
+	scenes.resources_destroy(&shared_canvas, &shared_res)
+	vg.canvas_destroy(&shared_canvas)
+	vgsdl.destroy(&shared)
+	kept := len(table.textures) > 0 && len(table.buffers) > 0
+	vgsdl.retired_release(gpu.device, &table)
+	emptied := len(table.textures) + len(table.buffers) == 0
+
+	own: vgsdl.SDL_Backend
+	if err := vgsdl.init(&own, retired = &table); err != nil {
+		fmt.println("FAIL retired_check: init on its own device", err)
+		return false
+	}
+	vgsdl.destroy(&own)
+	own_emptied := len(table.textures) + len(table.buffers) == 0
+	if !kept || !emptied || !own_emptied {
+		fmt.printfln("FAIL retired_check: destroy kept %v, emptied %v, its own device emptied %v", kept, emptied, own_emptied)
+	}
+	return differ == 0 && kept && emptied && own_emptied
 }
 
 // The scene's pixels, drawn with or without motion blur.

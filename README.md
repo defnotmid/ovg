@@ -149,6 +149,18 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   buffer when it creates a texture, a submit may defragment memory (moving
   textures), and a texture the frame had already bound then lost the draws
   made into it (rare, history-dependent pixel errors on RADV).
+- A device shared between threads needs a `Retired` table: `vgsdl.init(&gpu,
+  device, retired = &table)`. On SDL's Vulkan driver a texture or buffer
+  released on one thread while another presents can be written after it is
+  freed (a presenting submit may defragment memory, or on a device with no
+  claimed window, any submit). With a table the backend's releases wait in it,
+  from any thread, until `retired_release` gives them back, called between
+  presents on the thread that presents, even when it skips a present, since
+  nothing else frees them. The caller's own objects go in with `retire_texture`
+  and `retire_buffer`. Transfer buffers stay out: SDL makes them dedicated
+  allocations, which a defrag never moves, so queuing them would only hold
+  memory. Without a table everything is released at once, as a device used from
+  one thread can be.
 - Redundant state is skipped within a render pass: uniforms, samplers and
   scissor are set only when they change.
 - Shape draws aren't scissored by draw: each instance carries its
@@ -1124,6 +1136,7 @@ odin test lottie -collection:deps=.. -vet -strict-style # Lottie import: parsing
 ./tools/lottie_suite/run.sh                           # Lottie import vs lottie-web reference PNGs
 odin run tools/bench -collection:deps=.. -o:speed     # CPU time and allocations per warm frame, generated workloads
 odin check sdlgpu -collection:deps=.. -no-entry-point -vet -strict-style  # SDL_GPU backend
+odin test sdlgpu -collection:deps=.. -vet -strict-style  # its release table; needs the SDL3 library, no GPU
 odin run tools/sdlgpu_parity -collection:deps=.. -- out_dir # SDL_GPU vs software, headless
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64    # macOS / Windows compile
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:windows_amd64

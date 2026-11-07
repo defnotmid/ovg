@@ -137,6 +137,8 @@ SDL_Backend :: struct {
 	allocator:        mem.Allocator,
 	device:           ^sdl.GPUDevice,
 	owns_device:      bool,
+	// Where the memory it lets go of waits (retired.odin); nil: released at once.
+	retired:          ^Retired,
 	vert:             ^sdl.GPUShader,
 	// Shape instances (shapes.odin): quads pulled from `instance_stream`,
 	// coverage from the shapes in `shapes`.
@@ -226,11 +228,13 @@ Frame_Stats :: struct {
 // Prepares the backend on `device`, or on a new headless device when nil
 // (SDL's video subsystem is initialized; without a display the
 // `offscreen` video driver is used). On failure what was made is released
-// (an owned device too): `destroy` is not needed.
-init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context.allocator) -> (err: vg.Error) {
+// (an owned device too): `destroy` is not needed. A device shared between threads
+// takes a `retired` table (retired.odin).
+init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context.allocator, retired: ^Retired = nil) -> (err: vg.Error) {
 	b^ = {
 		allocator = allocator,
 		device    = device,
+		retired   = retired,
 		scratch   = make([dynamic]Cached_Texture, allocator),
 		pipelines = make(map[Pipeline_Key]^sdl.GPUGraphicsPipeline, allocator),
 		verts     = make([dynamic]Vertex, allocator),
@@ -359,11 +363,11 @@ destroy :: proc(b: ^SDL_Backend) {
 	}
 	delete(b.pipelines)
 	for t in b.scratch {
-		sdl.ReleaseGPUTexture(b.device, t.image.texture)
+		retire_texture(b.device, b.retired, t.image.texture)
 	}
 	delete(b.scratch)
 	for t in b.twins {
-		sdl.ReleaseGPUTexture(b.device, t.image.texture)
+		retire_texture(b.device, b.retired, t.image.texture)
 	}
 	delete(b.twins)
 	delete(b.twin_of)
@@ -408,6 +412,8 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.group_fill)
 
 	if b.owns_device {
+		// The table can't outlive the device its objects came from.
+		retired_release(b.device, b.retired)
 		sdl.DestroyGPUDevice(b.device)
 	}
 	b^ = {}
@@ -613,7 +619,7 @@ release_image :: proc(b: ^SDL_Backend, img: ^Image) {
 	}
 	// SDL defers the release until submitted work no longer uses it.
 	if !img.borrowed {
-		sdl.ReleaseGPUTexture(b.device, img.texture)
+		retire_texture(b.device, b.retired, img.texture)
 	}
 	if img.transfer != nil {
 		sdl.ReleaseGPUTransferBuffer(b.device, img.transfer)
