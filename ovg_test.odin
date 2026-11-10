@@ -722,7 +722,7 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 }
 
 // A layer composites under the scissor of its push: a blur spreading past
-// it and a flood filling the filter region stop at its edge (onib's
+// it and a flood filling the filter region stop at its edge (a user's
 // report: a box scissored to x < 50 showed alpha 26 at x 52 after a blur,
 // and the flood covered the box's right half). At a fractional edge
 // (x < 50.5) the pixel the edge cuts keeps the coverage its drawing had:
