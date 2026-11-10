@@ -9,7 +9,7 @@ import cv "deps:ocurves"
 #assert(cv.FORMAT == SHADERS_CURVES_FORMAT, "ovg's shape shaders read another ocurves curves.FORMAT: use the ocurves this ovg's tag names, or rerun shaders/build.sh against this one")
 
 // The backend's copies of the shapes it draws, in one storage buffer the
-// shape shader reads, found by shape id: a shape is uploaded the first time
+// shape shader reads, found by shape id's slot: a shape is uploaded the first time
 // it is drawn, after the shapes kept so far, and a frame's own words (paths
 // filled this frame, group grids) follow them, in the space the last
 // frame's took. Nothing is freed one by one: when a frame doesn't fit, the
@@ -23,12 +23,22 @@ Shape_Store :: struct {
 	capacity:          u32,
 	kept:              u32,
 	top:               u32,
-	// Shape id to its place.
-	at:                map[u64]u32,
+	// By shape id slot (vg.shape_id_slots): the id placed there and its
+	// offset, while placed in this generation of the store, which a restart
+	// ends, so starting over clears nothing.
+	at:                [dynamic]Store_Place,
+	gen:               u32,
 	// Words placed but not yet uploaded.
 	pending:           [dynamic]Pending_Shape,
 	transfer:          ^sdl.GPUTransferBuffer,
 	transfer_capacity: u32,
+}
+
+@(private)
+Store_Place :: struct {
+	id:     u64,
+	gen:    u32,
+	offset: u32,
 }
 
 @(private = "file")
@@ -52,7 +62,8 @@ Gpu_Shape_Instance :: struct {
 
 @(private)
 store_init :: proc(b: ^SDL_Backend) {
-	b.shapes.at = make(map[u64]u32, b.allocator)
+	b.shapes.at = make([dynamic]Store_Place, b.allocator)
+	b.shapes.gen = 1
 	b.shapes.pending = make([dynamic]Pending_Shape, b.allocator)
 }
 
@@ -77,7 +88,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 	st := &b.shapes
 	resize(&b.shape_offsets, len(frame.shapes))
 	restart :: proc(st: ^Shape_Store) {
-		clear(&st.at)
+		st.gen = st.gen + 1 if st.gen + 1 != 0 else 1
 		clear(&st.pending)
 		st.kept, st.top, st.capacity = 0, 0, 0
 	}
@@ -95,18 +106,22 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 		}
 		return offset
 	}
+	// Every shape the frame draws was built before it, so its slot is below
+	// the count now; new places are zero, of no generation.
+	if n := vg.shape_id_slots(); n > len(st.at) {
+		resize(&st.at, max(n, 2 * len(st.at)))
+	}
 	for again in ([2]bool{false, true}) {
 		st.top = st.kept
 		for inst, i in frame.shapes {
 			if inst.shape == nil {
 				continue
 			}
-			offset, found := st.at[inst.shape.id]
-			if !found {
-				offset = place(st, inst.shape.data)
-				st.at[inst.shape.id] = offset
+			p := &st.at[u32(inst.shape.id)]
+			if p.id != inst.shape.id || p.gen != st.gen {
+				p^ = {inst.shape.id, st.gen, place(st, inst.shape.data)}
 			}
-			b.shape_offsets[i] = offset
+			b.shape_offsets[i] = p.offset
 		}
 		st.kept = st.top
 		own := place(st, frame.shape_words)

@@ -15,8 +15,11 @@ import ft "deps:oglyph/font"
 
 Shape :: struct {
 	data:      []u32,
-	// Unique for the process's life (never reused): GPU backends find
-	// their copy of the shape by it, uploading it when they have none.
+	// A slot and its generation, `gen << 32 | slot`, never 0: GPU backends
+	// find their copy of the shape by it, uploading it when they have none.
+	// shape_destroy frees the slot for a later shape under a new
+	// generation, so an id names one shape and the slots stay as many as
+	// the shapes alive at once (shape_id_slots).
 	id:        u64,
 	// Shape units to the units the shape was built in (path units, or font
 	// units with y down): `p = origin + q * extent`.
@@ -30,11 +33,68 @@ Shape :: struct {
 
 shape_destroy :: proc(s: ^Shape) {
 	delete(s.data, s.allocator)
+	shape_id_free(s.id)
 	s^ = {}
 }
 
+// The id slots: each one's generation and the free ones, shared by every
+// thread building and destroying shapes. Its arrays are on the heap
+// allocator, for the process's life.
 @(private = "file")
-shape_next_id: u64
+Shape_Ids :: struct {
+	lock:  sync.Mutex,
+	gens:  [dynamic]u32,
+	free:  [dynamic]u32,
+	// len(gens), for shape_id_slots to read without the lock.
+	slots: int,
+}
+
+@(private = "file")
+shape_ids: Shape_Ids
+
+@(private = "file")
+shape_id_new :: proc() -> u64 {
+	ids := &shape_ids
+	sync.mutex_lock(&ids.lock)
+	defer sync.mutex_unlock(&ids.lock)
+	if ids.gens.allocator.procedure == nil {
+		ids.gens.allocator = runtime.heap_allocator()
+		ids.free.allocator = runtime.heap_allocator()
+	}
+	slot: u32
+	if n := len(ids.free); n > 0 {
+		slot = ids.free[n - 1]
+		resize(&ids.free, n - 1)
+	} else {
+		slot = u32(len(ids.gens))
+		append(&ids.gens, 1)
+		sync.atomic_store(&ids.slots, len(ids.gens))
+	}
+	return u64(ids.gens[slot]) << 32 | u64(slot)
+}
+
+// Frees `id`'s slot for a later shape, under the next generation (never 0).
+@(private = "file")
+shape_id_free :: proc(id: u64) {
+	if id == 0 {
+		return
+	}
+	ids := &shape_ids
+	sync.mutex_lock(&ids.lock)
+	defer sync.mutex_unlock(&ids.lock)
+	slot := u32(id)
+	ids.gens[slot] += 1
+	if ids.gens[slot] == 0 {
+		ids.gens[slot] = 1
+	}
+	append(&ids.free, slot)
+}
+
+// How many id slots there are: every live shape's id has `u32(id)` below
+// it, so a backend can keep a table by slot of that length.
+shape_id_slots :: proc "contextless" () -> int {
+	return sync.atomic_load(&shape_ids.slots)
+}
 
 // Shape units to the shape's source units.
 shape_local :: proc "contextless" (s: ^Shape) -> Transform2D {
@@ -130,7 +190,7 @@ shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index, o: ^ft.Outl
 // a hairline (`hairline_shape`).
 shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true) -> (s: Shape, ok: bool) {
 	words, origin, extent := cv.build(b, allocator, search) or_return
-	return {data = words, origin = origin, extent = extent, bounds = words_bounds(words), allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}, true
+	return {data = words, origin = origin, extent = extent, bounds = words_bounds(words), allocator = allocator, id = shape_id_new()}, true
 }
 
 // What building shapes needs, kept by a caller that builds many (it only

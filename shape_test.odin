@@ -236,6 +236,30 @@ test_shape_tolerance :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_shape_ids :: proc(t: ^testing.T) {
+	// Each shape built gets an id no shape had, never 0, its slot below
+	// shape_id_slots; destroying one frees its slot for the next, so
+	// building and destroying in turn adds no slots (other tests build
+	// shapes meanwhile, so the bound is loose).
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 4, 4)
+	seen := make(map[u64]bool)
+	defer delete(seen)
+	before := shape_id_slots()
+	for _ in 0 ..< 1000 {
+		s, ok := shape_from_path(&p)
+		testing.expect(t, ok)
+		testing.expect(t, s.id != 0)
+		testing.expect(t, int(u32(s.id)) < shape_id_slots())
+		testing.expectf(t, !seen[s.id], "id %x handed out twice", s.id)
+		seen[s.id] = true
+		shape_destroy(&s)
+	}
+	testing.expectf(t, shape_id_slots() - before < 500, "slots %d -> %d", before, shape_id_slots())
+}
+
+@(test)
 test_sw_fill_shapes :: proc(t: ^testing.T) {
 	// One shape at many places, one paint row: the pixels fill_shape draws
 	// at each (the one off the target skipped).
