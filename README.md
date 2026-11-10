@@ -67,7 +67,7 @@ packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.13), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.14), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -76,7 +76,7 @@ packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.13 https://github.com/defnotmid/oglyph
-git clone -b v0.0.13 https://github.com/defnotmid/ocurves
+git clone -b v0.0.14 https://github.com/defnotmid/ocurves
 git clone -b v0.0.26 https://github.com/defnotmid/oicut
 ```
 
