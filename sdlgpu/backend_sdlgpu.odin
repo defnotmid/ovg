@@ -24,15 +24,14 @@ Frag :: enum {
 	Main,
 	// Quads of image filters, apart so that the draws' shader doesn't carry them.
 	Filter,
-	// Shape instances (shapes.odin).
+	// Shape instances (shapes.odin): fills, and hairlines
+	// (vg.hairline_shape) in the same draws.
 	Shape,
 	// Instances whose pixel footprint is a box (no rotation or skew).
 	Shape_Box,
 	// Groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
 	// the instances.
 	Shape_Group,
-	// Hairlines (vg.hairline_shape).
-	Shape_Hairline,
 	// Groups of markers (vg.fill_markers).
 	Marker_Group,
 	// Motion blur: a layer's motion onto its target's twin
@@ -71,10 +70,6 @@ FRAG_CODE := [Frag][2]Frag_Code {
 	.Shape_Group = {
 		{#load("../shaders/ovg.shape_group_frag.spv"), #load("../shaders/ovg.shape_group_frag.msl"), "fs_shape_group", 2, 3},
 		{#load("../shaders/ovg.shape_group_frag_motion.spv"), #load("../shaders/ovg.shape_group_frag_motion.msl"), "fs_shape_group_motion", 2, 4},
-	},
-	.Shape_Hairline = {
-		{#load("../shaders/ovg.shape_hairline_frag.spv"), #load("../shaders/ovg.shape_hairline_frag.msl"), "fs_shape_hairline", 2, 3},
-		{#load("../shaders/ovg.shape_hairline_frag_motion.spv"), #load("../shaders/ovg.shape_hairline_frag_motion.msl"), "fs_shape_hairline_motion", 2, 4},
 	},
 	.Marker_Group = {
 		{#load("../shaders/ovg.marker_group_frag.spv"), #load("../shaders/ovg.marker_group_frag.msl"), "fs_marker_group", 2, 3},

@@ -193,8 +193,11 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, frame_words: []u32, offset: 
 	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
 	flags: u32 = (1 if inst.rule == .Even_Odd else 0) | (2 if inst.aliased else 0)
+	// A hairline's width in place of the flags: a positive normal float,
+	// whose exponent bits the shader tells from the flags by. Anything
+	// narrower than the smallest normal float covers nothing anyway.
 	if inst.hairline > 0 {
-		flags = transmute(u32)inst.hairline
+		flags = transmute(u32)max(inst.hairline, transmute(f32)u32(0x0080_0000))
 	}
 	// A marker: the unit square or circle, its kind where a shape's words
 	// are (16 added when it is filled).

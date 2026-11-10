@@ -580,15 +580,16 @@ plan_clear :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Clear_Rect) {
 }
 
 // Rows drawing `instances` with `base`'s state: one per stretch of
-// instances that are all hairlines (the hairline shader), all boxes (no
-// rotation or skew: the box shader) or all neither.
+// instances that are all boxes (no rotation or skew: the box shader) or
+// all not. Fills and hairlines share both shaders, so mixing them costs no
+// row.
 @(private = "file")
 plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 	row := base
 	start := instances.start
 	for i in instances.start ..< instances.start + instances.count {
 		inst := &p.frame.shapes[i]
-		frag := Frag.Shape_Hairline if inst.hairline > 0 else (.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape)
+		frag := Frag.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape
 		if i > start && frag != row.key.frag {
 			row.verts = {start, i - start}
 			append(&p.b.rows, row)

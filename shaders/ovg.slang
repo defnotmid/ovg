@@ -952,11 +952,26 @@ float shape_aliased(VS_Shape_Out i) {
     return curves_fill_inside(w, shape_rule(i.data.z)) ? 1.0 : 0.0;
 }
 
+// A hairline (ovg hairline_shape): the shape's outline drawn data.z's
+// width in pixels wide under any transform. The width is a positive normal
+// float and a fill's data.z its flags (under 8), so the float's exponent
+// bits tell them apart: fills and hairlines draw in one draw, in order.
+bool shape_is_hairline(uint z) {
+    return (z & 0x7f800000u) != 0u;
+}
+
+float4 shape_hairline(VS_Shape_Out i) {
+    return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
+}
+
 // Instances without rotation or skew (the pixel's footprint a box): a
 // leaner shader than the parallelogram one, so it runs with more waves.
 float4 shape_box(VS_Shape_Out i) {
     shape_clip(i);
     paint_index = i.data.y;
+    if (shape_is_hairline(i.data.z)) {
+        return shape_hairline(i);
+    }
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
     }
@@ -976,6 +991,9 @@ Motion_Targets fs_shape_box_motion(VS_Shape_Out i) {
 float4 shape_affine(VS_Shape_Out i) {
     shape_clip(i);
     paint_index = i.data.y;
+    if (shape_is_hairline(i.data.z)) {
+        return shape_hairline(i);
+    }
     if ((i.data.z & 2u) != 0u) {
         return shape_fill(i, shape_aliased(i));
     }
@@ -990,24 +1008,6 @@ float4 fs_shape(VS_Shape_Out i) : SV_Target {
 [shader("fragment")]
 Motion_Targets fs_shape_motion(VS_Shape_Out i) {
     return shape_targets(shape_affine(i), i.data.w & 0x7fffffffu, i.fpos);
-}
-
-// A hairline (ovg hairline_shape): the shape's outline drawn asfloat(data.z)
-// pixels wide under any transform.
-float4 shape_hairline(VS_Shape_Out i) {
-    shape_clip(i);
-    paint_index = i.data.y;
-    return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
-}
-
-[shader("fragment")]
-float4 fs_shape_hairline(VS_Shape_Out i) : SV_Target {
-    return shape_hairline(i);
-}
-
-[shader("fragment")]
-Motion_Targets fs_shape_hairline_motion(VS_Shape_Out i) {
-    return shape_targets(shape_hairline(i), i.data.w & 0x7fffffffu, i.fpos);
 }
 
 // A group of markers (ovg draw_markers): its records and cells a group of

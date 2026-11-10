@@ -18,8 +18,8 @@ if [ -z "$FORMAT" ]; then
 fi
 # Each fragment unit's motion-blur variant (two colour targets) is
 # <unit>_motion, entry <entry>_motion.
-UNITS=(vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape shape_box_frag:fs_shape_box shape_group_frag:fs_shape_group shape_hairline_frag:fs_shape_hairline marker_group_frag:fs_marker_group)
-for unit in frag shape_frag shape_box_frag shape_group_frag shape_hairline_frag marker_group_frag; do
+UNITS=(vert:vs_main frag:fs_main shape_vert:vs_shape shape_frag:fs_shape shape_box_frag:fs_shape_box shape_group_frag:fs_shape_group marker_group_frag:fs_marker_group)
+for unit in frag shape_frag shape_box_frag shape_group_frag marker_group_frag; do
 	entry=$(printf '%s\n' "${UNITS[@]}" | sed -n "s/^$unit://p")
 	UNITS+=("${unit}_motion:${entry}_motion")
 done
