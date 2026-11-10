@@ -133,9 +133,7 @@ float scissor_mask(float2 p) {
 // Coverage from the vertex (u, v): a pyramid across the stroke with a
 // one-pixel slope, times the edge fade in v.
 float stroke_mask(float2 ftcoord) {
-    float m = min(1.0, (1.0 - abs(ftcoord.x * 2.0 - 1.0)) * stroke_mult()) * min(1.0, ftcoord.y);
-    // frag[0].w: smooth edge (ovg.Params.smooth_edge).
-    return P(0).w != 0.0 ? m * m * (3.0 - 2.0 * m) : m;
+    return min(1.0, (1.0 - abs(ftcoord.x * 2.0 - 1.0)) * stroke_mult()) * min(1.0, ftcoord.y);
 }
 
 float4 apply_tt(float4 color, int tt) {
@@ -926,16 +924,24 @@ void shape_clip(VS_Shape_Out i) {
     }
 }
 
+// A fill's coverage, eased across its edge (smoothstep) when its flags
+// have 4: a feathered fill's (ovg Shape_Edge.Smooth), whose wide edge
+// then has no visible shoulder.
+float shape_ease(uint flags, float coverage) {
+    return (flags & 4u) != 0u ? coverage * coverage * (3.0 - 2.0 * coverage) : coverage;
+}
+
 // The paint through the pixel's coverage, as the edge coverage of a path's
-// vertices (so a feathered paint's smooth edge applies). Below half an
-// 8-bit step the pixel is left alone: rounding leaves such slivers where
-// the shape is absent, and a blend like Copy would clear them.
-float4 shape_fill(VS_Shape_Out i, float coverage) {
+// vertices, eased by a fill's `flags` (shape_ease; a hairline passes 0).
+// Below half an 8-bit step the pixel is left alone: rounding leaves such
+// slivers where the shape is absent, and a blend like Copy would clear
+// them.
+float4 shape_fill(VS_Shape_Out i, float coverage, uint flags) {
     if (coverage < 1.0 / 510.0) {
         discard;
     }
     float4 result = fill_color(shader_type(), i.fpos);
-    return result * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
+    return result * (stroke_mask(float2(0.5, shape_ease(flags, coverage))) * scissor_mask(i.fpos));
 }
 
 // An instance's fill rule: bit 0 of its flags.
@@ -961,7 +967,7 @@ bool shape_is_hairline(uint z) {
 }
 
 float4 shape_hairline(VS_Shape_Out i) {
-    return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)));
+    return shape_fill(i, curves_hairline(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, asfloat(i.data.z)), 0u);
 }
 
 // Instances without rotation or skew (the pixel's footprint a box): a
@@ -973,9 +979,9 @@ float4 shape_box(VS_Shape_Out i) {
         return shape_hairline(i);
     }
     if ((i.data.z & 2u) != 0u) {
-        return shape_fill(i, shape_aliased(i));
+        return shape_fill(i, shape_aliased(i), i.data.z);
     }
-    return shape_fill(i, curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), shape_rule(i.data.z)));
+    return shape_fill(i, curves_coverage(shapes, i.data.x, i.rc, float2(abs(i.uv.x), abs(i.uv.w)), shape_rule(i.data.z)), i.data.z);
 }
 
 [shader("fragment")]
@@ -995,9 +1001,9 @@ float4 shape_affine(VS_Shape_Out i) {
         return shape_hairline(i);
     }
     if ((i.data.z & 2u) != 0u) {
-        return shape_fill(i, shape_aliased(i));
+        return shape_fill(i, shape_aliased(i), i.data.z);
     }
-    return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, shape_rule(i.data.z)));
+    return shape_fill(i, curves_coverage_affine(shapes, i.data.x, i.rc, i.uv.xy, i.uv.zw, shape_rule(i.data.z)), i.data.z);
 }
 
 [shader("fragment")]
@@ -1116,7 +1122,7 @@ float4 shape_group(VS_Shape_Out i, bool moves, out float4 motion) {
             continue;
         }
         paint_index = s.data.y;
-        float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, coverage)) * scissor_mask(i.fpos));
+        float4 c = fill_color(shader_type(), i.fpos) * (stroke_mask(float2(0.5, shape_ease(s.data.z, coverage))) * scissor_mask(i.fpos));
         acc = c + acc * (1.0 - c.a);
         if (moves) {
             motion = motion_over(i.data.z + shapes[lists + k], i.fpos, c.a, motion);

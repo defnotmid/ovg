@@ -698,6 +698,7 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 		inv := transform_inverse(inst.transform)
 		u, v := instance_footprint(inst)
 		words := instance_words(inst, frame.shape_words)
+		smooth := inst.edge == .Smooth
 		when twinned {
 			m := sw_motion(run, it.inst)
 			moves := m.nearness != 0
@@ -710,7 +711,7 @@ raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes,
 				if cov < 1.0 / 510 {
 					continue
 				}
-				src, keep := shade(&frag, px, py, 0.5, cov)
+				src, keep := shade(&frag, px, py, 0.5, ease(cov, smooth))
 				if !keep {
 					continue
 				}
@@ -840,6 +841,7 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Boun
 	inv := transform_inverse(inst.transform)
 	u, v := instance_footprint(inst)
 	words := instance_words(inst, frame_words)
+	smooth := inst.edge == .Smooth
 	for y in y0 ..< y1 {
 		py := f32(y) + 0.5
 		for x in x0 ..< x1 {
@@ -849,7 +851,7 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Boun
 			if cov < 1.0 / 510 {
 				continue
 			}
-			src, keep := shade(r.frag, px, py, 0.5, cov)
+			src, keep := shade(r.frag, px, py, 0.5, ease(cov, smooth))
 			if !keep {
 				continue
 			}
@@ -862,6 +864,13 @@ raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Boun
 	}
 }
 
+// `cov` eased across a feathered fill's edge with `smooth`
+// (Shape_Edge.Smooth), as the shape shader eases it.
+@(private = "file")
+ease :: #force_inline proc "contextless" (cov: f32, smooth: bool) -> f32 {
+	return cov * cov * (3 - 2 * cov) if smooth else cov
+}
+
 // The coverage of the instance's pixel centered at `rc` (shape units) with
 // sides `u` and `v` (instance_footprint): the shape shader's.
 @(private = "file")
@@ -872,7 +881,7 @@ instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc,
 	if inst.hairline > 0 {
 		return cv.hairline(words, rc, u, v, inst.hairline)
 	}
-	if inst.aliased {
+	if inst.edge == .Aliased {
 		// Off center as the shader samples it.
 		w := cv.winding(words, rc + (u + v) / 64)
 		return 1 if cv.fill_inside(w, inst.rule) else 0
@@ -997,9 +1006,6 @@ shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
 	stroke_alpha: f32 = 1
 	if p.shader_type != .Texture_Copy_Unclipped {
 		stroke_alpha = min(1, (1 - abs(u * 2 - 1)) * p.stroke_mult) * min(1, v)
-		if p.smooth_edge {
-			stroke_alpha = stroke_alpha * stroke_alpha * (3 - 2 * stroke_alpha)
-		}
 		if stroke_alpha < p.stroke_thr {
 			return {}, false
 		}

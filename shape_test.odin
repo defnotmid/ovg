@@ -279,6 +279,176 @@ test_sw_fill_shapes :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_sw_paint_slots :: proc(t: ^testing.T) {
+	// Shapes in a few paints: with a slot for each paint, the pixels
+	// fill_shape and hairline_shape draw without, one paint row for each
+	// paint that draws, a paint's fills and hairlines sharing it. A state
+	// change between draws starts a new row.
+	// 0: no slots, 1: slots, 2: slots across a state change.
+	draw :: proc(how: int) -> (pixels: []u8, paints, instances: int) {
+		b: Software_Backend
+		software_backend_init(&b)
+		defer software_backend_destroy(&b)
+		c: Canvas
+		canvas_init(&c, software_backend(&b))
+		defer canvas_destroy(&c)
+		set_size(&c, 40, 20)
+		clear_rect(&c, 0, 0, 40, 20, WHITE)
+		p: Path
+		defer path_destroy(&p)
+		path_circle(&p, 0, 0, 3)
+		path_circle(&p, 0, 0, 1.5)
+		ring, _ := shape_from_path(&p, outline = true)
+		defer shape_destroy(&ring)
+		path_reset(&p)
+		path_rect(&p, 0, 0, 6, 4)
+		box, _ := shape_from_path(&p)
+		defer shape_destroy(&box)
+		paint_list := [4]Paint{paint_color(rgba(200, 0, 0, 160)), paint_color(rgb(0, 0, 255)), paint_color(rgb(0, 160, 0)), paint_color(rgb(0, 0, 0))}
+		paint_list[0].fill_rule = .Even_Odd
+		paint_list[1].feather = 1.5
+		paint_list[3].feather = 1
+		Row :: struct {
+			shape:    ^Shape,
+			local:    Transform2D,
+			paint:    int,
+			hairline: f32,
+		}
+		row_list := [?]Row {
+			{&ring, transform_translation(5, 5), 0, 0},
+			{&box, transform_translation(10, 4), 1, 0},
+			{&ring, transform_translation(80, 5), 2, 0},
+			{&ring, transform_translation(12, 9), 0, 0},
+			{&ring, transform_translation(5, 5), 3, 1},
+			{&box, transform_multiply(transform_scaling(2, 1), transform_translation(24, 12)), 3, 0},
+		}
+		slots: [4]Paint_Slot
+		translate(&c, 1, 0)
+		for r, i in row_list {
+			if how == 2 && i == 3 {
+				// Draws the same, but the slots' rows no longer hold.
+				set_global_alpha(&c, 1)
+			}
+			slot := &slots[r.paint] if how > 0 else nil
+			if r.hairline > 0 {
+				hairline_shape(&c, r.shape, paint_list[r.paint], r.hairline, r.local, slot)
+			} else {
+				fill_shape(&c, r.shape, paint_list[r.paint], r.local, slot)
+			}
+		}
+		paints, instances = len(c.paints), len(c.shapes)
+		flush(&c)
+		return slice.clone(b.pixels), paints, instances
+	}
+	each, each_paints, each_instances := draw(0)
+	defer delete(each)
+	testing.expect_value(t, each_instances, 5)
+	testing.expect_value(t, each_paints, 5)
+	// Red, blue and black, its fill and hairline sharing a row; green draws
+	// nothing. After the state change red and black take new rows.
+	for how in 1 ..= 2 {
+		pixels, paints, instances := draw(how)
+		defer delete(pixels)
+		testing.expect_value(t, instances, 5)
+		testing.expect_value(t, paints, 3 if how == 1 else 4)
+		testing.expect(t, slice.equal(each, pixels))
+	}
+}
+
+@(test)
+test_paint_slot_lifetime :: proc(t: ^testing.T) {
+	// Whatever a paint row bakes in changing, the slot adds a new row: each
+	// state change, a restore, another target, the next frame, another
+	// canvas; drawing again with nothing changed reuses it.
+	b: Software_Backend
+	software_backend_init(&b)
+	defer software_backend_destroy(&b)
+	c, d: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	canvas_init(&d, software_backend(&b))
+	defer canvas_destroy(&d)
+	set_size(&c, 20, 20)
+	set_size(&d, 20, 20)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 2, 2, 6, 6)
+	box, _ := shape_from_path(&p)
+	defer shape_destroy(&box)
+	paint := paint_color(rgb(0, 0, 255))
+	changes := [?]proc(c: ^Canvas) {
+		proc(c: ^Canvas) {translate(c, 0, 0)},
+		proc(c: ^Canvas) {set_transform(c, state(c).transform)},
+		proc(c: ^Canvas) {reset_transform(c)},
+		proc(c: ^Canvas) {scissor(c, 0, 0, 20, 20)},
+		proc(c: ^Canvas) {reset_scissor(c)},
+		proc(c: ^Canvas) {set_global_alpha(c, 1)},
+		proc(c: ^Canvas) {set_composite_operation(c, .Source_Over)},
+		proc(c: ^Canvas) {set_composite_blend_func(c, .One, .One_Minus_Src_Alpha)},
+		proc(c: ^Canvas) {set_composite_blend_func_separate(c, .One, .One_Minus_Src_Alpha, .One, .One_Minus_Src_Alpha)},
+		proc(c: ^Canvas) {save(c); restore(c)},
+		proc(c: ^Canvas) {reset(c)},
+		proc(c: ^Canvas) {set_size(c, 20, 20)},
+	}
+	for change, k in changes {
+		slot: Paint_Slot
+		fill_shape(&c, &box, paint, slot = &slot)
+		fill_shape(&c, &box, paint, slot = &slot)
+		testing.expectf(t, len(c.paints) == 1, "change %d: %d rows before it", k, len(c.paints))
+		change(&c)
+		fill_shape(&c, &box, paint, slot = &slot)
+		testing.expectf(t, len(c.paints) == 2, "change %d: %d rows after it", k, len(c.paints))
+		testing.expect_value(t, c.shapes[2].paint, 1)
+		flush(&c)
+	}
+	// Another target, and back.
+	img, _ := create_image_empty(&c, 8, 8, .RGBA8, {.Premultiplied})
+	defer delete_image(&c, img)
+	slot: Paint_Slot
+	fill_shape(&c, &box, paint, slot = &slot)
+	set_render_target(&c, img)
+	fill_shape(&c, &box, paint, slot = &slot)
+	set_render_target(&c, nil)
+	fill_shape(&c, &box, paint, slot = &slot)
+	testing.expect_value(t, len(c.paints), 3)
+	flush(&c)
+	// The next frame, and another canvas.
+	slot = {}
+	fill_shape(&c, &box, paint, slot = &slot)
+	flush(&c)
+	fill_shape(&c, &box, paint, slot = &slot)
+	testing.expect_value(t, len(c.paints), 1)
+	fill_shape(&d, &box, paint, slot = &slot)
+	testing.expect_value(t, len(d.paints), 1)
+	fill_shape(&c, &box, paint, slot = &slot)
+	testing.expect_value(t, len(c.paints), 2)
+	// Two canvases at the same generation: the slot still knows its own.
+	e, f: Canvas
+	canvas_init(&e, software_backend(&b))
+	defer canvas_destroy(&e)
+	canvas_init(&f, software_backend(&b))
+	defer canvas_destroy(&f)
+	set_size(&e, 20, 20)
+	set_size(&f, 20, 20)
+	slot = {}
+	fill_shape(&e, &box, paint, slot = &slot)
+	fill_shape(&f, &box, paint, slot = &slot)
+	testing.expect_value(t, len(f.paints), 1)
+	flush(&e)
+	flush(&f)
+	// Truncating drops the rows after the mark.
+	flush(&c)
+	m := canvas_mark(&c)
+	fill_shape(&c, &box, paint, slot = &slot)
+	canvas_truncate(&c, m)
+	fill_shape(&c, &box, paint, slot = &slot)
+	testing.expect_value(t, len(c.paints), 1)
+	testing.expect_value(t, c.shapes[0].paint, 0)
+	flush(&c)
+	flush(&d)
+}
+
+@(test)
 test_sw_hairline_shape :: proc(t: ^testing.T) {
 	b: Software_Backend
 	software_backend_init(&b)

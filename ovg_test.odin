@@ -5,6 +5,8 @@ import "core:mem"
 import "core:slice"
 import "core:testing"
 
+import cv "deps:ocurves"
+
 // ---- helpers ------------------------------------------------------------------
 
 @(private = "file")
@@ -1364,6 +1366,47 @@ test_sw_feather :: proc(t: ^testing.T) {
 	testing.expectf(t, px(&s, 16, 32)[3] > 10, "outside the edge: %v", px(&s, 16, 32))
 	testing.expectf(t, abs(int(px(&s, 20, 32)[3]) - 128) < 40, "on the edge: %v", px(&s, 20, 32))
 	testing.expectf(t, px(&s, 24, 32)[3] < 250 && px(&s, 24, 32)[3] > 128, "inside the edge: %v", px(&s, 24, 32))
+}
+
+// A feathered fill's coverage eases across its widened edge: each pixel
+// takes the smoothstep of its widened footprint's exact coverage. A
+// hairline in the same paint takes its band's, neither widened nor eased.
+@(test)
+test_sw_feather_eases :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	c := &s.canvas
+	clear_rect(c, 0, 0, 64, 64, TRANSPARENT)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 20, 20, 24, 24)
+	shape, ok := shape_from_path(&p, outline = true)
+	testing.expect(t, ok)
+	defer shape_destroy(&shape)
+	paint := paint_color(WHITE)
+	paint.feather = 4
+	fill_shape(c, &shape, paint)
+	inst := c.shapes[0]
+	flush(c)
+	u, v := instance_footprint(inst)
+	inv := transform_inverse(inst.transform)
+	for x in u32(12) ..< 30 {
+		cov := shape_coverage(shape.data, transform_point(inv, f32(x) + 0.5, 32.5), u, v, .Non_Zero)
+		want := cov * cov * (3 - 2 * cov)
+		got := f32(px(&s, x, 32)[3]) / 255
+		testing.expectf(t, abs(got - want) <= 1.0 / 255, "x %d: %v, want %v (straight %v)", x, got, want, cov)
+	}
+	clear_rect(c, 0, 0, 64, 64, TRANSPARENT)
+	hairline_shape(c, &shape, paint, 1.5)
+	hl := c.shapes[0]
+	flush(c)
+	hu, hv := instance_footprint(hl)
+	for x in u32(16) ..< 25 {
+		want := cv.hairline(shape.data, transform_point(inv, f32(x) + 0.5, 32.5), hu, hv, 1.5)
+		got := f32(px(&s, x, 32)[3]) / 255
+		testing.expectf(t, abs(got - want) <= 1.0 / 255, "hairline x %d: %v, want %v", x, got, want)
+	}
 }
 
 // A layer of hairlines isn't a group (the group shader draws fills); a layer

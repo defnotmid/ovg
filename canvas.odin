@@ -46,6 +46,9 @@ Canvas :: struct {
 	motion_blur:           bool,
 	motions:               [dynamic]Shape_Motion,
 	nearness:              f32,
+	// The generation of the paint rows Paint_Slots hold: a change of what
+	// a row bakes in (state, target, frame) starts the next.
+	paint_gen:             u64,
 }
 
 canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator) {
@@ -65,6 +68,7 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		fringe_width    = 1,
 		device_px_ratio = 1,
 		nearness        = 1,
+		paint_gen       = 1,
 	}
 	shape_scratch_init(&c.scratch, allocator)
 	image_store_init(&c.images, backend, allocator)
@@ -113,6 +117,7 @@ save :: proc(c: ^Canvas) {
 }
 
 restore :: proc(c: ^Canvas) {
+	paint_rows_stale(c)
 	was := state(c).motion.nearness
 	if len(c.states) > 1 {
 		pop(&c.states)
@@ -130,6 +135,13 @@ restore :: proc(c: ^Canvas) {
 // Resets the current state to defaults.
 reset :: proc "contextless" (c: ^Canvas) {
 	state(c)^ = default_state()
+	paint_rows_stale(c)
+}
+
+// The paint rows slots hold stop serving: what they bake in changed.
+@(private)
+paint_rows_stale :: #force_inline proc "contextless" (c: ^Canvas) {
+	c.paint_gen += 1
 }
 
 // Sets the screen size in device pixels and starts a frame on the screen.
@@ -138,6 +150,7 @@ set_size :: proc(c: ^Canvas, width, height: u32, dpi: f32 = 1) {
 	c.height = height
 	c.fringe_width = 1.0 / dpi
 	c.device_px_ratio = dpi
+	paint_rows_stale(c)
 	c.backend.set_size(c.backend.data, width, height, dpi)
 	c.current_render_target = nil
 	c.current_render_origin = {}
@@ -158,18 +171,22 @@ render_target_size :: proc(c: ^Canvas) -> (w, h: u32) {
 
 set_global_alpha :: proc "contextless" (c: ^Canvas, alpha: f32) {
 	state(c).alpha = alpha
+	paint_rows_stale(c)
 }
 
 set_composite_operation :: proc "contextless" (c: ^Canvas, op: Composite_Operation) {
 	state(c).composite_operation = composite_state_from_op(op)
+	paint_rows_stale(c)
 }
 
 set_composite_blend_func :: proc "contextless" (c: ^Canvas, src, dst: Blend_Factor) {
 	state(c).composite_operation = {src, dst, src, dst}
+	paint_rows_stale(c)
 }
 
 set_composite_blend_func_separate :: proc "contextless" (c: ^Canvas, src_rgb, dst_rgb, src_alpha, dst_alpha: Blend_Factor) {
 	state(c).composite_operation = {src_rgb, dst_rgb, src_alpha, dst_alpha}
+	paint_rows_stale(c)
 }
 
 // Directs subsequent drawing to `target` (`nil` = screen), whose top-left
@@ -189,6 +206,7 @@ render_target_set :: proc(c: ^Canvas, target: Render_Target, origin: [2]i32, vel
 		c.current_render_target = target
 		c.current_render_origin = origin
 		c.current_render_velocity = twin
+		paint_rows_stale(c)
 	}
 }
 
@@ -243,16 +261,19 @@ push_motions :: proc(c: ^Canvas, n: int) {
 
 reset_transform :: proc "contextless" (c: ^Canvas) {
 	state(c).transform = TRANSFORM_IDENTITY
+	paint_rows_stale(c)
 }
 
 // Replaces the current transform.
 set_transform :: proc "contextless" (c: ^Canvas, t: Transform2D) {
 	state(c).transform = t
+	paint_rows_stale(c)
 }
 
 // Applies `t` before the current transform (femtovg's `set_transform`).
 apply_transform :: proc "contextless" (c: ^Canvas, t: Transform2D) {
 	transform_premultiply(&state(c).transform, t)
+	paint_rows_stale(c)
 }
 
 translate :: proc "contextless" (c: ^Canvas, x, y: f32) {
@@ -288,6 +309,7 @@ scissor :: proc "contextless" (c: ^Canvas, x, y, width, height: f32) {
 	st.scissor.transform = transform_multiply(transform_translation(x + w * 0.5, y + h * 0.5), st.transform)
 	st.scissor.extent = {w * 0.5, h * 0.5}
 	st.scissor.has_extent = true
+	paint_rows_stale(c)
 }
 
 // Intersects the current scissor with a rectangle. With a rotated transform
@@ -308,6 +330,7 @@ intersect_scissor :: proc "contextless" (c: ^Canvas, x, y, w, h: f32) {
 
 reset_scissor :: proc "contextless" (c: ^Canvas) {
 	state(c).scissor = {transform = TRANSFORM_IDENTITY}
+	paint_rows_stale(c)
 }
 
 @(private)
@@ -424,7 +447,7 @@ outside_target :: proc(c: ^Canvas, b: Bounds) -> bool {
 // Fills `p` by per-pixel coverage: the path becomes a shape for this frame
 // (shape.odin), built in drawing coordinates, so its pixels' footprints
 // are upright boxes. A feathered paint widens the footprint and eases the
-// coverage in (Params.smooth_edge); one without anti-aliasing takes each
+// coverage in (Shape_Edge.Smooth); one without anti-aliasing takes each
 // pixel center's winding.
 fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	t := state(c).transform
@@ -463,7 +486,7 @@ fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
 paint_instance :: proc "contextless" (paint: Paint, t: Transform2D) -> Shape_Instance {
 	inst := Shape_Instance {
 		rule = paint.fill_rule,
-		aliased  = !paint.anti_alias,
+		edge = .Aliased if !paint.anti_alias else (.Smooth if paint.feather > 0 else .Exact),
 	}
 	if paint.feather > 0 {
 		// femtovg's fringe for the feather, as the footprint's growth.
@@ -479,24 +502,35 @@ paint_instance :: proc "contextless" (paint: Paint, t: Transform2D) -> Shape_Ins
 // units (its path's, or a glyph's font units, y down) to current units.
 // The paint fills as with fill_path (fill rule, anti-aliasing, feather).
 // The frame keeps `s`'s address: the shape must stay there, undestroyed,
-// until the frame has been rendered.
-fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY) {
-	to := transform_multiply(local, state(c).transform)
-	inst := paint_instance(paint, to)
-	inst.transform = transform_multiply(shape_local(s), to)
-	if outside_target(c, device_bounds(s.bounds, inst.transform, 1 + inst.widen)) {
-		return
-	}
-	inst.shape = s
-	cmd: Command
-	cmd, inst.paint = shape_paint(c, paint)
-	push_shape(c, cmd, inst)
+// until the frame has been rendered. With `slot` the paint's row is the
+// slot's while it holds (Paint_Slot).
+fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENTITY, slot: ^Paint_Slot = nil) {
+	push_shape_instance(c, s, paint, 0, local, slot)
 }
 
 // `fill_shape` at each of `locals`, sharing one paint row: a shape drawn
 // many times (an editor's anchors and handles) costs an instance each.
-fill_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, locals: []Transform2D) {
-	push_shapes(c, s, paint, 0, locals)
+fill_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, locals: []Transform2D, slot: ^Paint_Slot = nil) {
+	own: Paint_Slot
+	sl := slot if slot != nil else &own
+	for local in locals {
+		push_shape_instance(c, s, paint, 0, local, sl)
+	}
+}
+
+// A paint's row in the frame, kept by a caller that draws many shapes in
+// a few paints (a map's or a document's appearances) beside each paint,
+// zero to start: fill_shape, fill_shapes, hairline_shape and
+// hairline_shapes given it add the paint's row once and reuse it, fills
+// and hairlines alike, until what the row bakes in changes: the
+// transform, scissor, alpha or blend (save and restore included), the
+// render target or the frame. A slot serves one paint on one canvas;
+// clear it when its paint changes.
+Paint_Slot :: struct {
+	canvas: ^Canvas,
+	gen:    u64,
+	row:    u32,
+	cmd:    Command,
 }
 
 // Draws the outline of `s` (built with one: shape_from_path's `outline`)
@@ -505,18 +539,22 @@ fill_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, locals: []Transform2D) 
 // no stroke to build. Contours the path leaves open stay open; ends and
 // corners round. A pixel takes its share within width / 2 of the outline
 // (cv.hairline); the paint's fill rule, anti-aliasing and feather do not
-// apply. As with fill_shape, the frame keeps `s`'s address.
-hairline_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, local := TRANSFORM_IDENTITY) {
+// apply. As with fill_shape, the frame keeps `s`'s address, and `slot`
+// holds the paint's row (Paint_Slot), the same row its fills take.
+hairline_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, local := TRANSFORM_IDENTITY, slot: ^Paint_Slot = nil) {
 	if width > 0 {
-		local := local
-		push_shapes(c, s, paint, width, ([^]Transform2D)(&local)[:1])
+		push_shape_instance(c, s, paint, width, local, slot)
 	}
 }
 
 // `hairline_shape` at each of `locals`, sharing one paint row.
-hairline_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, locals: []Transform2D) {
+hairline_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, width: f32, locals: []Transform2D, slot: ^Paint_Slot = nil) {
 	if width > 0 {
-		push_shapes(c, s, paint, width, locals)
+		own: Paint_Slot
+		sl := slot if slot != nil else &own
+		for local in locals {
+			push_shape_instance(c, s, paint, width, local, sl)
+		}
 	}
 }
 
@@ -605,38 +643,30 @@ fill_markers :: proc(c: ^Canvas, kind: Marker_Kind, radius, outline: f32, paint:
 	}
 }
 
-// Instances of `s` at each of `locals` with one paint row: fills, or
-// hairlines `hairline` pixels wide.
+// One instance of `s` at `local` (under the current transform), a fill or
+// a hairline `hairline` pixels wide, unless it lies outside the target;
+// the paint's row is `slot`'s while it holds, else added (and kept in
+// `slot` when there is one).
 @(private)
-push_shapes :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, locals: []Transform2D) {
-	cmd: Command
-	row := max(u32)
-	for local in locals {
-		push_shape_instance(c, s, paint, hairline, local, &cmd, &row)
-	}
-}
-
-// One instance of `s` at `local` (under the current transform), unless it
-// lies outside the target; the paint row `row` (and its command `cmd`) is
-// added by the first that draws, max(u32) until then.
-@(private)
-push_shape_instance :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, local: Transform2D, cmd: ^Command, row: ^u32) {
+push_shape_instance :: #force_inline proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, local: Transform2D, slot: ^Paint_Slot) {
 	to := transform_multiply(local, state(c).transform)
 	inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
 	inst.transform = transform_multiply(shape_local(s), to)
 	if outside_target(c, device_bounds(s.bounds, inst.transform, instance_reach(inst))) {
 		return
 	}
-	if row^ == max(u32) {
-		pp := paint
-		if hairline > 0 {
-			pp.feather = 0
-		}
-		cmd^, row^ = shape_paint(c, pp)
-	}
 	inst.shape = s
-	inst.paint = row^
-	push_shape(c, cmd^, inst)
+	if slot != nil && slot.canvas == c && slot.gen == c.paint_gen {
+		inst.paint = slot.row
+		push_shape(c, slot.cmd, inst)
+		return
+	}
+	cmd: Command
+	cmd, inst.paint = shape_paint(c, paint)
+	if slot != nil {
+		slot^ = {c, c.paint_gen, inst.paint, cmd}
+	}
+	push_shape(c, cmd, inst)
 }
 
 
@@ -697,7 +727,6 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
 	params.spread = f32(paint.spread)
-	params.smooth_edge = paint.feather > 0
 	return cmd, add_paint(c, params)
 }
 
@@ -856,6 +885,7 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 		}
 	}
 	resize(&c.paints, m.paints)
+	paint_rows_stale(c)
 	resize(&c.bytes, m.bytes)
 	resize(&c.filters, m.filters)
 	resize(&c.runs, m.runs)
@@ -893,6 +923,7 @@ canvas_frame :: proc "contextless" (c: ^Canvas) -> Frame {
 @(private)
 frame_end :: proc(c: ^Canvas) {
 	gradient_store_release_old(&c.gradients, &c.images)
+	paint_rows_stale(c)
 	// The backend starts every frame on the screen; keep the canvas in sync.
 	c.current_render_target = nil
 	c.current_render_origin = {}

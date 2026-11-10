@@ -192,7 +192,7 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, frame_words: []u32, offset: 
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
-	flags: u32 = (1 if inst.rule == .Even_Odd else 0) | (2 if inst.aliased else 0)
+	flags: u32 = (1 if inst.rule == .Even_Odd else 0) | (2 if inst.edge == .Aliased else 0) | (4 if inst.edge == .Smooth else 0)
 	// A hairline's width in place of the flags: a positive normal float,
 	// whose exponent bits the shader tells from the flags by. Anything
 	// narrower than the smallest normal float covers nothing anyway.

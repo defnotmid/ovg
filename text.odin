@@ -316,11 +316,10 @@ hairline_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph
 	if !(width > 0) {
 		return
 	}
-	cmd: Command
-	row := max(u32)
+	slot: Paint_Slot
 	for g in glyphs {
 		if s := font_glyph_shape(f, g.glyph); s != nil {
-			push_shape_instance(c, s, paint, width, {scale, 0, 0, scale, g.x, g.y}, &cmd, &row)
+			push_shape_instance(c, s, paint, width, {scale, 0, 0, scale, g.x, g.y}, &slot)
 		}
 	}
 }

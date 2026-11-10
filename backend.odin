@@ -88,10 +88,6 @@ Params :: struct {
 	// Two-point conical radial gradient: 1 and the focal point (gradient
 	// space, outer center at the origin); extent = (outer r, focal r).
 	focal:                       [3]f32,
-	// Coverage eases in and out across the fringe (smoothstep) instead of a
-	// straight ramp: a feathered fill's wide edge then has no visible
-	// shoulder (`Paint.feather`).
-	smooth_edge:                 bool,
 }
 
 default_params :: proc "contextless" () -> Params {
@@ -100,7 +96,7 @@ default_params :: proc "contextless" () -> Params {
 
 // The 14 x vec4 uniform array the fragment shader reads as `frag[]`.
 pack_frag_uniforms :: proc "contextless" (p: Params) -> (out: [14][4]f32) {
-	out[0] = {p.scissor_mat[0], p.scissor_mat[1], p.scissor_mat[2], 1 if p.smooth_edge else 0}
+	out[0] = {p.scissor_mat[0], p.scissor_mat[1], p.scissor_mat[2], 0}
 	out[1] = {p.scissor_mat[4], p.scissor_mat[5], p.scissor_mat[6], 0}
 	out[2] = {p.scissor_mat[8], p.scissor_mat[9], p.scissor_mat[10], 0}
 	out[3] = {p.paint_mat[0], p.paint_mat[1], p.paint_mat[2], 0}
@@ -257,9 +253,8 @@ Cmd_Draw_Shapes :: struct {
 // `shape` (kept by its owner; GPU backends upload it once), or when nil
 // `Frame.shape_words[words]` (a path filled this frame). A pixel's
 // coverage is its footprint's, `widen` pixels wider than the pixel (a
-// feathered edge), or with `aliased` its center's winding; with `hairline`
-// its share within hairline / 2 pixels of the shape's outline
-// (`hairline_shape`) instead. A `marker` has no words: it is the unit
+// feathered edge), as `edge` takes it; with `hairline` its share within
+// hairline / 2 pixels of the shape's outline (`hairline_shape`) instead. A `marker` has no words: it is the unit
 // square or circle its transform scales and places, filled (`marker_fill`,
 // with its paint) and outlined `hairline` pixels wide (with its group's
 // tint) (`draw_markers`, cv.marker).
@@ -269,11 +264,21 @@ Shape_Instance :: struct {
 	transform:   Transform2D,
 	paint:       u32,
 	rule:        Fill_Rule,
-	aliased:     bool,
+	edge:        Shape_Edge,
 	marker:      Marker_Kind,
 	marker_fill: bool,
 	widen:       f32,
 	hairline:    f32,
+}
+
+// How a fill's coverage meets its edge: its footprint's exact area; its
+// center's winding (a paint without anti-aliasing, feathered or not); or
+// the exact area eased in and out across the edge, a smoothstep, so a
+// feathered fill's wide edge has no visible shoulder.
+Shape_Edge :: enum u8 {
+	Exact,
+	Aliased,
+	Smooth,
 }
 
 Marker_Kind :: enum u8 {

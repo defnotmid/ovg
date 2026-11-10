@@ -799,8 +799,11 @@ every part follows:
   (shape.odin) whose pixels take their exact area coverage. What makes a
   path long-lived owns its shape, built once and drawn under any transform
   (`fill_shape`; `fill_shapes` draws one at many transforms with one paint
-  row, as an editor's anchors): fonts own glyph shapes, SVG documents their
-  elements' fills and strokes; their cubics and stroke outlines are within
+  row, as an editor's anchors; a `Paint_Slot` kept beside each of a few
+  paints gives many shapes, fills and hairlines alike, the paint's one row
+  until the state changes, as a map's or a document's appearances): fonts
+  own glyph shapes, SVG documents their elements' fills and strokes; their
+  cubics and stroke outlines are within
   1/4096 of their size, or the `tol` they are built with (`shape_from_path`,
   `shape_from_stroke`: a shape drawn magnified wants the pixel fraction it
   may miss by at its largest scale). `fill_path` and `stroke_path` build one for paths
