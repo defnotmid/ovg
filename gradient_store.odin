@@ -8,22 +8,38 @@ GRADIENT_RAMP_WIDTH :: 256
 // The 256x1 ramp textures of multi-stop gradients, by stop list (a paint's
 // alpha is applied when drawing, so fades reuse the ramp). Ramps are half
 // floats, so a gradient keeps more than 8 bits in an RGBA16F target. Ramps used in a
-// frame survive into the next; anything unused for a whole frame is freed.
-// Kept across frames because the stops arrive with every draw and a ramp
-// is a texture upload.
+// frame survive into the next; one unused for a whole frame joins `spare`,
+// whose ramps a new stop list takes and writes over, so an animated
+// gradient costs an upload a frame rather than a texture made, cleared and
+// freed; a spare unused for SPARE_FRAMES more frames is freed. Kept across
+// frames because the stops arrive with every draw and a ramp is a texture
+// upload.
 Gradient_Store :: struct {
 	this_frame: map[u64]Image_Id,
 	prev_frame: map[u64]Image_Id,
+	spare:      [dynamic]Spare_Ramp,
 }
+
+@(private)
+Spare_Ramp :: struct {
+	id:   Image_Id,
+	// The frames it has been spare.
+	idle: int,
+}
+
+@(private)
+SPARE_FRAMES :: 2
 
 gradient_store_init :: proc(s: ^Gradient_Store, allocator := context.allocator) {
 	s.this_frame = make(map[u64]Image_Id, allocator)
 	s.prev_frame = make(map[u64]Image_Id, allocator)
+	s.spare = make([dynamic]Spare_Ramp, allocator)
 }
 
 gradient_store_destroy :: proc(s: ^Gradient_Store) {
 	delete(s.this_frame)
 	delete(s.prev_frame)
+	delete(s.spare)
 }
 
 @(private)
@@ -42,7 +58,14 @@ gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient,
 	if cached, ok := s.this_frame[key]; ok {
 		return cached, nil
 	}
-	id = image_store_alloc(images, {{.Repeat_Y}, GRADIENT_RAMP_WIDTH, 1, .RGBA16F}) or_return
+	// The newest spare, else a new ramp. A spare drew nothing this frame or
+	// the last, so writing over it changes no row of this frame's.
+	if n := len(s.spare); n > 0 {
+		id = s.spare[n - 1].id
+		resize(&s.spare, n - 1)
+	} else {
+		id = image_store_alloc(images, {{.Repeat_Y}, GRADIENT_RAMP_WIDTH, 1, .RGBA16F}) or_return
+	}
 	ramp: [GRADIENT_RAMP_WIDTH][4]f16
 	gradient_synthesize(g, &ramp)
 	if err = image_store_update(images, id, {.RGBA16F, slice.to_bytes(ramp[:]), GRADIENT_RAMP_WIDTH, 1, 0}, 0, 0); err != nil {
@@ -53,10 +76,21 @@ gradient_store_lookup_or_add :: proc(s: ^Gradient_Store, g: Multi_Stop_Gradient,
 	return id, nil
 }
 
-// Call after every rendered frame.
+// Call after every rendered frame: ramps the frame before used and this
+// one didn't become spare, and spares idle too long are freed.
 gradient_store_release_old :: proc(s: ^Gradient_Store, images: ^Image_Store) {
+	kept := 0
+	for sp in s.spare {
+		if sp.idle < SPARE_FRAMES {
+			s.spare[kept] = {sp.id, sp.idle + 1}
+			kept += 1
+		} else {
+			image_store_remove(images, sp.id)
+		}
+	}
+	resize(&s.spare, kept)
 	for _, id in s.prev_frame {
-		image_store_remove(images, id)
+		append(&s.spare, Spare_Ramp{id, 0})
 	}
 	clear(&s.prev_frame)
 	s.this_frame, s.prev_frame = s.prev_frame, s.this_frame

@@ -1345,6 +1345,55 @@ test_morphology_erode_outside_valid :: proc(t: ^testing.T) {
 	testing.expect_value(t, d[(1 * 16 + 1) * 4 + 3], 0)
 }
 
+// A gradient whose stops change every frame draws each frame as a fresh
+// canvas would, its ramps taken from the spares of frames before rather
+// than made anew, and the images kept stay few.
+@(test)
+test_animated_gradient_ramps :: proc(t: ^testing.T) {
+	draw :: proc(c: ^Canvas, k: int) {
+		clear_rect(c, 0, 0, 64, 16, WHITE)
+		p: Path
+		defer path_destroy(&p)
+		for g in 0 ..< 3 {
+			stops := [?]Gradient_Stop{{0, rgb(255, 0, 0)}, {0.2 + 0.01 * f32(k) + 0.1 * f32(g), rgb(0, u8(80 * g), 255)}, {1, rgb(0, 0, 0)}}
+			path_reset(&p)
+			path_rect(&p, f32(g) * 21, 0, 21, 16)
+			fill_path(c, &p, paint_linear_gradient_stops(f32(g) * 21, 0, f32(g) * 21 + 21, 0, stops[:]))
+		}
+	}
+	s: Sw
+	sw_open(&s, 64, 16)
+	defer sw_close(&s)
+	most: u32
+	for k in 0 ..< 20 {
+		draw(&s.canvas, k)
+		flush(&s.canvas)
+		most = max(most, s.canvas.images.entries.len)
+	}
+	// The frame's three ramps, kept into the next, and the three spares the
+	// next frame writes over: made anew each frame they would be twelve.
+	testing.expectf(t, most <= 6, "%d images", most)
+	fresh: Sw
+	sw_open(&fresh, 64, 16)
+	defer sw_close(&fresh)
+	draw(&fresh.canvas, 19)
+	flush(&fresh.canvas)
+	testing.expect(t, slice.equal(s.backend.pixels, fresh.backend.pixels))
+	// With no gradients drawn, the ramps and spares are freed within a few
+	// frames.
+	for _ in 0 ..< 5 {
+		clear_rect(&s.canvas, 0, 0, 64, 16, WHITE)
+		flush(&s.canvas)
+	}
+	testing.expect_value(t, s.canvas.images.entries.len, 0)
+	// Still stops reuse their ramp: nothing new after the first frame.
+	for _ in 0 ..< 4 {
+		draw(&fresh.canvas, 19)
+		flush(&fresh.canvas)
+	}
+	testing.expect_value(t, fresh.canvas.images.entries.len, 3)
+}
+
 // A feathered fill keeps its soft edge on software, as the shape shader does.
 @(test)
 test_sw_feather :: proc(t: ^testing.T) {
