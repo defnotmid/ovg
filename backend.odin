@@ -297,7 +297,16 @@ instance_bounds :: proc "contextless" (inst: Shape_Instance, frame_words: []u32)
 		ex, ey := abs(t[0]) + abs(t[2]) + g, abs(t[1]) + abs(t[3]) + g
 		return {t[4] - ex, t[5] - ey, t[4] + ex, t[5] + ey}
 	}
-	return device_bounds(instance_words(inst, frame_words), inst.transform, instance_reach(inst))
+	return device_bounds(instance_shape_bounds(inst, frame_words), inst.transform, instance_reach(inst))
+}
+
+// The instance's shape's bounds in shape units: a kept shape's from the
+// Shape, a frame's from its words. Not for markers.
+instance_shape_bounds :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> Bounds {
+	if inst.shape != nil {
+		return inst.shape.bounds
+	}
+	return words_bounds(frame_words[inst.words.start:][:inst.words.count])
 }
 
 // How many pixels past the shape's bounds the instance's coverage reaches.

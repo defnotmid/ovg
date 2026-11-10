@@ -448,7 +448,7 @@ fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
 	inst := paint_instance(paint, t)
 	inst.words = {u32(start), u32(len(words))}
 	inst.transform = {extent, 0, 0, extent, origin.x, origin.y}
-	if outside_target(c, device_bounds(words, inst.transform, 1 + inst.widen)) {
+	if outside_target(c, device_bounds(words_bounds(words), inst.transform, 1 + inst.widen)) {
 		resize(&c.shape_words, start)
 		return
 	}
@@ -484,7 +484,7 @@ fill_shape :: proc(c: ^Canvas, s: ^Shape, paint: Paint, local := TRANSFORM_IDENT
 	to := transform_multiply(local, state(c).transform)
 	inst := paint_instance(paint, to)
 	inst.transform = transform_multiply(shape_local(s), to)
-	if outside_target(c, device_bounds(s.data, inst.transform, 1 + inst.widen)) {
+	if outside_target(c, device_bounds(s.bounds, inst.transform, 1 + inst.widen)) {
 		return
 	}
 	inst.shape = s
@@ -624,7 +624,7 @@ push_shape_instance :: proc(c: ^Canvas, s: ^Shape, paint: Paint, hairline: f32, 
 	to := transform_multiply(local, state(c).transform)
 	inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
 	inst.transform = transform_multiply(shape_local(s), to)
-	if outside_target(c, device_bounds(s.data, inst.transform, instance_reach(inst))) {
+	if outside_target(c, device_bounds(s.bounds, inst.transform, instance_reach(inst))) {
 		return
 	}
 	if row^ == max(u32) {
@@ -714,13 +714,20 @@ push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, r
 // Device bounds of a shape under `t` (shape units to drawing coordinates),
 // grown by the pixel its edge coverage reaches.
 shape_device_bounds :: proc "contextless" (s: ^Shape, t: Transform2D) -> Bounds {
-	return device_bounds(s.data, t, 1)
+	return device_bounds(s.bounds, t, 1)
 }
 
-// Device bounds of shape words under `t`, grown by `grow` pixels.
+// The bounds shape words' header holds, in shape units (Shape.bounds).
 @(private)
-device_bounds :: proc "contextless" (words: []u32, t: Transform2D, grow: f32) -> Bounds {
+words_bounds :: proc "contextless" (words: []u32) -> Bounds {
 	x0, y0, x1, y1 := cv.bounds(words)
+	return {x0, y0, x1, y1}
+}
+
+// Device bounds of `sb` (shape units) under `t`, grown by `grow` pixels.
+@(private)
+device_bounds :: proc "contextless" (sb: Bounds, t: Transform2D, grow: f32) -> Bounds {
+	x0, y0, x1, y1 := sb.minx, sb.miny, sb.maxx, sb.maxy
 	b := EMPTY_BOUNDS
 	for p in ([4]Vec2{{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}}) {
 		q := transform_point(t, p.x, p.y)

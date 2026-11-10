@@ -181,7 +181,7 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 		// Written once, straight into the mapped transfer buffer.
 		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
-				out[i] = gpu_shape_instance(inst, vg.instance_words(inst, frame.shape_words), b.shape_offsets[i], b.shape_clips[i])
+				out[i] = gpu_shape_instance(inst, frame.shape_words, b.shape_offsets[i], b.shape_clips[i])
 			}
 			copy(out[len(frame.shapes):instance_count], b.groups[:])
 			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))

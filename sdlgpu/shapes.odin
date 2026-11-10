@@ -185,10 +185,10 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	return true
 }
 
-// The instance as the shader reads it: `words` are its shape's, `offset`
-// their place in the store.
+// The instance as the shader reads it: `offset` is its shape's words'
+// place in the store, `frame_words` the frame's own.
 @(private)
-gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, clip: [4]f32) -> Gpu_Shape_Instance {
+gpu_shape_instance :: proc(inst: vg.Shape_Instance, frame_words: []u32, offset: u32, clip: [4]f32) -> Gpu_Shape_Instance {
 	t := inst.transform
 	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
 	u, v := vg.instance_footprint(inst)
@@ -199,16 +199,16 @@ gpu_shape_instance :: proc(inst: vg.Shape_Instance, words: []u32, offset: u32, c
 	// A marker: the unit square or circle, its kind where a shape's words
 	// are (16 added when it is filled).
 	at := offset
-	x0, y0, x1, y1: f32 = -1, -1, 1, 1
+	sb := vg.Bounds{-1, -1, 1, 1}
 	if inst.marker != .None {
 		at = u32(inst.marker) | (16 if inst.marker_fill else 0)
 	} else {
-		x0, y0, x1, y1 = cv.bounds(words)
+		sb = vg.instance_shape_bounds(inst, frame_words)
 	}
 	return {
 		m = {t[0], t[1], t[2], t[3]},
 		t = {t[4], t[5], epp.x, epp.y},
-		bounds = {x0, y0, x1, y1},
+		bounds = {sb.minx, sb.miny, sb.maxx, sb.maxy},
 		uv = {u.x, u.y, v.x, v.y},
 		data = {at, inst.paint, flags, 0},
 		clip = clip,

@@ -22,6 +22,9 @@ Shape :: struct {
 	// units with y down): `p = origin + q * extent`.
 	origin:    Vec2,
 	extent:    f32,
+	// In shape units, as the words' header holds them: drawing reads them
+	// here, beside the transform, not from the words.
+	bounds:    Bounds,
 	allocator: mem.Allocator,
 }
 
@@ -40,7 +43,7 @@ shape_local :: proc "contextless" (s: ^Shape) -> Transform2D {
 
 // Bounds in shape units.
 shape_bounds :: proc "contextless" (s: ^Shape) -> (minx, miny, maxx, maxy: f32) {
-	return cv.bounds(s.data)
+	return s.bounds.minx, s.bounds.miny, s.bounds.maxx, s.bounds.maxy
 }
 
 // ---- building -------------------------------------------------------------------
@@ -127,7 +130,7 @@ shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index, o: ^ft.Outl
 // a hairline (`hairline_shape`).
 shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true) -> (s: Shape, ok: bool) {
 	words, origin, extent := cv.build(b, allocator, search) or_return
-	return {data = words, origin = origin, extent = extent, allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}, true
+	return {data = words, origin = origin, extent = extent, bounds = words_bounds(words), allocator = allocator, id = sync.atomic_add(&shape_next_id, 1) + 1}, true
 }
 
 // What building shapes needs, kept by a caller that builds many (it only
