@@ -10,9 +10,7 @@ import cv "deps:ocurves"
 // q lies within `near` of an outline.
 @(private = "file")
 path_winding_at :: proc(p: ^Path, q: [2]f64, near: f64) -> (w: i32, on: bool) {
-	stack: [dynamic][2]f64
-	defer delete(stack)
-	return cv.contours_winding(p, 0, len(p.contours), q, &stack, near)
+	return cv.contours_winding(p, 0, len(p.contours), q, near)
 }
 
 @(private = "file")

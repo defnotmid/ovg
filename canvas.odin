@@ -428,7 +428,7 @@ contains_point :: proc(c: ^Canvas, p: ^Path, x, y: f32, rule: Fill_Rule) -> bool
 	h := &c.scratch.hit
 	path_reset(h)
 	path_append(h, p, state(c).transform)
-	w, _ := cv.contours_winding(h, 0, len(h.contours), {f64(x), f64(y)}, &c.scratch.stack)
+	w, _ := cv.contours_winding(h, 0, len(h.contours), {f64(x), f64(y)})
 	return cv.fill_inside(w, rule)
 }
 

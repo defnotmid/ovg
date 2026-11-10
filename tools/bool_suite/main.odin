@@ -175,16 +175,14 @@ operand :: proc(p: ^vg.Path, kind: int, r: rand.Generator) {
 
 // Wrong and overlapping samples of `out` against `a op b`.
 check :: proc(a, b, out: ^vg.Path, op: vg.Bool_Op, rule: vg.Fill_Rule) -> (wrong, overlapping: int) {
-	stack: [dynamic][2]f64
-	defer delete(stack)
 	N :: 40
 	near := 0.15
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
-			wa, ona := winding(a, q, near, &stack)
-			wb, onb := winding(b, q, near, &stack)
-			wr, onr := winding(out, q, near, &stack)
+			wa, ona := winding(a, q, near)
+			wb, onb := winding(b, q, near)
+			wr, onr := winding(out, q, near)
 			if ona || onb || onr {
 				continue
 			}
@@ -222,20 +220,18 @@ check_regions :: proc(s: ^cv.Bool_Scratch) -> (faults: int) {
 		}
 	}
 	faults += int(at != u32(len(c.contours)))
-	stack: [dynamic][2]f64
-	defer delete(stack)
 	N :: 40
 	near := 0.15
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
-			wr, onr := winding(c, q, near, &stack)
+			wr, onr := winding(c, q, near)
 			if onr {
 				continue
 			}
 			holding := 0
 			for r in s.faces {
-				if w, _ := cv.contours_winding(c, int(r.x), int(r.y), q, &stack); w != 0 {
+				if w, _ := cv.contours_winding(c, int(r.x), int(r.y), q); w != 0 {
 					holding += 1
 				}
 			}
@@ -248,16 +244,14 @@ check_regions :: proc(s: ^cv.Bool_Scratch) -> (faults: int) {
 // Samples of a divide where the count of faces holding the point isn't 1
 // inside the union and 0 outside it.
 check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> (wrong: int) {
-	stack: [dynamic][2]f64
-	defer delete(stack)
 	N :: 40
 	near := 0.15
 	for i in 0 ..< N {
 		for j in 0 ..< N {
 			q := [2]f64{(f64(i) + 0.37) * 100 / N, (f64(j) + 0.61) * 100 / N}
-			wa, ona := winding(a, q, near, &stack)
-			wb, onb := winding(b, q, near, &stack)
-			_, ono := winding(out, q, near, &stack)
+			wa, ona := winding(a, q, near)
+			wb, onb := winding(b, q, near)
+			_, ono := winding(out, q, near)
 			if ona || onb || ono {
 				continue
 			}
@@ -265,7 +259,7 @@ check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> 
 			// either operand, and that face says which.
 			holding := 0
 			for f, fi in faces {
-				if w, _ := cv.contours_winding(out, int(f.start), int(f.count), q, &stack); w != 0 {
+				if w, _ := cv.contours_winding(out, int(f.start), int(f.count), q); w != 0 {
 					holding += 1
 					wrong += int(inside[2 * fi] != (wa != 0) || inside[2 * fi + 1] != (wb != 0))
 				}
@@ -279,6 +273,6 @@ check_divide :: proc(a, b, out: ^vg.Path, faces: []vg.Range, inside: []bool) -> 
 
 // The winding about q, with `on` when q lies within `near` of an outline:
 // a sample that close is skipped (the result may round or merge there).
-winding :: proc(c: ^cv.Contours, q: [2]f64, near: f64, stack: ^[dynamic][2]f64) -> (w: i32, on: bool) {
-	return cv.contours_winding(c, 0, len(c.contours), q, stack, near)
+winding :: proc(c: ^cv.Contours, q: [2]f64, near: f64) -> (w: i32, on: bool) {
+	return cv.contours_winding(c, 0, len(c.contours), q, near)
 }
