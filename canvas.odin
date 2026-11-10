@@ -2,6 +2,7 @@ package ovg
 
 import "core:math"
 import "core:mem"
+import "core:sync"
 
 import cv "deps:ocurves"
 
@@ -47,7 +48,9 @@ Canvas :: struct {
 	motions:               [dynamic]Shape_Motion,
 	nearness:              f32,
 	// The generation of the paint rows Paint_Slots hold: a change of what
-	// a row bakes in (state, target, frame) starts the next.
+	// a row bakes in (state, target, an image's info, frame) starts the
+	// next. Each canvas_init starts an epoch of its own (its high bits), so
+	// a slot can't match a canvas made again at the same address.
 	paint_gen:             u64,
 }
 
@@ -68,7 +71,7 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		fringe_width    = 1,
 		device_px_ratio = 1,
 		nearness        = 1,
-		paint_gen       = 1,
+		paint_gen       = (sync.atomic_add(&paint_epochs, 1) + 1) << 40,
 	}
 	shape_scratch_init(&c.scratch, allocator)
 	image_store_init(&c.images, backend, allocator)
@@ -137,6 +140,9 @@ reset :: proc "contextless" (c: ^Canvas) {
 	state(c)^ = default_state()
 	paint_rows_stale(c)
 }
+
+@(private = "file")
+paint_epochs: u64
 
 // The paint rows slots hold stop serving: what they bake in changed.
 @(private)
@@ -388,6 +394,7 @@ update_image :: proc(c: ^Canvas, id: Image_Id, src: Image_Source, x, y: u32) -> 
 
 delete_image :: proc(c: ^Canvas, id: Image_Id) {
 	image_store_remove(&c.images, id)
+	paint_rows_stale(c)
 }
 
 image_info :: proc(c: ^Canvas, id: Image_Id) -> (Image_Info, bool) {
@@ -408,7 +415,22 @@ read_image :: proc(c: ^Canvas, id: Image_Id, allocator := context.allocator) -> 
 }
 
 realloc_image :: proc(c: ^Canvas, id: Image_Id, width, height: u32, format: Pixel_Format, flags: Image_Flags = {}) -> Error {
+	// An image paint's row bakes in its flags and format.
+	paint_rows_stale(c)
 	return image_store_realloc(&c.images, id, {flags, width, height, format})
+}
+
+// Replaces an existing image's info, for a backend whose image follows
+// another texture (vgsdl.image_borrow_texture): paint rows made from it
+// stop serving Paint_Slots. False when there is no such image.
+image_set_info :: proc(c: ^Canvas, id: Image_Id, info: Image_Info) -> bool {
+	entry := image_store_get(&c.images, id)
+	if entry == nil {
+		return false
+	}
+	entry.info = info
+	paint_rows_stale(c)
+	return true
 }
 
 // Writes `filter(source)` into `target` when the frame is flushed. Both

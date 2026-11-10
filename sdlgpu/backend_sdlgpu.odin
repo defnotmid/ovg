@@ -549,7 +549,7 @@ image_borrow_texture :: proc(c: ^vg.Canvas, id: vg.Image_Id, texture: ^sdl.GPUTe
 	}
 	if entry := vg.image_store_get(&c.images, id); entry != nil && entry.image.user != nil && (^Image)(entry.image.user).borrowed {
 		(^Image)(entry.image.user)^ = img
-		entry.info = info
+		vg.image_set_info(c, id, info)
 		return id
 	}
 	p := new(Image, b.allocator)

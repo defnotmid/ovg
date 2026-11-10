@@ -446,6 +446,46 @@ test_paint_slot_lifetime :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(d.paints), 1)
 	fill_shape(&c, &box, paint, slot = &slot)
 	testing.expect_value(t, len(c.paints), 2)
+	// An image's info changing: an image paint's row bakes in its flags
+	// and format.
+	{
+		img2, _ := create_image_empty(&c, 4, 4, .RGBA8, {.Premultiplied})
+		ip := paint_image(img2, 0, 0, 4, 4, 0, 1)
+		islot: Paint_Slot
+		for k in 0 ..< 3 {
+			fill_shape(&c, &box, ip, slot = &islot)
+			before := len(c.paints)
+			switch k {
+			case 0:
+				realloc_image(&c, img2, 4, 4, .RGBA16F)
+			case 1:
+				image_set_info(&c, img2, {{.Flip_Y}, 4, 4, .RGBA16F})
+			case 2:
+				gone, _ := create_image_empty(&c, 2, 2, .RGBA8)
+				delete_image(&c, gone)
+			}
+			fill_shape(&c, &box, ip, slot = &islot)
+			testing.expectf(t, len(c.paints) == before + 1, "image change %d: %d rows, %d before", k, len(c.paints), before)
+		}
+		delete_image(&c, img2)
+		flush(&c)
+	}
+	// A canvas made again at the same address: its rows are new.
+	{
+		g: Canvas
+		canvas_init(&g, software_backend(&b))
+		set_size(&g, 20, 20)
+		gs: Paint_Slot
+		fill_shape(&g, &box, paint, slot = &gs)
+		flush(&g)
+		canvas_destroy(&g)
+		canvas_init(&g, software_backend(&b))
+		set_size(&g, 20, 20)
+		fill_shape(&g, &box, paint, slot = &gs)
+		testing.expect_value(t, len(g.paints), 1)
+		flush(&g)
+		canvas_destroy(&g)
+	}
 	// Two canvases at the same generation: the slot still knows its own.
 	e, f: Canvas
 	canvas_init(&e, software_backend(&b))
