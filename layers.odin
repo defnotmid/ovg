@@ -202,6 +202,19 @@ LAYER_KEEP_FRAMES :: 30
 @(private = "file")
 LAYER_MAX_EXACT_SIGMA :: 6
 
+// The most words of curves a layer's shape instances may read, summed over
+// them, for the layer to draw as a group (layer_group) rather than in a
+// pass of its own. A group's pixel composites its instances one after
+// another, so its cost grows with their curves, where a pass's cost is
+// the pass. Measured on the SDL_GPU backend: N shapes of K vertices at
+// opacity 0.35, grouped against offscreen, cross over between 478 K and
+// 680 K words on RADV whatever K; on an M4 grouping still wins to 2 M
+// words, and both lose from 800 K with K = 2048. A map's layer of 336
+// zoomed-out urban areas (1.4 M words) took 7.2 ms grouped against 0.95
+// offscreen on RADV.
+@(private)
+LAYER_GROUP_MAX_WORDS :: 1 << 19
+
 layer_stack_destroy :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	for l in ls.pool {
 		delete_image(c, l.id)
@@ -565,7 +578,8 @@ layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32,
 // when it has only an opacity and drew (`drawn`, within `bounds`) one shape
 // draw, source-over, inside its scissor (so the composite would cut
 // nothing): shapes sharing an image, blend and scissor record as one
-// (`push_shape`), so that is every layer of plain shapes.
+// (`push_shape`), so that is every layer of plain shapes whose curves
+// are few enough (LAYER_GROUP_MAX_WORDS).
 @(private = "file")
 layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bounds) -> bool {
 	if f.has_filter || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
@@ -580,10 +594,15 @@ layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bound
 		return false
 	}
 	// The group shader draws fills; hairlines keep their own.
+	words := 0
 	for inst in c.shapes[d.instances.start:][:d.instances.count] {
 		if inst.hairline > 0 {
 			return false
 		}
+		words += len(instance_words(inst, c.shape_words[:]))
+	}
+	if words > LAYER_GROUP_MAX_WORDS {
+		return false
 	}
 	resize(&c.commands, f.mark.commands)
 	o := f.opacity

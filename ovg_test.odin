@@ -871,7 +871,8 @@ test_layer_backdrop_blur :: proc(t: ^testing.T) {
 }
 
 // A layer with only an opacity over shapes draws as one group: the shapes
-// composite, then fade once (the blue hides the red where they overlap).
+// composite, then fade once (the blue hides the red where they overlap);
+// one whose shapes read too many curves draws offscreen, alike.
 @(test)
 test_layer_opacity_group :: proc(t: ^testing.T) {
 	s: Sw
@@ -901,6 +902,58 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 		for i in 0 ..< 4 {
 			testing.expectf(t, abs(int(got[i]) - int(want[i])) <= 1, "x %d: got %v, want %v", x, got, want)
 		}
+	}
+
+	// Shapes reading more curves than LAYER_GROUP_MAX_WORDS composite from
+	// a pass of their own, to the same look: the red, 20 px wide, its edges
+	// cut into 8,192 lines, drawn over itself.
+	path_reset(&p)
+	path_move_to(&p, 0, 0)
+	for side in 0 ..< 4 {
+		for k in 1 ..= 2048 {
+			f := f32(k) / 2048
+			switch side {
+			case 0:
+				path_line_to(&p, 20 * f, 0)
+			case 1:
+				path_line_to(&p, 20, 32 * f)
+			case 2:
+				path_line_to(&p, 20 - 20 * f, 32)
+			case 3:
+				path_line_to(&p, 0, 32 - 32 * f)
+			}
+		}
+	}
+	path_close(&p)
+	red, built := shape_from_path(&p)
+	testing.expect(t, built)
+	defer shape_destroy(&red)
+	copies := LAYER_GROUP_MAX_WORDS / len(red.data) + 1
+	testing.expectf(t, copies <= 64, "%d copies of %d words", copies, len(red.data))
+	draw :: proc(c: ^Canvas, ls: ^Layer_Stack, red: ^Shape, copies: int) {
+		clear_rect(c, 0, 0, 32, 32, WHITE)
+		layer_stack_begin(ls, c, 32, 32)
+		layer_push(ls, c, {opacity = 0.5})
+		for _ in 0 ..< copies {
+			fill_shape(c, red, paint_color(rgb(255, 0, 0)))
+		}
+		layer_pop(ls, c)
+		layer_stack_end(ls, c)
+	}
+	for n in ([2]int{copies - 1, copies}) {
+		draw(c, &ls, &red, n)
+		grouped := false
+		for cmd in c.commands {
+			if shapes, is_shapes := cmd.type.(Cmd_Draw_Shapes); is_shapes && shapes.group != 0 {
+				grouped = true
+			}
+		}
+		testing.expectf(t, grouped == (n * len(red.data) <= LAYER_GROUP_MAX_WORDS), "%d copies: grouped %v", n, grouped)
+		flush(c)
+		for v, i in ([4]u8{255, 128, 128, 255}) {
+			testing.expectf(t, abs(int(px(&s, 4, 8)[i]) - int(v)) <= 1, "%d copies: got %v", n, px(&s, 4, 8))
+		}
+		testing.expect_value(t, px(&s, 26, 8), [4]u8{255, 255, 255, 255})
 	}
 }
 
