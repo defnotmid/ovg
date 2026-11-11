@@ -1,6 +1,7 @@
 package ovg
 
 import "base:runtime"
+import "core:math"
 import "core:mem"
 import "core:sync"
 
@@ -29,6 +30,57 @@ Shape :: struct {
 	// here, beside the transform, not from the words.
 	bounds:    Bounds,
 	allocator: mem.Allocator,
+	// Coarser copies of its curves, for drawing it much smaller than its
+	// detail (shape_level): blocks of `data` after its own words, coarser
+	// down the list.
+	levels:      [len(SHAPE_LEVEL_ERRORS)]Shape_Level,
+	level_count: int,
+}
+
+// A coarser copy of a shape's curves: where its words start in
+// Shape.data, and how far, in shape units, it may lie from the shape.
+Shape_Level :: struct {
+	at:  u32,
+	err: f32,
+}
+
+// The errors coarse levels are made at, in shape units (the shape spans
+// 1 across), finest first. A level is kept when it has at most a quarter
+// of the curves of the last one kept (the shape's own at first), so a
+// shape's levels hold at most a third more words than it does, and a
+// shape whose curves don't thin out keeps none.
+SHAPE_LEVEL_ERRORS :: [3]f32{1.0 / 1024, 1.0 / 128, 1.0 / 16}
+
+// How far, in pixels, a level drawn may lie from its shape: below a
+// pixel's coverage step at an edge, so neighbouring shapes stay joined
+// within what their antialiased edges already leave.
+SHAPE_LEVEL_PIXELS :: 0.125
+
+// The words `s` draws under `t` (its words to drawing coordinates): its
+// coarsest level whose error, stretched as far as `t` stretches any
+// direction, stays within SHAPE_LEVEL_PIXELS, else its own; as a range of
+// `data`, and the level's number (0 for its own words).
+shape_level :: proc "contextless" (s: ^Shape, t: Transform2D) -> (lo, hi: u32, level: int) {
+	hi = s.levels[0].at if s.level_count > 0 else u32(len(s.data))
+	stretch := transform_max_stretch(t)
+	for k := s.level_count - 1; k >= 0; k -= 1 {
+		if s.levels[k].err * stretch <= SHAPE_LEVEL_PIXELS {
+			lo = s.levels[k].at
+			hi = s.levels[k + 1].at if k + 1 < s.level_count else u32(len(s.data))
+			return lo, hi, k + 1
+		}
+	}
+	return 0, hi, 0
+}
+
+// The most `t` stretches a length in any direction: its linear part's
+// largest singular value.
+@(private)
+transform_max_stretch :: proc "contextless" (t: Transform2D) -> f32 {
+	a, b, c, d := t[0], t[1], t[2], t[3]
+	h := (a * a + b * b + c * c + d * d) * 0.5
+	det := a * d - b * c
+	return math.sqrt(h + math.sqrt(max(h * h - det * det, 0)))
 }
 
 shape_destroy :: proc(s: ^Shape) {
@@ -188,9 +240,287 @@ shape_add_glyph :: proc(b: ^Shape_Builder, f: ^Font, g: Glyph_Index, o: ^ft.Outl
 // there are none. `search` sizes the grid for the fastest drawing
 // (cv.build); with `b.outline` (set before adding curves) it also draws as
 // a hairline (`hairline_shape`).
-shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true) -> (s: Shape, ok: bool) {
-	words, origin, extent := cv.build(b, allocator, search) or_return
-	return {data = words, origin = origin, extent = extent, bounds = words_bounds(words), allocator = allocator, id = shape_id_new()}, true
+shape_build :: proc(b: ^Shape_Builder, allocator := context.allocator, search := true, levels: ^Level_Scratch = nil) -> (s: Shape, ok: bool) {
+	out := make([dynamic]u32, allocator)
+	origin, extent, built := cv.build_append(b, &out, search)
+	if !built {
+		delete(out)
+		return
+	}
+	own := len(out)
+	shape_add_levels(b, &out, origin, extent, &s, levels)
+	// The levels' appends grew it geometrically: keep only the words.
+	if cap(out) > len(out) {
+		shrink(&out)
+	}
+	s.data, s.origin, s.extent, s.allocator, s.id = out[:], origin, extent, allocator, shape_id_new()
+	s.bounds = words_bounds(s.data[:own])
+	return s, true
+}
+
+// ---- levels ----------------------------------------------------------------------
+
+// What making a shape's levels works in, kept by a caller that builds
+// many (Shape_Scratch): the shape's contours after the linear pass (their
+// curves, each contour a range of them; per end, a curve's start and each
+// contour's last, the least deviation of the splits keeping it, infinite
+// for pinned ends; which curves the outline skips), and the builder a
+// level is built from.
+@(private)
+Level_Scratch :: struct {
+	curves:   [dynamic]cv.Curve,
+	sig:      [dynamic]f32,
+	hidden:   [dynamic]bool,
+	contours: [dynamic][2]int,
+	builder:  Shape_Builder,
+}
+
+@(private)
+level_scratch_init :: proc(ls: ^Level_Scratch, allocator: mem.Allocator) {
+	ls^ = {}
+	ls.curves.allocator, ls.sig.allocator, ls.hidden.allocator, ls.contours.allocator = allocator, allocator, allocator, allocator
+	ls.builder.curves.allocator = allocator
+}
+
+@(private)
+level_scratch_destroy :: proc(ls: ^Level_Scratch) {
+	delete(ls.curves)
+	delete(ls.sig)
+	delete(ls.hidden)
+	delete(ls.contours)
+	shape_builder_destroy(&ls.builder)
+	ls^ = {}
+}
+
+// Appends the shape's levels to `out` (SHAPE_LEVEL_ERRORS). Each contour
+// is simplified between pinned points (its start, its extreme points and
+// the ends of curves closing contours left open, which its outline skips):
+// first a linear pass merges each run of curves lying within a quarter of
+// the finest error of where it starts into one line; then the farthest-
+// point split (Ramer-Douglas-Peucker) over the curves' ends and control
+// points runs once, giving each end the least deviation of the splits down
+// to it, so a level keeps the ends past what is left of its error (the
+// same ends as a split run at that error). A level is built in the shape's
+// frame, without grid search (it is only drawn small), when it keeps at
+// most a quarter of the curves of the last level kept.
+@(private = "file")
+shape_add_levels :: proc(b: ^Shape_Builder, out: ^[dynamic]u32, origin: Vec2, extent: f32, s: ^Shape, scratch: ^Level_Scratch) {
+	// A contour keeps at least 3 curves, so under 12 no level cuts them 4 times.
+	if len(b.curves) < 12 {
+		return
+	}
+	temp: Level_Scratch
+	ls := scratch
+	if ls == nil {
+		level_scratch_init(&temp, runtime.heap_allocator())
+		ls = &temp
+	}
+	defer if scratch == nil {
+		level_scratch_destroy(&temp)
+	}
+	errors := SHAPE_LEVEL_ERRORS
+	pre := errors[0] * extent / 4
+	level_split_all(ls, b.curves[:], b.unstroked[:], pre, errors[0] * extent - pre)
+	kept := len(b.curves)
+	for err in errors {
+		tol := err * extent - pre
+		// The curves it would have: each contour's ends kept past its start.
+		n, base := 0, 0
+		for c in ls.contours {
+			for k in 1 ..= c[1] - c[0] {
+				n += 1 if ls.sig[base + k] > tol else 0
+			}
+			base += c[1] - c[0] + 1
+		}
+		if 4 * n > kept {
+			continue
+		}
+		cb := &ls.builder
+		shape_builder_reset(cb)
+		cb.outline = b.outline
+		level_emit(ls, tol, cb)
+		at := len(out)
+		if _, _, ok := cv.build_append(cb, out, false, cv.Frame{origin, extent}); !ok {
+			resize(out, at)
+			continue
+		}
+		s.levels[s.level_count] = {u32(at), err}
+		s.level_count += 1
+		kept = n
+		if kept < 12 {
+			break
+		}
+	}
+}
+
+// The linear pass and the split, contour by contour, into `ls`. A contour
+// is the curves from one whose start the builder's curves reach again
+// (every contour ends where it starts).
+@(private = "file")
+level_split_all :: proc(ls: ^Level_Scratch, curves: []cv.Curve, unstroked: []u32, pre, floor: f32) {
+	clear(&ls.curves)
+	clear(&ls.sig)
+	clear(&ls.hidden)
+	clear(&ls.contours)
+	q2 := pre * pre
+	near :: #force_inline proc "contextless" (p, o: Vec2, q2: f32) -> bool {
+		d := p - o
+		return d.x * d.x + d.y * d.y <= q2
+	}
+	// The contour's next curve its outline skips, as an index into it (-1: none).
+	next_hidden :: proc "contextless" (unstroked: []u32, u: ^int, i, n: int) -> int {
+		for u^ < len(unstroked) && int(unstroked[u^]) < i {
+			u^ += 1
+		}
+		return int(unstroked[u^]) - i if u^ < len(unstroked) && int(unstroked[u^]) < i + n else -1
+	}
+	u := 0
+	for i := 0; i < len(curves); {
+		start := curves[i].p1
+		j := i
+		for j < len(curves) - 1 && curves[j].p3 != start {
+			j += 1
+		}
+		contour := curves[i:j + 1]
+		n := len(contour)
+		lo, hi: [2]int
+		for k in 0 ..< n {
+			p := contour[k].p1
+			for a in 0 ..< 2 {
+				if p[a] < contour[lo[a]].p1[a] {
+					lo[a] = k
+				}
+				if p[a] > contour[hi[a]].p1[a] {
+					hi[a] = k
+				}
+			}
+		}
+		extreme :: #force_inline proc "contextless" (k: int, lo, hi: [2]int) -> bool {
+			return k == lo[0] || k == lo[1] || k == hi[0] || k == hi[1]
+		}
+		hide := next_hidden(unstroked, &u, i, n)
+		first, base := len(ls.curves), len(ls.sig)
+		append(&ls.sig, math.INF_F32)
+		for k := 0; k < n; {
+			o := contour[k].p1
+			m := k
+			for m < n && m != hide && near(contour[m].p2, o, q2) && near(contour[m].p3, o, q2) {
+				m += 1
+				if m == n || extreme(m, lo, hi) || m == hide {
+					break
+				}
+			}
+			hidden := false
+			if m - k >= 2 {
+				end := contour[m - 1].p3
+				append(&ls.curves, cv.Curve{o, (o + end) * 0.5, end})
+				k = m
+			} else {
+				append(&ls.curves, contour[k])
+				hidden = k == hide
+				k += 1
+				if hidden {
+					u += 1
+					hide = next_hidden(unstroked, &u, i, n)
+				}
+			}
+			append(&ls.hidden, hidden)
+			// The end reached: pinned, or its deviation set by the split.
+			pinned := k == n || extreme(k, lo, hi) || hidden || k == hide
+			append(&ls.sig, math.INF_F32 if pinned else -1)
+		}
+		last := len(ls.curves)
+		append(&ls.contours, [2]int{first, last})
+		a := 0
+		for k in 1 ..= last - first {
+			if ls.sig[base + k] == math.INF_F32 {
+				level_split(ls.curves[first:last], ls.sig[base:][:last - first + 1], a, k, math.INF_F32, floor)
+				a = k
+			}
+		}
+		i = j + 1
+	}
+}
+
+// Gives the ends strictly inside the chain of curves `a ..< b` the least
+// deviation of the splits down to them (`parent`: the chain's): its
+// farthest end splits it, its deviation the most of any end or control
+// point from the chord. A chain within `floor` (the finest level's) is
+// left: no level keeps an end inside it.
+@(private = "file")
+level_split :: proc(curves: []cv.Curve, sig: []f32, a, b: int, parent, floor: f32) {
+	if b <= a + 1 {
+		return
+	}
+	pa, pd := curves[a].p1, curves[b - 1].p3 - curves[a].p1
+	pl := pd.x * pd.x + pd.y * pd.y
+	inv := 1 / pl if pl > 0 else 0
+	// Squared distance from the chord.
+	dist :: #force_inline proc "contextless" (p, a, d: Vec2, inv: f32) -> f32 {
+		q := a + d * clamp(((p.x - a.x) * d.x + (p.y - a.y) * d.y) * inv, 0, 1) - p
+		return q.x * q.x + q.y * q.y
+	}
+	far, efar := f32(0), f32(-1)
+	kfar := a + 1
+	for c, k in curves[a:b] {
+		// A line's control point is its midpoint, no farther than its ends.
+		if c.p2 != (c.p1 + c.p3) * 0.5 {
+			far = max(far, dist(c.p2, pa, pd, inv))
+		}
+		if k > 0 {
+			if d := dist(c.p1, pa, pd, inv); d > efar {
+				efar, kfar = d, a + k
+			}
+		}
+	}
+	far = max(far, efar)
+	if far <= floor * floor {
+		return
+	}
+	s := min(math.sqrt(far), parent)
+	sig[kfar] = s
+	level_split(curves, sig, a, kfar, s, floor)
+	level_split(curves, sig, kfar, b, s, floor)
+}
+
+// Builds the contours keeping the ends past `tol`: a kept curve as it is
+// (its chord when its control point lies within `tol`), the curves
+// between kept ends as one line.
+@(private = "file")
+level_emit :: proc(ls: ^Level_Scratch, tol: f32, cb: ^Shape_Builder) {
+	tol2 := tol * tol
+	base := 0
+	for c in ls.contours {
+		curves := ls.curves[c[0]:c[1]]
+		sig := ls.sig[base:][:len(curves) + 1]
+		hidden := ls.hidden[c[0]:c[1]]
+		base += len(curves) + 1
+		cv.move_to(cb, curves[0].p1)
+		a := 0
+		for k in 1 ..= len(curves) {
+			if sig[k] <= tol {
+				continue
+			}
+			if k > a + 1 {
+				cv.line_to(cb, curves[k - 1].p3)
+			} else {
+				cc := curves[a]
+				d := cc.p3 - cc.p1
+				l := d.x * d.x + d.y * d.y
+				e := cc.p1 + d * (clamp(((cc.p2.x - cc.p1.x) * d.x + (cc.p2.y - cc.p1.y) * d.y) / l, 0, 1) if l > 0 else 0) - cc.p2
+				if !hidden[a] && e.x * e.x + e.y * e.y <= tol2 {
+					cv.line_to(cb, cc.p3)
+				} else {
+					cv.quad_to(cb, cc.p2, cc.p3)
+				}
+				if hidden[a] {
+					append(&cb.unstroked, u32(len(cb.curves) - 1))
+				}
+			}
+			a = k
+		}
+		cv.close(cb)
+	}
 }
 
 // What building shapes needs, kept by a caller that builds many (it only
@@ -207,6 +537,8 @@ Shape_Scratch :: struct {
 	dots:    Path,
 	// Hit tests: the path under the transform.
 	hit:     Path,
+	// Shapes' coarse levels.
+	levels:  Level_Scratch,
 }
 
 // A scratch allocating from `allocator`.
@@ -218,6 +550,7 @@ shape_scratch_init :: proc(s: ^Shape_Scratch, allocator := context.allocator) {
 	path_init(&s.dots, allocator)
 	flat_path_init(&s.flat, allocator)
 	cv.contours_init(&s.hit, allocator)
+	level_scratch_init(&s.levels, allocator)
 }
 
 shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
@@ -227,6 +560,7 @@ shape_scratch_destroy :: proc(s: ^Shape_Scratch) {
 	flat_path_destroy(&s.flat)
 	path_destroy(&s.dots)
 	cv.contours_destroy(&s.hit)
+	level_scratch_destroy(&s.levels)
 	s^ = {}
 }
 
@@ -248,7 +582,7 @@ shape_from_path :: proc(p: ^Path, allocator := context.allocator, search := true
 	sc.builder.tol = tol
 	sc.builder.outline = outline
 	shape_add_path(&sc.builder, p)
-	return shape_build(&sc.builder, allocator, search)
+	return shape_build(&sc.builder, allocator, search, &sc.levels)
 }
 
 // Builds the shape of `p`'s stroke with `s` (stroke.odin), within `tol`
@@ -277,7 +611,7 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 		tol = max(hi.x - lo.x, hi.y - lo.y, s.line_width) / 4096
 	}
 	complete = stroke_add(sc, p, TRANSFORM_IDENTITY, s, tol, max_dashes)
-	shape, ok = shape_build(&sc.builder, allocator, search)
+	shape, ok = shape_build(&sc.builder, allocator, search, &sc.levels)
 	return
 }
 

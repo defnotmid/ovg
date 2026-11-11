@@ -67,7 +67,7 @@ packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.15), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.16), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -76,7 +76,7 @@ packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.13 https://github.com/defnotmid/oglyph
-git clone -b v0.0.15 https://github.com/defnotmid/ocurves
+git clone -b v0.0.16 https://github.com/defnotmid/ocurves
 git clone -b v0.0.26 https://github.com/defnotmid/oicut
 ```
 
@@ -828,6 +828,26 @@ every part follows:
   a frame, 0.43 ms of it recording, where stroke_path per shape takes
   30.5 ms (26.5 ms recording), the images within 16 levels; the outlines
   add 29% to building the shapes and 20% to their words.
+- **Coarse levels for shapes drawn small.** A kept shape whose detail
+  thins out (`shape_build`: `shape_from_path`, `shape_from_stroke`, glyph
+  shapes) also keeps up to three coarser copies of its curves, within
+  1/1024, 1/128 and 1/16 of its size (`SHAPE_LEVEL_ERRORS`). Each contour
+  is simplified between pinned points (its start, its extreme points, the
+  ends of edges its outline skips): runs of tiny curves merge into lines,
+  then farthest-point splits (Ramer-Douglas-Peucker), run once for every
+  level, keep the ends that matter; a copy is kept when it has at most a
+  quarter of the curves of the last one, so a shape gains at most a third
+  of its words and a simple one none. Each draw takes the coarsest copy
+  within 1/8 px of the shape at the most its transform stretches any way
+  (`shape_level`), its fill and its hairline alike, and the SDL_GPU store
+  places only the copies drawn; shapes built for one frame (`fill_path`,
+  `stroke_path`, a layout's variable-font glyphs) keep none. Neighbouring
+  shapes stay joined within what their antialiased edges already leave.
+  A map application's map of 17,758 urban areas (RX 9070 XT, 1280 x 800):
+  everything selected 67.7 ms a frame at zoom 0.15, 2.8 to 3.1 ms with the
+  copies, 28.4 to 28.8 at 0.32, 3.2 to 3.6, the map alone 11.4 to 11.8 at
+  0.32, 2.0; building its shapes takes 3.25 s of CPU from 2.0, and the
+  process 1.23 GB from 1.13.
 - **Markers.** `draw_markers` draws squares or circles a fixed size in
   pixels at many points, filled with one paint and outlined with another
   (either optional), every outline over every fill: an editor's anchors

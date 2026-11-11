@@ -906,21 +906,24 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 
 	// Shapes reading more curves than LAYER_GROUP_MAX_WORDS composite from
 	// a pass of their own, to the same look: the red, 20 px wide, its edges
-	// cut into 8,192 lines, drawn over itself.
+	// cut into 8,192 lines zigzagging a pixel either side (no coarse level
+	// takes that out at this size, so each copy reads all its words), drawn
+	// over itself.
 	path_reset(&p)
 	path_move_to(&p, 0, 0)
 	for side in 0 ..< 4 {
 		for k in 1 ..= 2048 {
 			f := f32(k) / 2048
+			z: f32 = 1 if k % 2 == 1 && k < 2048 else 0
 			switch side {
 			case 0:
-				path_line_to(&p, 20 * f, 0)
+				path_line_to(&p, 20 * f, z)
 			case 1:
-				path_line_to(&p, 20, 32 * f)
+				path_line_to(&p, 20 - z, 32 * f)
 			case 2:
-				path_line_to(&p, 20 - 20 * f, 32)
+				path_line_to(&p, 20 - 20 * f, 32 - z)
 			case 3:
-				path_line_to(&p, 0, 32 - 32 * f)
+				path_line_to(&p, z, 32 - 32 * f)
 			}
 		}
 	}
@@ -928,8 +931,9 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 	red, built := shape_from_path(&p)
 	testing.expect(t, built)
 	defer shape_destroy(&red)
-	copies := LAYER_GROUP_MAX_WORDS / len(red.data) + 1
-	testing.expectf(t, copies <= 64, "%d copies of %d words", copies, len(red.data))
+	words := len(instance_words({shape = &red, transform = shape_local(&red)}, nil))
+	copies := LAYER_GROUP_MAX_WORDS / words + 1
+	testing.expectf(t, copies <= 64, "%d copies of %d words", copies, words)
 	draw :: proc(c: ^Canvas, ls: ^Layer_Stack, red: ^Shape, copies: int) {
 		clear_rect(c, 0, 0, 32, 32, WHITE)
 		layer_stack_begin(ls, c, 32, 32)
@@ -948,7 +952,7 @@ test_layer_opacity_group :: proc(t: ^testing.T) {
 				grouped = true
 			}
 		}
-		testing.expectf(t, grouped == (n * len(red.data) <= LAYER_GROUP_MAX_WORDS), "%d copies: grouped %v", n, grouped)
+		testing.expectf(t, grouped == (n * words <= LAYER_GROUP_MAX_WORDS), "%d copies: grouped %v", n, grouped)
 		flush(c)
 		for v, i in ([4]u8{255, 128, 128, 255}) {
 			testing.expectf(t, abs(int(px(&s, 4, 8)[i]) - int(v)) <= 1, "%d copies: got %v", n, px(&s, 4, 8))

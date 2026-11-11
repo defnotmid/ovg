@@ -287,10 +287,13 @@ Marker_Kind :: enum u8 {
 	Circle,
 }
 
-// The instance's shape words; `frame_words` is the frame's `shape_words`.
+// The words the instance draws: a kept shape's level for its transform
+// (shape_level), a frame's its range of `frame_words` (the frame's
+// `shape_words`).
 instance_words :: proc "contextless" (inst: Shape_Instance, frame_words: []u32) -> []u32 {
 	if inst.shape != nil {
-		return inst.shape.data
+		lo, hi, _ := shape_level(inst.shape, inst.transform)
+		return inst.shape.data[lo:hi]
 	}
 	return frame_words[inst.words.start:][:inst.words.count]
 }

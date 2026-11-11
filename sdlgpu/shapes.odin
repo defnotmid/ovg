@@ -23,9 +23,9 @@ Shape_Store :: struct {
 	capacity:          u32,
 	kept:              u32,
 	top:               u32,
-	// By shape id slot (vg.shape_id_slots): the id placed there and its
-	// offset, while placed in this generation of the store, which a restart
-	// ends, so starting over clears nothing.
+	// By shape id slot (vg.shape_id_slots): the id placed there and the
+	// offsets of its levels placed, while placed in this generation of the
+	// store, which a restart ends, so starting over clears nothing.
 	at:                [dynamic]Store_Place,
 	gen:               u32,
 	// Words placed but not yet uploaded.
@@ -36,10 +36,15 @@ Shape_Store :: struct {
 
 @(private)
 Store_Place :: struct {
-	id:     u64,
-	gen:    u32,
-	offset: u32,
+	id:      u64,
+	gen:     u32,
+	// Per level (vg.shape_level: 0 the shape's own words), where its words
+	// lie, PLACE_NONE when no frame of this generation drew it.
+	offsets: [1 + len(vg.SHAPE_LEVEL_ERRORS)]u32,
 }
+
+@(private = "file")
+PLACE_NONE :: max(u32)
 
 @(private = "file")
 Pending_Shape :: struct {
@@ -119,9 +124,17 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 			}
 			p := &st.at[u32(inst.shape.id)]
 			if p.id != inst.shape.id || p.gen != st.gen {
-				p^ = {inst.shape.id, st.gen, place(st, inst.shape.data)}
+				p^ = {id = inst.shape.id, gen = st.gen}
+				for &o in p.offsets {
+					o = PLACE_NONE
+				}
 			}
-			b.shape_offsets[i] = p.offset
+			// Only the level the instance draws is placed.
+			lo, hi, level := vg.shape_level(inst.shape, inst.transform)
+			if p.offsets[level] == PLACE_NONE {
+				p.offsets[level] = place(st, inst.shape.data[lo:hi])
+			}
+			b.shape_offsets[i] = p.offsets[level]
 		}
 		st.kept = st.top
 		own := place(st, frame.shape_words)

@@ -1,5 +1,6 @@
 package ovg_sdlgpu
 
+import "core:math"
 import "core:testing"
 import vg ".."
 
@@ -78,4 +79,55 @@ test_store_capacity :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, store_capacity(1000), 1 << 16)
 	testing.expect_value(t, store_capacity(1 << 20), 1 << 22)
+}
+
+// The store places only the level an instance draws (vg.shape_level): a
+// detailed shape drawn large places its own words, drawn small one of its
+// coarse levels' beside them, and drawn at both again places nothing.
+@(test)
+test_store_levels :: proc(t: ^testing.T) {
+	b: SDL_Backend
+	store_init(&b)
+	defer {
+		delete(b.shapes.at)
+		delete(b.shapes.pending)
+		delete(b.shape_offsets)
+	}
+	p: vg.Path
+	vg.path_init(&p)
+	defer vg.path_destroy(&p)
+	for k in 0 ..< 4096 {
+		a := 2 * math.PI * f32(k) / 4096
+		r := 1 + 0.0004 * math.sin(f32(k) * 1.3) + 0.05 * math.sin(a * 5)
+		if k == 0 {
+			vg.path_move_to(&p, r * math.cos(a), r * math.sin(a))
+		} else {
+			vg.path_line_to(&p, r * math.cos(a), r * math.sin(a))
+		}
+	}
+	vg.path_close(&p)
+	s, _ := vg.shape_from_path(&p, search = false)
+	defer vg.shape_destroy(&s)
+	testing.expect(t, s.level_count > 0)
+	large := vg.transform_multiply(vg.shape_local(&s), {400, 0, 0, 400, 0, 0})
+	small := vg.transform_multiply(vg.shape_local(&s), {4, 0, 0, 4, 0, 0})
+	frame := [2]vg.Shape_Instance{{shape = &s, transform = large}, {shape = &s, transform = small}}
+	_, ok := store_place(&b, {shapes = frame[:]})
+	testing.expect(t, ok)
+	testing.expect_value(t, len(b.shapes.pending), 2)
+	if len(b.shapes.pending) == 2 {
+		lo, hi, level := vg.shape_level(&s, small)
+		testing.expect(t, level > 0)
+		testing.expect_value(t, len(b.shapes.pending[0].data), int(s.levels[0].at))
+		testing.expect_value(t, len(b.shapes.pending[1].data), int(hi - lo))
+		testing.expect(t, b.shape_offsets[0] != b.shape_offsets[1])
+	}
+	b.shapes.capacity = 1 << 22
+	clear(&b.shapes.pending)
+	at := [2]u32{b.shape_offsets[0], b.shape_offsets[1]}
+	_, ok = store_place(&b, {shapes = frame[:]})
+	testing.expect(t, ok)
+	testing.expect_value(t, len(b.shapes.pending), 0)
+	testing.expect_value(t, b.shape_offsets[0], at[0])
+	testing.expect_value(t, b.shape_offsets[1], at[1])
 }
