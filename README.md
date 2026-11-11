@@ -55,33 +55,35 @@ Added in ovg:
   each pixel's coverage in closed form (see Shapes below).
 
 Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
-Vulkan on Linux, Metal on macOS, Vulkan or D3D12 on Windows). Fonts are
+Vulkan on Linux and Windows, Metal on macOS). Fonts are
 read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), shapes'
 coverage and path booleans computed by
 [ocurves](https://github.com/defnotmid/ocurves), images decoded and PNGs
-written by [oicut](https://github.com/defnotmid/oicut) (all Odin, MIT), read
+written by [oicut](https://github.com/defnotmid/oicut), the shaders compiled
+by [oksl](https://github.com/defnotmid/oksl) (all Odin, MIT), read
 through the `deps` collection: clone them next to ovg and build with
-`-collection:deps=..` (the directory holding all four). ovg builds with Odin
+`-collection:deps=..` (the directory holding all five). ovg builds with Odin
 dev-2026-11a, as CI does. The other dependencies are Odin's own `vendor`
 packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.16), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.17), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26); its tests `deps:oksl` |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
-| `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
+| `ovg/sdlgpu` (GPU backend) | `deps:oksl` ([oksl](https://github.com/defnotmid/oksl) v0.0.8), `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.13 https://github.com/defnotmid/oglyph
-git clone -b v0.0.16 https://github.com/defnotmid/ocurves
+git clone -b v0.0.17 https://github.com/defnotmid/ocurves
 git clone -b v0.0.26 https://github.com/defnotmid/oicut
+git clone -b v0.0.8 https://github.com/defnotmid/oksl
 ```
 
 ```odin
-import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph, ocurves and oicut)
+import vg "deps:ovg"   // -collection:deps=.. (the directory holding ovg, oglyph, ocurves, oicut and oksl)
 import image "deps:oicut/image"
 
 sw: vg.Software_Backend
@@ -188,24 +190,30 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - New images are cleared to transparent: SDL_GPU leaves texture contents
   undefined (garbage on Metal), and a partly updated image samples texels
   it never wrote.
-  D3D12 needs DXIL blobs, which the build doesn't produce on Linux (slangc's
-  dxc fails on Arch), so Windows runs on Vulkan.
+- On Windows the backend runs on Vulkan: oksl writes SPIR-V and MSL, not
+  D3D12's DXIL.
 
 ### Shaders
 
-`shaders/ovg.slang` is the single shader source (vertex + fragment, entry
-points `vs_main` / `fs_main`). SDL_GPU has no specialization constants, so the
-shader type and glyph mode come from the uniforms and are branched on at
-runtime, as in femtovg. Bindings follow SDL_GPU's convention (vertex uniforms
-set 1, fragment samplers set 2, fragment uniforms set 3).
-`shaders/build.sh` compiles it with `slangc` to the committed `.spv`
-(Vulkan) and `.msl` (Metal) blobs, which the backend `#load`s; each
-fragment entry but the motion blur passes' has a `_motion` variant writing
-a second target (a velocity twin). Only shader
-edits need slangc. It includes ocurves' `curves.slang` from the checkout
-beside ovg and records that ocurves' `curves.FORMAT` in
-`sdlgpu/curves_format.odin`, and the backend `#assert`s it is the one it
-builds with.
+The shaders are GLSL ES 3.0 in `shaders/`, compiled by
+[oksl](https://github.com/defnotmid/oksl) when the backend starts (`init`,
+about 4 ms for all of them) to the device's SPIR-V (Vulkan) or MSL (Metal):
+nothing is compiled ahead of time and no shader toolchain is needed.
+`shaders.odin` lists the units: `quad.vert` and `shape.vert` (instances
+pulled from a storage buffer by `gl_VertexID`, six vertices an instance),
+and the fragment units `main.frag` (clears, image copies), `filter.frag`,
+`shape.frag` (with `SHAPE_BOX` for instances without rotation or skew),
+`group.frag`, `markers.frag` and `velocity.frag`, each compiled after
+`common.glsl` (the paints and the paint's colour) and, for shapes,
+ocurves' `curves.glsl` (its `curves.GLSL`, from the same package as the
+words it reads) and `shapes.glsl`. Each fragment unit but the filters' and
+the motion passes' has a `MOTION` variant writing a second target (a
+velocity twin). SDL_GPU has no specialization constants, so the shader type
+and glyph mode come from the paint row and are branched on at runtime, as in
+femtovg. A unit's samplers and storage buffers are checked at compile
+against the order the renderer binds them (`shader_bindings_ok`), and
+`test_shaders_compile` compiles every unit for SPIR-V, MSL and oksl's CPU
+program, linked with its vertex shader, without a GPU.
 
 ### Recording on other threads
 
@@ -279,7 +287,7 @@ vt, nt := vgsdl.velocity_textures(&gpu)          // R16G16_FLOAT, R16_FLOAT
 ## Filters and paint extras
 
 SVG filter primitives and paint options, implemented identically in the
-software and SDL_GPU backends (`filter_math.odin` and `shaders/ovg.slang`).
+software and SDL_GPU backends (`filter_math.odin` and `shaders/filter.frag`).
 
 `filter_image(c, target, filter, source)` records a filter that runs at flush,
 in order with drawing. Inputs and target are images of one size; the target
@@ -940,7 +948,7 @@ every part follows:
   it only has to live for the draw call.
 - **Shapes** (`shape.odin`, over the core-only
   [ocurves](https://github.com/defnotmid/ocurves) and its GPU twin
-  `curves.slang`, which other renderers use alone: the
+  `curves.glsl`, which other renderers use alone: the
   word layout, `coverage` of a box footprint, `coverage_affine` of any
   parallelogram (`coverage_jacobian` from a 3D footprint's Jacobian),
   `winding` at a point for sample masks, a mean coverage to `fade` to when
@@ -1159,7 +1167,7 @@ every part follows:
 ## Test
 
 ```sh
-# with oglyph, ocurves and oicut cloned next to ovg (see Use); every build takes -collection:deps=..
+# with oglyph, ocurves, oicut and oksl cloned next to ovg (see Use); every build takes -collection:deps=..
 # (fonts and shaping are tested in oglyph: odin test font / shape there; shapes' words and booleans in ocurves)
 odin test . -collection:deps=.. -vet -strict-style    # core + software backend
 odin test svg -collection:deps=.. -vet -strict-style  # SVG import: parsing, drawing, hostile files
@@ -1172,8 +1180,6 @@ odin test sdlgpu -collection:deps=.. -vet -strict-style  # its release table; ne
 odin run tools/sdlgpu_parity -collection:deps=.. -- out_dir # SDL_GPU vs software, headless
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64    # macOS / Windows compile
 odin check sdlgpu -collection:deps=.. -no-entry-point -target:windows_amd64
-./shaders/build.sh                                    # after editing ovg.slang, or for another ocurves curves.slang (from ../ocurves)
-./tools/scenes/build_program.sh                       # after editing the parity scene's program.slang
 ```
 
 `assets/Vera.ttf` is Bitstream Vera Sans (`LICENSES/Bitstream-Vera.txt`), used

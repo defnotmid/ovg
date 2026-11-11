@@ -10,6 +10,7 @@ import "../../svg"
 import "../../lottie"
 import vg "../.."
 import image "deps:oicut/image"
+import "deps:oksl"
 
 W :: 256
 H :: 192
@@ -39,6 +40,9 @@ Resources :: struct {
 	panel_out: vg.Image_Id,
 	// The "program" scene: a custom program and its two outputs.
 	program:  vg.Program_Id,
+	// The program compiled by oksl: its CPU program runs it on the software
+	// backend.
+	program_cpu: Program_Cpu,
 	prog_out: vg.Image_Id,
 	prog_opaque: vg.Image_Id,
 	// The layer scenes (layer_scenes.odin).
@@ -142,6 +146,8 @@ resources_destroy :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.path_destroy(&r.scratch)
 	vg.path_destroy(&r.path)
 	delete(r.glyphs)
+	oksl.destroy(r.program_cpu.frag)
+	oksl.scratch_destroy(&r.program_cpu.scratch)
 }
 
 setup :: proc(c: ^vg.Canvas, r: ^Resources) {
@@ -171,18 +177,24 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 	r.tile_out, _ = vg.create_image_empty(c, 32, 32, .RGBA8, {.Premultiplied})
 	r.panel, _ = vg.create_image_empty(c, 80, 80, .RGBA8, {.Premultiplied})
 	r.panel_out, _ = vg.create_image_empty(c, 80, 80, .RGBA8, {.Premultiplied})
+	vert, _, vert_ok := oksl.compile(oksl.LAYER_VERTEX_GLSL, {profile = .Glsl, stage = .Vertex, no_cpu = true})
+	frag, _, frag_ok := oksl.compile(PROGRAM_FRAG, {profile = .Glsl})
+	assert(vert_ok && frag_ok && frag.block_size == size_of(Program_Params))
+	defer oksl.destroy(vert)
+	r.program_cpu.frag = frag
 	r.program, _ = vg.create_program(
 		c,
 		{
-			frag_spirv = PROGRAM_FRAG_SPV,
-			frag_msl = PROGRAM_FRAG_MSL,
-			frag_msl_entry = "fs_main",
-			vert_spirv = PROGRAM_VERT_SPV,
-			vert_msl = PROGRAM_VERT_MSL,
-			vert_msl_entry = "vs_main",
+			frag_spirv = mem.slice_to_bytes(frag.spirv),
+			frag_msl = transmute([]u8)frag.msl,
+			frag_msl_entry = oksl.MSL_ENTRY,
+			vert_spirv = mem.slice_to_bytes(vert.spirv),
+			vert_msl = transmute([]u8)vert.msl,
+			vert_msl_entry = oksl.MSL_ENTRY,
 			uniform_size = size_of(Program_Params),
-			num_samplers = 2,
+			num_samplers = frag.num_samplers,
 			cpu = program_cpu,
+			cpu_user = &r.program_cpu,
 		},
 	)
 	r.prog_out, _ = vg.create_image_empty(c, 100, 80, .RGBA8, {.Premultiplied})
@@ -785,12 +797,9 @@ report :: proc(out_dir, name, a_tag, b_tag: string, a, b: []u8, d: Diff) -> bool
 
 // ---- custom program ---------------------------------------------------------------
 
-PROGRAM_VERT_SPV :: #load("program.vert.spv")
-PROGRAM_FRAG_SPV :: #load("program.frag.spv")
-PROGRAM_VERT_MSL :: #load("program.vert.msl")
-PROGRAM_FRAG_MSL :: #load("program.frag.msl")
+PROGRAM_FRAG :: #load("program.frag", string)
 
-// program.slang's uniform block.
+// program.frag's uniforms, its block.
 Program_Params :: struct {
 	color_a: [4]f32,
 	color_b: [4]f32,
@@ -798,28 +807,26 @@ Program_Params :: struct {
 	shape:   [4]f32,
 }
 
-// program.slang's fs_main on the CPU.
+// program.frag's CPU program and a run's working memory (one run at a
+// time).
+Program_Cpu :: struct {
+	frag:    ^oksl.Module,
+	scratch: oksl.Scratch,
+}
+
+// The program on the CPU: oksl's CPU program into the RGBA8 target.
 program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: vg.Pixel_Format, sampler: vg.Program_Sampler) {
-	p: Program_Params
-	copy(mem.ptr_to_bytes(&p), uniforms)
-	unorm :: proc(v: f32) -> u8 {
-		return u8(clamp(v * 255 + 0.5, 0, 255))
+	p := (^Program_Cpu)(user)
+	s := sampler
+	sizes: [vg.PROGRAM_MAX_CHANNELS][3]i32
+	for size, k in s.sizes {
+		sizes[k] = {size.x, size.y, 1}
 	}
-	for y in 0 ..< height {
-		for x in 0 ..< width {
-			uv := [2]f32{(f32(x) + 0.5) / f32(width), (f32(y) + 0.5) / f32(height)}
-			tex := sampler.sample(sampler.data, 0, uv * p.shape.z, 0)
-			none := sampler.sample(sampler.data, 1, uv, 0)
-			d := math.sqrt((uv.x - 0.5) * (uv.x - 0.5) + (uv.y - 0.5) * (uv.y - 0.5))
-			ring := clamp(1 - abs(d - p.shape.x) / p.shape.y, 0, 1)
-			grad := p.color_a + (p.color_b - p.color_a) * uv.x
-			a := ring * grad.a
-			k := tex.a * (1 - a) * 0.5
-			o := [4]f32{grad.r * a + tex.r * k, grad.g * a + tex.g * k, grad.b * a + tex.b * k, a + k} + none
-			px := out[y * stride + x * 4:]
-			px[0], px[1], px[2], px[3] = unorm(o[0]), unorm(o[1]), unorm(o[2]), unorm(o[3])
-		}
+	sample :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
+		s := (^vg.Program_Sampler)(user)
+		return s.sample(s.data, channel, uv, lod)
 	}
+	oksl.run(&p.frag.program, uniforms, width, height, out, stride, &p.scratch, {sampler = sample, user = &s, channel_sizes = sizes[:]})
 }
 
 scene_program :: proc(c: ^vg.Canvas, r: ^Resources) {

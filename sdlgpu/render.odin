@@ -290,7 +290,8 @@ Planner :: struct {
 	twin:   Image,
 }
 
-// An instance's motion as the shaders read it (Shape_Motion in ovg.slang).
+// An instance's motion as the shaders read it (Shape_Motion in
+// shaders/shapes.glsl).
 Gpu_Shape_Motion :: [2][4]f32
 
 // Where the planner's next quad starts in the vertex buffer.
@@ -1020,11 +1021,9 @@ flush :: proc(r: ^Recorder) {
 		r.scissor = row.scissor
 	}
 	if row.kind == .Shapes {
-		// The instances index from the draw's first (SV_InstanceID counts
-		// from 0 in every draw).
-		base := [4]u32{row.verts.start, 0, 0, 0}
-		sdl.PushGPUVertexUniformData(r.cmd, 1, &base, size_of(base))
-		sdl.DrawGPUPrimitives(r.pass, 6, row.verts.count, 0, 0)
+		// Six vertices an instance, from the draw's first: gl_VertexID / 6
+		// is the instance's row (shape.vert).
+		sdl.DrawGPUPrimitives(r.pass, 6 * row.verts.count, 1, 6 * row.verts.start, 0)
 	} else {
 		sdl.DrawGPUPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0)
 	}
@@ -1222,7 +1221,7 @@ scratch_image :: proc(b: ^SDL_Backend, info: vg.Image_Info) -> ^Image {
 	return &b.scratch[len(b.scratch) - 1].image
 }
 
-// feTurbulence's uniforms (see `turbulence` in ovg.slang): frag[0] the
+// feTurbulence's uniforms (see `turbulence` in shaders/filter.frag): frag[0] the
 // lattice coordinate of target pixel x, y as (x + a) * b, frag[1] =
 // (octaves, fractal, stitch, 0); stitching: frag[2] the tile size in
 // cells and the region origin, frag[3].xy the frequencies; frag[3].z is 1

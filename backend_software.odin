@@ -8,7 +8,7 @@ import common "deps:oicut/common"
 import cv "deps:ocurves"
 
 // CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
-// as the GPU fragment shader (shaders/ovg.slang) and the same shape
+// as the GPU fragment shaders (shaders/) and the same shape
 // coverage, so its output is a pixel reference for GPU backends: one
 // sample at each pixel center, blending in [0, 1] with rounding to 8 bits.
 Software_Backend :: struct {
@@ -928,7 +928,7 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	}
 }
 
-// ---- fragment evaluation (mirrors shaders/ovg.slang) ---------------------
+// ---- fragment evaluation (mirrors shaders/common.glsl and main.frag) ------
 
 @(private = "file")
 Sw_Texture :: struct {

@@ -1,5 +1,6 @@
-// SDL_GPU backend for ovg: Vulkan on Linux, Metal on macOS, Vulkan (or
-// D3D12 with DXIL blobs) on Windows, through SDL3's GPU API.
+// SDL_GPU backend for ovg: Vulkan on Linux and Windows, Metal on macOS,
+// through SDL3's GPU API, with its shaders compiled by oksl at `init`
+// (ovg's shaders.odin).
 //
 // `init` creates a headless device, or borrows the host's (e.g. the one its
 // window renders with). Every flush records one command buffer; up to
@@ -11,73 +12,11 @@ import "core:mem"
 import sdl "vendor:sdl3"
 
 import vg ".."
+import "deps:oksl"
 
-VERT_SPV :: #load("../shaders/ovg.vert.spv")
-VERT_MSL :: #load("../shaders/ovg.vert.msl")
-SHAPE_VERT_SPV :: #load("../shaders/ovg.shape_vert.spv")
-SHAPE_VERT_MSL :: #load("../shaders/ovg.shape_vert.msl")
-
-// The fragment shaders, each (but the last two) with a motion-blur variant
-// that writes its target's velocity twin beside the colour (render.odin).
-Frag :: enum {
-	// Quads: clears, images.
-	Main,
-	// Quads of image filters, apart so that the draws' shader doesn't carry them.
-	Filter,
-	// Shape instances (shapes.odin): fills, and hairlines
-	// (vg.hairline_shape) in the same draws.
-	Shape,
-	// Instances whose pixel footprint is a box (no rotation or skew).
-	Shape_Box,
-	// Groups (Cmd_Draw_Shapes.group): one record, its pixels compositing
-	// the instances.
-	Shape_Group,
-	// Groups of markers (vg.fill_markers).
-	Marker_Group,
-	// Motion blur: a layer's motion onto its target's twin
-	// (vg.Cmd_Composite_Velocity), and the screen's twin resolved into the
-	// velocity and nearness textures.
-	Composite_Velocity,
-	Resolve_Velocity,
-}
-
-@(private = "file")
-Frag_Code :: struct {
-	spv, msl:          []u8,
-	entry:             cstring,
-	samplers, storage: u32,
-}
-
-// Each fragment shader and its motion variant (`nil` code: none).
-@(private = "file")
-FRAG_CODE := [Frag][2]Frag_Code {
-	.Main = {
-		{#load("../shaders/ovg.frag.spv"), #load("../shaders/ovg.frag.msl"), "fs_main", 2, 1},
-		{#load("../shaders/ovg.frag_motion.spv"), #load("../shaders/ovg.frag_motion.msl"), "fs_main_motion", 2, 1},
-	},
-	.Filter = {
-		{#load("../shaders/ovg.filter_frag.spv"), #load("../shaders/ovg.filter_frag.msl"), "fs_filter", 2, 1},
-		{},
-	},
-	.Shape = {
-		{#load("../shaders/ovg.shape_frag.spv"), #load("../shaders/ovg.shape_frag.msl"), "fs_shape", 2, 3},
-		{#load("../shaders/ovg.shape_frag_motion.spv"), #load("../shaders/ovg.shape_frag_motion.msl"), "fs_shape_motion", 2, 4},
-	},
-	.Shape_Box = {
-		{#load("../shaders/ovg.shape_box_frag.spv"), #load("../shaders/ovg.shape_box_frag.msl"), "fs_shape_box", 2, 3},
-		{#load("../shaders/ovg.shape_box_frag_motion.spv"), #load("../shaders/ovg.shape_box_frag_motion.msl"), "fs_shape_box_motion", 2, 4},
-	},
-	.Shape_Group = {
-		{#load("../shaders/ovg.shape_group_frag.spv"), #load("../shaders/ovg.shape_group_frag.msl"), "fs_shape_group", 2, 3},
-		{#load("../shaders/ovg.shape_group_frag_motion.spv"), #load("../shaders/ovg.shape_group_frag_motion.msl"), "fs_shape_group_motion", 2, 4},
-	},
-	.Marker_Group = {
-		{#load("../shaders/ovg.marker_group_frag.spv"), #load("../shaders/ovg.marker_group_frag.msl"), "fs_marker_group", 2, 3},
-		{#load("../shaders/ovg.marker_group_frag_motion.spv"), #load("../shaders/ovg.marker_group_frag_motion.msl"), "fs_marker_group_motion", 2, 4},
-	},
-	.Composite_Velocity = {{#load("../shaders/ovg.composite_velocity_frag.spv"), #load("../shaders/ovg.composite_velocity_frag.msl"), "fs_composite_velocity", 2, 1}, {}},
-	.Resolve_Velocity = {{#load("../shaders/ovg.resolve_velocity_frag.spv"), #load("../shaders/ovg.resolve_velocity_frag.msl"), "fs_resolve_velocity", 1, 0}, {}},
-}
+// The fragment shaders (vg.Shader_Unit), each with its motion-blur
+// variant where it has one (render.odin).
+Frag :: vg.Shader_Unit
 
 // Motion blur (vg.canvas_motion_blur): a frame's velocity, in pixels (the
 // shutter's middle minus its opening), and nearness (larger is nearer), as
@@ -264,44 +203,13 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		b.owns_device = true
 	}
 
-	// slangc names the SPIR-V entry points "main" and keeps the function
-	// names for Metal.
 	formats := sdl.GetGPUShaderFormats(b.device)
 	spirv := .SPIRV in formats
 	if !spirv && .MSL not_in formats {
 		return .Unsupported_Operation
 	}
 	b.shader_format = {.SPIRV} if spirv else {.MSL}
-	shader :: proc(b: ^SDL_Backend, spv, msl: []u8, entry: cstring, stage: sdl.GPUShaderStage, samplers, storage, uniforms: u32) -> ^sdl.GPUShader {
-		spirv := b.shader_format == {.SPIRV}
-		code := spv if spirv else msl
-		return sdl.CreateGPUShader(b.device, {
-			code_size = len(code),
-			code = raw_data(code),
-			entrypoint = "main" if spirv else entry,
-			format = b.shader_format,
-			stage = stage,
-			num_samplers = samplers,
-			num_storage_buffers = storage,
-			num_uniform_buffers = uniforms,
-		})
-	}
-	b.vert = shader(b, VERT_SPV, VERT_MSL, "vs_main", .VERTEX, 0, 0, 1)
-	b.shape_vert = shader(b, SHAPE_VERT_SPV, SHAPE_VERT_MSL, "vs_shape", .VERTEX, 0, 1, 2)
-	if b.vert == nil || b.shape_vert == nil {
-		return .Shader_Compile
-	}
-	for variants, f in FRAG_CODE {
-		for code, k in variants {
-			if code.spv == nil {
-				continue
-			}
-			b.frags[f][k] = shader(b, code.spv, code.msl, code.entry, .FRAGMENT, code.samplers, code.storage, 0)
-			if b.frags[f][k] == nil {
-				return .Shader_Compile
-			}
-		}
-	}
+	shaders_init(b) or_return
 	store_init(b)
 
 	for &s, i in b.samplers {
@@ -878,4 +786,57 @@ sdl_screenshot :: proc(data: rawptr, allocator: mem.Allocator) -> (vg.Screenshot
 		return {}, err
 	}
 	return {pixels, b.last_screen.width, b.last_screen.height}, nil
+}
+
+// ---- shaders ---------------------------------------------------------------------------
+
+// Compiles the vertex shaders and every fragment unit (and its motion
+// variant) to the device's SPIR-V or MSL.
+@(private = "file")
+shaders_init :: proc(b: ^SDL_Backend) -> vg.Error {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	b.vert = compile_shader(b, vg.SHADER_QUAD_VERT, "", .Vertex) or_return
+	b.shape_vert = compile_shader(b, vg.SHADER_SHAPE_VERT, "", .Vertex) or_return
+	for src, u in vg.SHADER_SOURCES {
+		for k in 0 ..< (2 if src.motion else 1) {
+			b.frags[u][k] = compile_shader(b, src.source, vg.shader_prelude(u, k == 1, context.temp_allocator), .Fragment) or_return
+		}
+	}
+	return nil
+}
+
+// One shader for the device, its bindings checked against what the
+// renderer binds.
+@(private = "file")
+compile_shader :: proc(b: ^SDL_Backend, source, prelude: string, stage: oksl.Stage) -> (^sdl.GPUShader, vg.Error) {
+	spirv := b.shader_format == {.SPIRV}
+	m, _, ok := oksl.compile(source, {profile = .Glsl, stage = stage, prelude = prelude, no_cpu = true, no_spirv = !spirv, no_msl = spirv})
+	if !ok {
+		return nil, .Shader_Compile
+	}
+	defer oksl.destroy(m)
+	if stage == .Fragment {
+		buffers := make([]string, len(m.storage_buffers), context.temp_allocator)
+		for sb, i in m.storage_buffers {
+			buffers[i] = sb.name
+		}
+		if !vg.shader_bindings_ok(m.channel_names[:m.num_samplers], buffers) {
+			return nil, .Shader_Compile
+		}
+	}
+	code := mem.slice_to_bytes(m.spirv) if spirv else transmute([]u8)m.msl
+	s := sdl.CreateGPUShader(b.device, {
+		code_size = len(code),
+		code = raw_data(code),
+		entrypoint = oksl.SPIRV_ENTRY if spirv else oksl.MSL_ENTRY,
+		format = b.shader_format,
+		stage = .VERTEX if stage == .Vertex else .FRAGMENT,
+		num_samplers = u32(m.num_samplers),
+		num_storage_buffers = u32(len(m.storage_buffers)),
+		num_uniform_buffers = u32(m.num_uniform_buffers),
+	})
+	if s == nil {
+		return nil, .Shader_Compile
+	}
+	return s, nil
 }

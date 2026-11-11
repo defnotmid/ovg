@@ -16,13 +16,15 @@ env:
   ODIN_VERSION: dev-2026-11a
 
 # ovg reads oglyph (fonts and shaping), ocurves (shapes' coverage and path
-# booleans) and oicut (image decoding and PNG writing) through
+# booleans, and the curves.glsl its shaders include), oicut (image decoding
+# and PNG writing) and oksl (the shader compiler) through
 # `-collection:deps=..`, so the job checks them out side by side:
-#   $GITHUB_WORKSPACE/{ovg,oglyph,ocurves,oicut}
+#   $GITHUB_WORKSPACE/{ovg,oglyph,ocurves,oicut,oksl}
 # All are pinned to the tags onimite builds with. The core package with the
-# software backend, svg and lottie are tested; the SDL_GPU backend
-# (sdlgpu/) is type-checked only, since hosted runners have no GPU and
-# `odin check` needs no SDL3 library.
+# software backend, svg and lottie are tested (the core's tests compile
+# every shader with oksl); the SDL_GPU backend (sdlgpu/) is type-checked
+# only, since hosted runners have no GPU and `odin check` needs no SDL3
+# library.
 
 jobs:
   test:
@@ -47,13 +49,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/ocurves
-          ref: v0.0.16
+          ref: v0.0.17
           path: ocurves
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/oicut
           ref: v0.0.26
           path: oicut
+      - uses: actions/checkout@v4
+        with:
+          repository: defnotmid/oksl
+          ref: v0.0.8
+          path: oksl
 
       - name: Cache Odin
         id: odin-cache

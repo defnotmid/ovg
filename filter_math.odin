@@ -3,7 +3,7 @@ package ovg
 import "core:math"
 
 // Per-pixel math of the image filters, on RGBA in [0, 1]. The software
-// backend runs these procedures; shaders/ovg.slang carries the same
+// backend runs these procedures; shaders/filter.frag carries the same
 // formulas for the GPU, so the two stay pixel-identical.
 
 unpremultiply :: #force_inline proc "contextless" (c: [4]f32) -> [4]f32 {

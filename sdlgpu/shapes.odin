@@ -4,9 +4,6 @@ import "core:math"
 import sdl "vendor:sdl3"
 
 import vg ".."
-import cv "deps:ocurves"
-
-#assert(cv.FORMAT == SHADERS_CURVES_FORMAT, "ovg's shape shaders read another ocurves curves.FORMAT: use the ocurves this ovg's tag names, or rerun shaders/build.sh against this one")
 
 // The backend's copies of the shapes it draws, in one storage buffer the
 // shape shader reads, found by shape id's slot: a shape is uploaded the first time
@@ -56,8 +53,8 @@ Pending_Shape :: struct {
 	data:   []u32,
 }
 
-// One shape instance as the shape shader reads it (`Shape_Instance` in
-// ovg.slang).
+// One shape instance as the shape shaders read it (`Shape_Instance` in
+// shaders/shapes.glsl).
 @(private)
 Gpu_Shape_Instance :: struct {
 	m:      [4]f32,
