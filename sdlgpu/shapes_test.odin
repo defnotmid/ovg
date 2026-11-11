@@ -131,3 +131,53 @@ test_store_levels :: proc(t: ^testing.T) {
 	testing.expect_value(t, b.shape_offsets[0], at[0])
 	testing.expect_value(t, b.shape_offsets[1], at[1])
 }
+
+// Words past the store's capacity grow it rather than starting it over:
+// the shapes it holds keep their places and only new words wait to
+// upload, the held words copied to the larger buffer (store_upload); a
+// frame dropped before its upload still starts it over.
+@(test)
+test_store_grows :: proc(t: ^testing.T) {
+	b: SDL_Backend
+	store_init(&b)
+	defer {
+		delete(b.shapes.at)
+		delete(b.shapes.pending)
+		delete(b.shape_offsets)
+	}
+	p: vg.Path
+	vg.path_init(&p)
+	defer vg.path_destroy(&p)
+	vg.path_circle(&p, 0, 0, 3)
+	a, _ := vg.shape_from_path(&p)
+	defer vg.shape_destroy(&a)
+	vg.path_reset(&p)
+	vg.path_rect(&p, 0, 0, 9, 2)
+	c, _ := vg.shape_from_path(&p)
+	defer vg.shape_destroy(&c)
+	one := [1]vg.Shape_Instance{{shape = &a}}
+	_, ok := store_place(&b, {shapes = one[:]})
+	testing.expect(t, ok)
+	at_a := b.shape_offsets[0]
+	// Uploaded into a store just that large.
+	b.shapes.capacity = b.shapes.top
+	clear(&b.shapes.pending)
+	b.stats = {}
+	two := [2]vg.Shape_Instance{{shape = &a}, {shape = &c}}
+	_, ok = store_place(&b, {shapes = two[:]})
+	testing.expect(t, ok)
+	testing.expect(t, b.shapes.top > b.shapes.capacity)
+	testing.expect_value(t, b.stats.shape_restarts, 0)
+	testing.expect_value(t, b.shape_offsets[0], at_a)
+	testing.expect_value(t, b.shapes.held, u32(len(a.data)))
+	testing.expect_value(t, len(b.shapes.pending), 1)
+	if len(b.shapes.pending) == 1 {
+		testing.expect(t, raw_data(b.shapes.pending[0].data) == raw_data(c.data))
+	}
+	// Dropped before its upload: the next frame starts over, holding nothing.
+	_, ok = store_place(&b, {shapes = two[:]})
+	testing.expect(t, ok)
+	testing.expect_value(t, b.stats.shape_restarts, 1)
+	testing.expect_value(t, b.shapes.held, 0)
+	testing.expect_value(t, len(b.shapes.pending), 2)
+}

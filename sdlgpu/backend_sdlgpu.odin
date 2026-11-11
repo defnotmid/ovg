@@ -213,11 +213,13 @@ Frame_Stats :: struct {
 	draws:          int,
 	pipeline_binds: int,
 	render_passes:  int,
-	// Shape instances drawn, words of shapes uploaded to the store, and
-	// whether the store started over in a fresh buffer (1) this frame.
+	// Shape instances drawn, words of shapes uploaded to the store,
+	// whether the store started over in a fresh buffer (1) this frame, and
+	// whether it grew into a larger one, keeping what it held (1).
 	shape_instances: int,
 	shape_upload_words: int,
 	shape_restarts: int,
+	shape_grows: int,
 }
 
 // Prepares the backend on `device`, or on a new headless device when nil

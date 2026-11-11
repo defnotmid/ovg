@@ -30,6 +30,10 @@ Shape_Store :: struct {
 	gen:               u32,
 	// Words placed but not yet uploaded.
 	pending:           [dynamic]Pending_Shape,
+	// The words the buffer holds from earlier frames (its kept shapes'),
+	// which a larger buffer takes by copy: the store grows without
+	// uploading again what the GPU has.
+	held:              u32,
 	transfer:          ^sdl.GPUTransferBuffer,
 	transfer_capacity: u32,
 }
@@ -103,6 +107,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 		restart(st)
 		b.stats.shape_restarts = 1
 	}
+	held := st.kept
 	place :: proc(st: ^Shape_Store, data: []u32) -> u32 {
 		offset := st.top
 		if len(data) > 0 {
@@ -144,14 +149,17 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 				b.shape_offsets[i] = own + inst.words.start
 			}
 		}
-		if st.top <= st.capacity || again {
+		if st.top <= STORE_MAX_CAPACITY / 2 || again {
 			break
 		}
-		// It doesn't fit: start over with only this frame's shapes, in a
-		// buffer four times their size (store_upload makes it).
+		// Past what a store holds: start over with only this frame's
+		// shapes.
 		restart(st)
+		held = 0
 		b.stats.shape_restarts = 1
 	}
+	// Past its capacity the store grows (store_upload), keeping what it holds.
+	st.held = held
 	// Sizes in bytes are 32-bit (store_capacity).
 	return grids, st.top <= STORE_MAX_CAPACITY / 2
 }
@@ -167,8 +175,9 @@ store_capacity :: proc "contextless" (top: u32) -> u32 {
 @(private)
 STORE_MAX_CAPACITY :: 1 << 29
 
-// Uploads the words placed since the last upload, into a fresh buffer when
-// the store started over; false (nothing recorded) when the device fails.
+// Uploads the words placed since the last upload, into a larger buffer
+// when they pass the store's capacity, the words it holds copied over on
+// the GPU first; false (nothing recorded) when the device fails.
 @(private)
 store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	st := &b.shapes
@@ -177,6 +186,16 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 		buffer := sdl.CreateGPUBuffer(b.device, {usage = {.GRAPHICS_STORAGE_READ}, size = capacity * 4})
 		if buffer == nil {
 			return false
+		}
+		if st.held > 0 && st.buffer != nil {
+			pass := sdl.BeginGPUCopyPass(cmd)
+			if pass == nil {
+				sdl.ReleaseGPUBuffer(b.device, buffer)
+				return false
+			}
+			sdl.CopyGPUBufferToBuffer(pass, {buffer = st.buffer}, {buffer = buffer}, st.held * 4, false)
+			sdl.EndGPUCopyPass(pass)
+			b.stats.shape_grows = 1
 		}
 		retire_buffer(b.device, b.retired, st.buffer)
 		st.buffer, st.capacity = buffer, capacity
