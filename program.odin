@@ -1,9 +1,11 @@
 package ovg
 
+import "deps:oksl"
+
 // Custom fragment programs: a host-supplied fragment shader (and its CPU
 // twin for the software backend) run over a whole image, like a filter.
-// ovg knows nothing about the shading language; the host compiles it
-// (e.g. with oksl) and registers the blobs.
+// The host compiles it (with oksl, say) and registers the blobs; the CPU
+// program's sampler is oksl's, so a host passes it straight to oksl.run.
 //
 // A run is a recorded command executed in order at flush: the target image
 // is cleared, then every pixel is shaded from a uniform block (copied into
@@ -25,15 +27,18 @@ PROGRAM_MAX_CHANNELS :: 4
 // Samples input image `channel` at normalized `uv` (origin top-left) and mip
 // level `lod` with GL semantics: bilinear or nearest per the image flags,
 // clamp-to-edge or repeat, texel values as stored (Gray8 and Gray16 are (g, 0, 0, 1)).
-// The software backend has no mipmaps; `lod` is ignored.
-Program_Sample_Proc :: #type proc(data: rawptr, channel: int, uv: [2]f32, lod: f32) -> [4]f32
+// oksl's Sampler_Proc, so `sample` and `data` are oksl.Run_Options' sampler
+// and user. The software backend has no mipmaps and images have one layer:
+// `lod` and `layer` are ignored.
+Program_Sample_Proc :: oksl.Sampler_Proc
 
 Program_Sampler :: struct {
 	data:   rawptr,
 	sample: Program_Sample_Proc,
-	// Each channel's size in texels (0 x 0 when unbound): GLSL's
-	// textureSize, and what an implicit mip level is reckoned from.
-	sizes:  [PROGRAM_MAX_CHANNELS][2]i32,
+	// Each channel's size in texels and its layers, 1 (0 x 0 x 0 when
+	// unbound): GLSL's textureSize, and what an implicit mip level is
+	// reckoned from; oksl.Run_Options' channel_sizes.
+	sizes:  [PROGRAM_MAX_CHANNELS][3]i32,
 }
 
 // The CPU program: shades a `width x height` image into `out` (`format`

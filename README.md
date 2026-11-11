@@ -68,9 +68,9 @@ packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.17), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26); its tests `deps:oksl` |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.17), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26), `deps:oksl` ([oksl](https://github.com/defnotmid/oksl) v0.0.8) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
-| `ovg/sdlgpu` (GPU backend) | `deps:oksl` ([oksl](https://github.com/defnotmid/oksl) v0.0.8), `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
+| `ovg/sdlgpu` (GPU backend) | `ovg`, `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
 ## Use
 
@@ -740,11 +740,15 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
   per pixel), as of the last flush; `update_image` takes the same layout.
 - Software: calls `cpu(user, uniforms, w, h, out, stride, format, sampler)`
   (`out` holds `format` texels: RGBA8, or RGBA16F as `[4]f16`).
-  `sampler.sample(data, channel, uv, lod)` gives GL `texture()` semantics
-  over the channel images: bilinear or nearest, clamp or repeat, texels as
-  stored (images have one level, so `lod` changes nothing); `sampler.sizes`
-  gives each channel's size in texels (GLSL `textureSize`), 0 x 0 when
-  unbound. The callback may split the image across threads.
+  `sampler.sample(data, channel, uv, lod, layer)` gives GL `texture()`
+  semantics over the channel images: bilinear or nearest, clamp or repeat,
+  texels as stored (images have one level and one layer, so `lod` and
+  `layer` change nothing); `sampler.sizes` gives each channel's size in
+  texels and its layers (GLSL `textureSize`), 0 x 0 x 0 when unbound. They
+  are oksl's sampler and channel sizes, so an oksl CPU program runs as
+  `oksl.run(..., {sampler = sampler.sample, user = sampler.data,
+  channel_sizes = sampler.sizes[:]})`. The callback may split the image
+  across threads.
 - Backends without programs leave `create_program` nil, and creating one
   then returns `.Unsupported_Operation`.
 - `run_external(c, fn, user)` runs host work at its place in the frame:
@@ -873,8 +877,12 @@ every part follows:
   (5.75 against 67.9 zoomed out to half, the markers piled up); on an
   RX 9070 XT 3.5 against 11.5 ms.
 - **The software backend is the pixel reference for the GPU backend.** It
-  evaluates the fragment shader's formulas and the same coverage function,
-  samples textures like the GPU and uses the top-left fill rule.
+  runs the GPU's own shape shaders (`shape.frag`, `group.frag`,
+  `markers.frag`) on [oksl](https://github.com/defnotmid/oksl)'s CPU
+  program, over 2x2 quads of each instance's pixels as a GPU rasterizes
+  them, compiled from the same sources the first time a frame draws with
+  them; the filters evaluate the same formulas in Odin. It samples
+  textures like the GPU and uses the top-left fill rule.
   `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
   and diffs them; on an RX 9070 XT (Vulkan, RADV) all 35 checks match, with
   a mean difference under 0.1 / 255 in each: most pixels within one or two
@@ -974,8 +982,8 @@ every part follows:
   their owner upload once into the backend's store; a frame's own words
   (paths filled this frame) go up with it. Against the
   two-ray estimate (4K, Linux / M4): dense upright text costs 17% / 18%
-  more, rotated text 50% / 26% more. The software backend evaluates the
-  same coverage function (parity: max diff 1 in the `curves` scene).
+  more, rotated text 50% / 26% more. The software backend runs the same
+  shape shaders (parity: max diff 1 in the `curves` scene).
 - **Text** reads fonts with `oglyph/font` (core only: the table directory,
   cmap, hmtx, kern and GPOS pair kerning, glyf with composites, CFF Type 2
   charstrings; bounds-checked; outlines placed by hmtx's side bearing as

@@ -53,19 +53,6 @@ Pending_Shape :: struct {
 	data:   []u32,
 }
 
-// One shape instance as the shape shaders read it (`Shape_Instance` in
-// shaders/shapes.glsl).
-@(private)
-Gpu_Shape_Instance :: struct {
-	m:      [4]f32,
-	t:      [4]f32,
-	bounds: [4]f32,
-	uv:     [4]f32,
-	data:   [4]u32,
-	// The scissor's pixels (target pixels x0, y0, x1, y1).
-	clip:   [4]f32,
-}
-
 @(private)
 store_init :: proc(b: ^SDL_Backend) {
 	b.shapes.at = make([dynamic]Store_Place, b.allocator)
@@ -238,37 +225,4 @@ store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	sdl.UploadToGPUBuffer(pass, {transfer_buffer = st.transfer}, {buffer = st.buffer, offset = first * 4, size = total * 4}, false)
 	sdl.EndGPUCopyPass(pass)
 	return true
-}
-
-// The instance as the shader reads it: `offset` is its shape's words'
-// place in the store, `frame_words` the frame's own.
-@(private)
-gpu_shape_instance :: proc(inst: vg.Shape_Instance, frame_words: []u32, offset: u32, clip: [4]f32) -> Gpu_Shape_Instance {
-	t := inst.transform
-	epp := vg.shape_ems_per_pixel(t) * vg.instance_reach(inst)
-	u, v := vg.instance_footprint(inst)
-	flags: u32 = (1 if inst.rule == .Even_Odd else 0) | (2 if inst.edge == .Aliased else 0) | (4 if inst.edge == .Smooth else 0)
-	// A hairline's width in place of the flags: a positive normal float,
-	// whose exponent bits the shader tells from the flags by. Anything
-	// narrower than the smallest normal float covers nothing anyway.
-	if inst.hairline > 0 {
-		flags = transmute(u32)max(inst.hairline, transmute(f32)u32(0x0080_0000))
-	}
-	// A marker: the unit square or circle, its kind where a shape's words
-	// are (16 added when it is filled).
-	at := offset
-	sb := vg.Bounds{-1, -1, 1, 1}
-	if inst.marker != .None {
-		at = u32(inst.marker) | (16 if inst.marker_fill else 0)
-	} else {
-		sb = vg.instance_shape_bounds(inst, frame_words)
-	}
-	return {
-		m = {t[0], t[1], t[2], t[3]},
-		t = {t[4], t[5], epp.x, epp.y},
-		bounds = {sb.minx, sb.miny, sb.maxx, sb.maxy},
-		uv = {u.x, u.y, v.x, v.y},
-		data = {at, inst.paint, flags, 0},
-		clip = clip,
-	}
 }

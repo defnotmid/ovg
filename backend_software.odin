@@ -5,12 +5,12 @@ import "core:math"
 import "core:mem"
 import "core:slice"
 import common "deps:oicut/common"
-import cv "deps:ocurves"
+import "deps:oksl"
 
-// CPU rasterizer writing RGBA8. It evaluates the same per-fragment formulas
-// as the GPU fragment shaders (shaders/) and the same shape
-// coverage, so its output is a pixel reference for GPU backends: one
-// sample at each pixel center, blending in [0, 1] with rounding to 8 bits.
+// CPU rasterizer writing RGBA8. It runs the GPU's shape shaders (shaders/)
+// on oksl's CPU program and the filters' same formulas, so its output is a
+// pixel reference for GPU backends: one sample at each pixel center,
+// blending in [0, 1] with rounding to 8 bits.
 Software_Backend :: struct {
 	allocator: mem.Allocator,
 	pixels:    []u8,
@@ -32,9 +32,9 @@ Software_Backend :: struct {
 	transient: []u8,
 	// The caller's pool a frame's row bands run on (oicut's Work_Pool: one
 	// band a range); nil runs them all on the calling thread. A band takes
-	// a group's scratch from context.temp_allocator, so each of the pool's
-	// threads must have its own (an Odin thread's default, as oicut's
-	// Static_Pool's workers do).
+	// the shaders' working memory from context.temp_allocator, so each of
+	// the pool's threads must have its own (an Odin thread's default, as
+	// oicut's Static_Pool's workers do).
 	pool:      ^common.Work_Pool,
 	// Motion blur (Frame.motion): the velocity twins of the screen and of
 	// each image a frame draws into with `velocity`, one block carved for a
@@ -49,6 +49,56 @@ Software_Backend :: struct {
 	// The last frame's velocity and nearness (software_backend_velocity).
 	velocity:  [dynamic][2]f32,
 	nearness:  [dynamic]f32,
+	// The shape units (shaders.odin) as oksl's CPU programs, [1] each's
+	// motion variant: the shading the SDL_GPU backend's shaders do, from the
+	// same source. Each is compiled the first time a run draws with it.
+	programs:  [Sw_Unit][2]Sw_Program_Unit,
+	// The frame's paints and motions as the shaders read them.
+	paint_rows:  [dynamic][14][4]f32,
+	motion_rows: [dynamic]Shader_Motion,
+	// A run's groups (Cmd_Draw_Shapes.group), built before its bands: their
+	// grids and members' words, the members' rows and motions as the shaders
+	// read them, each group's grid and first row, and each command's group.
+	group_words:   [dynamic]u32,
+	group_rows:    [dynamic]Shader_Instance,
+	group_motions: [dynamic]Shader_Motion,
+	groups:        [dynamic]Sw_Group,
+	group_of:      [dynamic]i32,
+	group_grid:    Group_Grid_Scratch,
+}
+
+// The units the software backend runs on oksl's CPU program.
+@(private = "file")
+Sw_Unit :: enum u8 {
+	Shape,
+	Shape_Box,
+	Shape_Group,
+	Marker_Group,
+}
+
+@(private = "file", rodata)
+SW_UNITS := [Sw_Unit]Shader_Unit {
+	.Shape        = .Shape,
+	.Shape_Box    = .Shape_Box,
+	.Shape_Group  = .Shape_Group,
+	.Marker_Group = .Marker_Group,
+}
+
+// A unit's CPU program, and where each stage input (shapes.glsl's rc, fpos,
+// uv, data: locations 0 to 3) is in its varyings' record (-1: it reads
+// none).
+@(private = "file")
+Sw_Program_Unit :: struct {
+	module: ^oksl.Module,
+	inputs: [4]int,
+}
+
+// A group of a run: its grid in `group_words` and its first member's row
+// in `group_rows`.
+@(private = "file")
+Sw_Group :: struct {
+	grid:  Group_Grid,
+	first: u32,
 }
 
 software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocator) {
@@ -59,6 +109,37 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.twin_at = make([dynamic]int, allocator)
 	b.velocity = make([dynamic][2]f32, allocator)
 	b.nearness = make([dynamic]f32, allocator)
+	b.paint_rows = make([dynamic][14][4]f32, allocator)
+	b.motion_rows = make([dynamic]Shader_Motion, allocator)
+	b.group_words = make([dynamic]u32, allocator)
+	b.group_rows = make([dynamic]Shader_Instance, allocator)
+	b.group_motions = make([dynamic]Shader_Motion, allocator)
+	b.groups = make([dynamic]Sw_Group, allocator)
+	b.group_of = make([dynamic]i32, allocator)
+	b.group_grid = {make([dynamic]Bounds, allocator), make([dynamic][4]i32, allocator), make([dynamic]u32, allocator)}
+}
+
+// Compiles the units `needs` (their motion variants with `motion`) that
+// aren't yet, before a run's bands read them. They are ovg's own sources,
+// which test_shaders_compile compiles, so a failure is a bug.
+@(private = "file")
+sw_programs_need :: proc(b: ^Software_Backend, needs: bit_set[Sw_Unit], motion: int) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	for u in needs {
+		p := &b.programs[u][motion]
+		if p.module != nil {
+			continue
+		}
+		unit := SW_UNITS[u]
+		prelude := shader_prelude(unit, motion == 1, context.temp_allocator)
+		context.allocator = b.allocator
+		m, _, ok := oksl.compile(SHADER_SOURCES[unit].source, {profile = .Glsl, prelude = prelude, no_spirv = true, no_msl = true})
+		assert(ok, "ovg's shape shaders compile for oksl's CPU program")
+		p^ = {module = m, inputs = {-1, -1, -1, -1}}
+		for v in m.stage_inputs {
+			p.inputs[v.location] = v.offset
+		}
+	}
 }
 
 software_backend_destroy :: proc(b: ^Software_Backend) {
@@ -72,6 +153,21 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.twin_at)
 	delete(b.velocity)
 	delete(b.nearness)
+	delete(b.paint_rows)
+	delete(b.motion_rows)
+	delete(b.group_words)
+	delete(b.group_rows)
+	delete(b.group_motions)
+	delete(b.groups)
+	delete(b.group_of)
+	group_grid_scratch_destroy(&b.group_grid)
+	for variants in b.programs {
+		for p in variants {
+			if p.module != nil {
+				oksl.destroy(p.module)
+			}
+		}
+	}
 	b^ = {}
 }
 
@@ -227,6 +323,15 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 	if len(b.bounds) < len(frame.shapes) {
 		resize(&b.bounds, len(frame.shapes))
 	}
+	// The paints and motions as the shaders read them, once a frame.
+	resize(&b.paint_rows, len(frame.paints))
+	for p, i in frame.paints {
+		b.paint_rows[i] = pack_frag_uniforms(p)
+	}
+	resize(&b.motion_rows, len(frame.motions))
+	for m, i in frame.motions {
+		b.motion_rows[i] = shader_motion(m)
+	}
 	run := 0
 	for cmd, i in frame.commands {
 		#partial switch _ in cmd.type {
@@ -345,15 +450,6 @@ sw_resolve_velocity :: proc(b: ^Software_Backend) {
 	}
 }
 
-// Motion blur: a draw's motion `m` over the twin's pixel `d` at drawing
-// coordinates (px, py), by its coverage `a` (its final alpha):
-// premultiplied source-over, whatever the draw's blend.
-@(private = "file")
-twin_over :: #force_inline proc "contextless" (d: ^[4]f32, m: Shape_Motion, px, py, a: f32) {
-	v := transform_point(m.velocity, px, py)
-	d^ = [4]f32{v.x, v.y, m.nearness, 1} * a + d^ * (1 - a)
-}
-
 // A layer's or a group's motion `g` (a twin pixel) over the twin's pixel
 // `d`, faded by `opacity` and cut to the coverage `a` it composites with
 // where that is less (a clip or mask): its motion at the layer's coverage,
@@ -464,6 +560,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 	// starts[k] at band k's end), then shift back.
 	resize(&b.starts, bands + 1)
 	mem.zero_slice(b.starts[:])
+	needs: bit_set[Sw_Unit]
 	for fill in ([2]bool{false, true}) {
 		if fill {
 			for band in 0 ..< bands {
@@ -485,9 +582,16 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 			case Cmd_Clear_Rect:
 				sw_bin(&run, fill, {u32(k), SW_NO_INSTANCE}, max(r.y0, i32(c.y)), min(r.y1, i32(c.y + c.h)))
 			case Cmd_Draw_Shapes:
+				if !fill && c.group != 0 && c.instances.count > 0 {
+					needs += {.Marker_Group if frame.shapes[c.instances.start].marker != .None else .Shape_Group}
+				}
 				for i in c.instances.start ..< c.instances.start + c.instances.count {
 					if !fill {
 						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
+						t := frame.shapes[i].transform
+						if c.group == 0 {
+							needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape}
+						}
 					}
 					ib := b.bounds[i]
 					sw_bin(&run, fill, {u32(k), i}, clamp_i32(math.floor(ib.miny), r.y0, r.y1), clamp_i32(math.ceil(ib.maxy), r.y0, r.y1))
@@ -499,7 +603,46 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 		b.starts[band] = b.starts[band - 1]
 	}
 	b.starts[0] = 0
+	sw_programs_need(b, needs, int(run.twin.pixels != nil))
+	sw_build_groups(b, frame, cmds)
 	sw_bands(b, rows, &run, sw_run_band)
+}
+
+// The run's groups as the group and marker shaders read them, before its
+// bands: each group's grid and its members' words (copied after it, each
+// drawn level once a member) in `group_words`, the members' rows (words at
+// their copies) and motions in `group_rows` and `group_motions`, and each
+// command's group in `group_of` (-1: none).
+@(private = "file")
+sw_build_groups :: proc(b: ^Software_Backend, frame: Frame, cmds: []Command) {
+	clear(&b.group_words)
+	clear(&b.group_rows)
+	clear(&b.group_motions)
+	clear(&b.groups)
+	resize(&b.group_of, len(cmds))
+	for cmd, k in cmds {
+		b.group_of[k] = -1
+		c, is_draw := cmd.type.(Cmd_Draw_Shapes)
+		if !is_draw || c.group == 0 || c.instances.count == 0 {
+			continue
+		}
+		members := frame.shapes[c.instances.start:][:c.instances.count]
+		grid := group_grid(&b.group_grid, &b.group_words, members, frame.shape_words)
+		b.group_of[k] = i32(len(b.groups))
+		append(&b.groups, Sw_Group{grid, u32(len(b.group_rows))})
+		for inst, i in members {
+			at := u32(len(b.group_words))
+			if inst.marker == .None {
+				append(&b.group_words, ..instance_words(inst, frame.shape_words))
+			}
+			append(&b.group_rows, shader_instance(inst, frame.shape_words, at, {}))
+			m: Shader_Motion
+			if len(frame.motions) > 0 {
+				m = b.motion_rows[int(c.instances.start) + i]
+			}
+			append(&b.group_motions, m)
+		}
+	}
 }
 
 // A draw reaching rows [y0, y1) (drawing coordinates) of the run's target:
@@ -520,9 +663,8 @@ sw_bin :: proc(run: ^Sw_Run, fill: bool, item: Sw_Binned, y0, y1: i32) {
 	}
 }
 
-// One band of a run: its draws, a command's together. A group's pixels
-// before its tint (and their motion, on a twin) go through the band's
-// scratch, in the temp arena of the thread drawing the band.
+// One band of a run: its draws, a command's together. The shaders' working
+// memory is in the temp arena of the thread drawing the band.
 @(private = "file")
 sw_run_band :: proc(data: rawptr, y0, y1: int) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
@@ -531,21 +673,14 @@ sw_run_band :: proc(data: rawptr, y0, y1: int) {
 	k := y0 / SW_BAND_ROWS
 	items := b.binned[b.starts[k]:b.starts[k + 1]]
 	top, bottom := i32(y0) + run.origin.y, i32(y1) + run.origin.y
-	scratch, motion: [][4]f32
+	context.allocator = context.temp_allocator
+	lanes := sw_lanes_make(context.temp_allocator)
 	for i := 0; i < len(items); {
 		j := i + 1
 		for j < len(items) && items[j].cmd == items[i].cmd {
 			j += 1
 		}
-		cmd := run.cmds[items[i].cmd]
-		if c, ok := cmd.type.(Cmd_Draw_Shapes); ok && c.group != 0 && scratch == nil {
-			n := int(run.target.width) * (y1 - y0)
-			scratch = make([][4]f32, n, context.temp_allocator)
-			if run.twin.pixels != nil {
-				motion = make([][4]f32, n, context.temp_allocator)
-			}
-		}
-		sw_band_command(run, cmd, items[i:j], top, bottom, scratch, motion)
+		sw_band_command(run, items[i].cmd, items[i:j], top, bottom, &lanes)
 		i = j
 	}
 }
@@ -558,7 +693,6 @@ Raster :: struct {
 	ox, oy:  i32,
 	x0, y0:  i32,
 	x1, y1:  i32,
-	frag:    ^Frag,
 	blend:   Composite_Operation_State,
 	twin:    Sw_Twin,
 }
@@ -591,10 +725,10 @@ sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 	return r
 }
 
-// A command's draws in one band, rows [top, bottom); `scratch` holds a
-// group's band before its tint, and `motion` its motion.
+// Command `k`'s draws in one band, rows [top, bottom).
 @(private = "file")
-sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bottom: i32, scratch, motion: [][4]f32) {
+sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i32, lanes: ^Sw_Lanes) {
+	cmd := run.cmds[k]
 	r := sw_raster(run, cmd)
 	r.y0 = max(r.y0, top)
 	r.y1 = min(r.y1, bottom)
@@ -606,287 +740,32 @@ sw_band_command :: proc(run: ^Sw_Run, cmd: Command, items: []Sw_Binned, top, bot
 	case Cmd_Clear_Rect:
 		sw_clear_rect(&r, c)
 	case Cmd_Draw_Shapes:
-		// With a twin or not, once per command.
-		twinned := r.twin.pixels != nil
-		if c.group != 0 && frame.shapes[c.instances.start].marker != .None {
-			if twinned {
-				raster_markers(run, &r, cmd, c, items, scratch, true)
-			} else {
-				raster_markers(run, &r, cmd, c, items, scratch, false)
-			}
-			return
-		} else if c.group != 0 {
-			if twinned {
-				raster_group(run, &r, cmd, c, items, scratch, motion, true)
-			} else {
-				raster_group(run, &r, cmd, c, items, scratch, motion, false)
-			}
+		b := run.b
+		tex: Sw_Shader_Texture
+		tex.tex, tex.ok = lookup_texture(run.images, cmd.image)
+		// With a twin, the units' motion variants, whose motion goes over it.
+		motion := int(r.twin.pixels != nil)
+		paints := slice.reinterpret([]u32, b.paint_rows[:])
+		if g := b.group_of[k]; g >= 0 {
+			group := b.groups[g]
+			grid := group.grid
+			unit := Sw_Unit.Marker_Group if frame.shapes[c.instances.start].marker != .None else .Shape_Group
+			// Cell units at the pixel: the group's records map them to
+			// drawing coordinates.
+			to_cells := Transform2D{1 / grid.cell.x, 0, 0, 1 / grid.cell.y, -grid.area.minx / grid.cell.x, -grid.area.miny / grid.cell.y}
+			buffers := [4][]u32{paints, b.group_words[:], slice.reinterpret([]u32, b.group_rows[:]), slice.reinterpret([]u32, b.group_motions[:])}
+			sw_shade_rect(lanes, &r, b.programs[unit][motion], sw_pixels(&r, grid.area), to_cells, {}, {u32(grid.head), c.group - 1, group.first, 0}, buffers[:], &tex)
 			return
 		}
-		frag: Frag
-		row := max(u32)
 		for it in items {
 			inst := frame.shapes[it.inst]
-			if inst.paint != row {
-				frag = make_frag(run.images, cmd, frame.paints[inst.paint])
-				row = inst.paint
-			}
-			r.frag = &frag
-			// Moving or not, once per instance.
-			if m := sw_motion(run, it.inst); m.nearness != 0 {
-				raster_shape(&r, inst, m, run.b.bounds[it.inst], frame.shape_words, true)
-			} else {
-				raster_shape(&r, inst, m, run.b.bounds[it.inst], frame.shape_words, false)
-			}
+			unit := Sw_Unit.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape
+			uv, data := shader_instance_inputs(inst, 0)
+			data.w = it.inst
+			buffers := [4][]u32{paints, instance_words(inst, frame.shape_words), nil, slice.reinterpret([]u32, b.motion_rows[:])}
+			sw_shade_rect(lanes, &r, b.programs[unit][motion], sw_pixels(&r, b.bounds[it.inst]), transform_inverse(inst.transform), uv, data, buffers[:], &tex)
 		}
 	}
-}
-
-// Instance `i`'s motion where the run's target keeps a twin, else none
-// (nearness 0).
-@(private = "file")
-sw_motion :: #force_inline proc "contextless" (run: ^Sw_Run, i: u32) -> Shape_Motion {
-	return run.frame.motions[i] if run.twin.pixels != nil else {}
-}
-
-// The area a group's or markers' draws in a band cover, clipped to the
-// raster.
-@(private = "file")
-sw_items_area :: proc(run: ^Sw_Run, r: ^Raster, items: []Sw_Binned) -> (x0, y0, x1, y1: i32) {
-	area := EMPTY_BOUNDS
-	for it in items {
-		ib := run.b.bounds[it.inst]
-		area = {min(area.minx, ib.minx), min(area.miny, ib.miny), max(area.maxx, ib.maxx), max(area.maxy, ib.maxy)}
-	}
-	x0 = clamp_i32(math.floor(area.minx), r.x0, r.x1)
-	y0 = clamp_i32(math.floor(area.miny), r.y0, r.y1)
-	x1 = clamp_i32(math.ceil(area.maxx), r.x0, r.x1)
-	y1 = clamp_i32(math.ceil(area.maxy), r.y0, r.y1)
-	return
-}
-
-// A group, as the shape shader draws it: each pixel the instances
-// source-over in order (each as `raster_shape` shades it), then times the
-// tint, blended once. `scratch` holds the band's pixels before the tint,
-// and on a twin (`twinned`) `motion` their motion, which composites as a
-// layer's.
-@(private = "file")
-raster_group :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch, motion: [][4]f32, $twinned: bool) {
-	frame := run.frame
-	x0, y0, x1, y1 := sw_items_area(run, r, items)
-	if x0 >= x1 || y0 >= y1 {
-		return
-	}
-	w, h := int(x1 - x0), int(y1 - y0)
-	acc := scratch[:w * h]
-	mem.zero_slice(acc)
-	when twinned {
-		vacc := motion[:w * h]
-		mem.zero_slice(vacc)
-	}
-	frag: Frag
-	row := max(u32)
-	for it in items {
-		inst := frame.shapes[it.inst]
-		if inst.paint != row {
-			frag = make_frag(run.images, cmd, frame.paints[inst.paint])
-			row = inst.paint
-		}
-		ib := run.b.bounds[it.inst]
-		ix0, iy0 := clamp_i32(math.floor(ib.minx), x0, x1), clamp_i32(math.floor(ib.miny), y0, y1)
-		ix1, iy1 := clamp_i32(math.ceil(ib.maxx), x0, x1), clamp_i32(math.ceil(ib.maxy), y0, y1)
-		inv := transform_inverse(inst.transform)
-		u, v := instance_footprint(inst)
-		words := instance_words(inst, frame.shape_words)
-		smooth := inst.edge == .Smooth
-		when twinned {
-			m := sw_motion(run, it.inst)
-			moves := m.nearness != 0
-		}
-		for y in iy0 ..< iy1 {
-			py := f32(y) + 0.5
-			for x in ix0 ..< ix1 {
-				px := f32(x) + 0.5
-				cov := instance_coverage(inst, words, transform_point(inv, px, py), u, v)
-				if cov < 1.0 / 510 {
-					continue
-				}
-				src, keep := shade(&frag, px, py, 0.5, ease(cov, smooth))
-				if !keep {
-					continue
-				}
-				i := int(y - y0) * w + int(x - x0)
-				acc[i] = src + acc[i] * (1 - src[3])
-				when twinned {
-					if moves {
-						twin_over(&vacc[i], m, px, py, src[3])
-					}
-				}
-			}
-		}
-	}
-	tint := make_frag(run.images, cmd, frame.paints[c.group - 1])
-	for y in y0 ..< y1 {
-		py := f32(y) + 0.5
-		for x in x0 ..< x1 {
-			a := acc[int(y - y0) * w + int(x - x0)]
-			if a[3] < 1.0 / 510 {
-				continue
-			}
-			px := f32(x) + 0.5
-			t, keep := shade(&tint, px, py, 0.5, 1)
-			if !keep {
-				continue
-			}
-			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			blend_texel(r.target, tx, ty, r.blend, a * t)
-			when twinned {
-				twin_composite(&r.twin.pixels[ty * r.twin.width + tx], vacc[int(y - y0) * w + int(x - x0)], a[3], t[3])
-			}
-		}
-	}
-}
-
-// A group of markers (draw_markers), as their shader draws it: each pixel
-// the union of the markers' fills and of their outlines, a pixel stopping
-// once both are whole (or absent), then the fill's paint at the first and
-// the outlines' (the tint) at the second over it, blended once. The fill,
-// its paint and the outline width are the command's first marker's, and
-// so is the motion they take on a twin (`twinned`).
-@(private = "file")
-raster_markers :: proc(run: ^Sw_Run, r: ^Raster, cmd: Command, c: Cmd_Draw_Shapes, items: []Sw_Binned, scratch: [][4]f32, $twinned: bool) {
-	frame := run.frame
-	x0, y0, x1, y1 := sw_items_area(run, r, items)
-	if x0 >= x1 || y0 >= y1 {
-		return
-	}
-	w, h := int(x1 - x0), int(y1 - y0)
-	// Per pixel: the fills' union, the outlines'.
-	acc := scratch[:w * h]
-	mem.zero_slice(acc)
-	first := frame.shapes[c.instances.start]
-	filled, outline := first.marker_fill, first.hairline
-	for it in items {
-		inst := frame.shapes[it.inst]
-		ib := run.b.bounds[it.inst]
-		ix0, iy0 := clamp_i32(math.floor(ib.minx), x0, x1), clamp_i32(math.floor(ib.miny), y0, y1)
-		ix1, iy1 := clamp_i32(math.ceil(ib.maxx), x0, x1), clamp_i32(math.ceil(ib.maxy), y0, y1)
-		inv := transform_inverse(inst.transform)
-		u, v := instance_footprint(inst)
-		circle := inst.marker == .Circle
-		for y in iy0 ..< iy1 {
-			py := f32(y) + 0.5
-			for x in ix0 ..< ix1 {
-				a := &acc[int(y - y0) * w + int(x - x0)]
-				if (!filled || a[0] >= 1) && (outline <= 0 || a[1] >= 1) {
-					continue
-				}
-				rc := transform_point(inv, f32(x) + 0.5, py)
-				if filled {
-					f := cv.marker(circle, rc, u, v, 0)
-					a[0] += f - a[0] * f
-				}
-				if outline > 0 {
-					o := cv.marker(circle, rc, u, v, outline)
-					a[1] += o - a[1] * o
-				}
-			}
-		}
-	}
-	fill := make_frag(run.images, cmd, frame.paints[first.paint])
-	tint := make_frag(run.images, cmd, frame.paints[c.group - 1])
-	when twinned {
-		m := sw_motion(run, c.instances.start)
-		moves := m.nearness != 0
-	}
-	for y in y0 ..< y1 {
-		py := f32(y) + 0.5
-		for x in x0 ..< x1 {
-			a := acc[int(y - y0) * w + int(x - x0)]
-			px := f32(x) + 0.5
-			src: [4]f32
-			if a[0] >= 1.0 / 510 {
-				if f, keep := shade(&fill, px, py, 0.5, a[0]); keep {
-					src = f
-				}
-			}
-			if a[1] >= 1.0 / 510 {
-				if o, keep := shade(&tint, px, py, 0.5, a[1]); keep {
-					src = o + src * (1 - o[3])
-				}
-			}
-			if src[3] < 1.0 / 510 {
-				continue
-			}
-			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			blend_texel(r.target, tx, ty, r.blend, src)
-			when twinned {
-				if moves {
-					twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
-				}
-			}
-		}
-	}
-}
-
-// Every pixel center of the instance's bounds `ib` (instance_bounds): its
-// coverage (shape.odin) as the paint's edge coverage, as the shader does,
-// and if it `moves` its motion `m` on the twin.
-@(private = "file")
-raster_shape :: proc(r: ^Raster, inst: Shape_Instance, m: Shape_Motion, ib: Bounds, frame_words: []u32, $moves: bool) {
-	x0 := clamp_i32(math.floor(ib.minx), r.x0, r.x1)
-	y0 := clamp_i32(math.floor(ib.miny), r.y0, r.y1)
-	x1 := clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
-	y1 := clamp_i32(math.ceil(ib.maxy), r.y0, r.y1)
-	inv := transform_inverse(inst.transform)
-	u, v := instance_footprint(inst)
-	words := instance_words(inst, frame_words)
-	smooth := inst.edge == .Smooth
-	for y in y0 ..< y1 {
-		py := f32(y) + 0.5
-		for x in x0 ..< x1 {
-			px := f32(x) + 0.5
-			cov := instance_coverage(inst, words, transform_point(inv, px, py), u, v)
-			// Rounding's slivers where the shape is absent (as the shader).
-			if cov < 1.0 / 510 {
-				continue
-			}
-			src, keep := shade(r.frag, px, py, 0.5, ease(cov, smooth))
-			if !keep {
-				continue
-			}
-			tx, ty := u32(x - r.ox), u32(y - r.oy)
-			blend_texel(r.target, tx, ty, r.blend, src)
-			when moves {
-				twin_over(&r.twin.pixels[ty * r.twin.width + tx], m, px, py, src[3])
-			}
-		}
-	}
-}
-
-// `cov` eased across a feathered fill's edge with `smooth`
-// (Shape_Edge.Smooth), as the shape shader eases it.
-@(private = "file")
-ease :: #force_inline proc "contextless" (cov: f32, smooth: bool) -> f32 {
-	return cov * cov * (3 - 2 * cov) if smooth else cov
-}
-
-// The coverage of the instance's pixel centered at `rc` (shape units) with
-// sides `u` and `v` (instance_footprint): the shape shader's.
-@(private = "file")
-instance_coverage :: proc "contextless" (inst: Shape_Instance, words: []u32, rc, u, v: Vec2) -> f32 {
-	if inst.marker != .None {
-		return cv.marker(inst.marker == .Circle, rc, u, v, inst.hairline)
-	}
-	if inst.hairline > 0 {
-		return cv.hairline(words, rc, u, v, inst.hairline)
-	}
-	if inst.edge == .Aliased {
-		// Off center as the shader samples it.
-		w := cv.winding(words, rc + (u + v) / 64)
-		return 1 if cv.fill_inside(w, inst.rule) else 0
-	}
-	return shape_coverage(words, rc, u, v, inst.rule)
 }
 
 @(private = "file")
@@ -928,7 +807,7 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	}
 }
 
-// ---- fragment evaluation (mirrors shaders/common.glsl and main.frag) ------
+// ---- textures ----------------------------------------------------------------
 
 @(private = "file")
 Sw_Texture :: struct {
@@ -937,13 +816,6 @@ Sw_Texture :: struct {
 	height: u32,
 	format: Pixel_Format,
 	flags:  Image_Flags,
-}
-
-@(private = "file")
-Frag :: struct {
-	p:       Params,
-	tex:     Sw_Texture,
-	has_tex: bool,
 }
 
 @(private = "file")
@@ -959,32 +831,8 @@ lookup_texture :: proc(images: ^Image_Store, id: Image_Id) -> (Sw_Texture, bool)
 }
 
 @(private = "file")
-make_frag :: proc(images: ^Image_Store, cmd: Command, p: Params) -> (f: Frag) {
-	f.p = p
-	f.tex, f.has_tex = lookup_texture(images, cmd.image)
-	return
-}
-
-@(private = "file")
-paint_point :: #force_inline proc "contextless" (m: [12]f32, px, py: f32) -> Vec2 {
-	return {m[0] * px + m[4] * py + m[8], m[1] * px + m[5] * py + m[9]}
-}
-
-@(private = "file")
-sd_round_rect :: proc "contextless" (pt, ext: Vec2, rad: f32) -> f32 {
-	d := Vec2{abs(pt.x), abs(pt.y)} - (ext - rad)
-	return min(max(d.x, d.y), 0) + math.hypot(max(d.x, 0), max(d.y, 0)) - rad
-}
-
-@(private = "file")
 mix4 :: #force_inline proc "contextless" (a, b: [4]f32, t: f32) -> [4]f32 {
 	return a * (1 - t) + b * t
-}
-
-@(private = "file")
-conic_fraction :: proc "contextless" (p: Params, px, py: f32) -> f32 {
-	pt := paint_point(p.paint_mat, px, py)
-	return -math.atan2(pt.x, pt.y) / math.TAU + 0.5
 }
 
 @(private = "file")
@@ -996,55 +844,6 @@ apply_tex_type :: #force_inline proc "contextless" (c: [4]f32, tex_type: f32) ->
 		return {c[0], c[0], c[0], c[0]}
 	}
 	return c
-}
-
-// One fragment: the color to blend, or `keep = false` for a discard.
-@(private = "file")
-shade :: proc(f: ^Frag, px, py, u, v: f32) -> (result: [4]f32, keep: bool) {
-	p := &f.p
-
-	stroke_alpha: f32 = 1
-	if p.shader_type != .Texture_Copy_Unclipped {
-		stroke_alpha = min(1, (1 - abs(u * 2 - 1)) * p.stroke_mult) * min(1, v)
-		if stroke_alpha < p.stroke_thr {
-			return {}, false
-		}
-	}
-
-	switch p.shader_type {
-	case .Fill_Gradient:
-		result = mix4(p.inner_col, p.outer_col, gradient_t(p, px, py))
-	case .Fill_Image_Gradient:
-		// The ramp is the stops; inner_col carries the paint's alpha.
-		d := gradient_t(p, px, py)
-		result = sample(f.tex, d, 0) * p.inner_col if f.has_tex else p.inner_col
-	case .Fill_Gradient_Conic:
-		result = mix4(p.inner_col, p.outer_col, conic_fraction(p^, px, py))
-	case .Fill_Image_Gradient_Conic:
-		result = sample(f.tex, conic_fraction(p^, px, py), 0) * p.inner_col if f.has_tex else p.inner_col
-	case .Fill_Image:
-		if f.has_tex {
-			pt := paint_point(p.paint_mat, px, py) / p.extent
-			result = apply_tex_type(sample(f.tex, pt.x, pt.y), p.tex_type) * p.inner_col
-		} else {
-			result = p.inner_col
-		}
-	case .Texture_Copy_Unclipped:
-		result = apply_tex_type(sample(f.tex, u, v), p.tex_type) * p.inner_col if f.has_tex else p.inner_col
-		return result, true
-	case .Fill_Color, .Fill_Color_Unclipped, .Filter_Image, .Filter_Color_Matrix, .Filter_Blend, .Filter_Composite, .Filter_Color_Space, .Filter_Component_Transfer, .Filter_Morphology, .Filter_Lighting, .Filter_Tile, .Filter_Displacement, .Filter_Convolve, .Filter_Turbulence, .Filter_Bloom_Bright, .Filter_Bloom_Add:
-		result = p.inner_col
-	}
-
-	// Rotated scissor; always 1 when no scissor is set.
-	sp := paint_point(p.scissor_mat, px, py)
-	sc := Vec2{0.5, 0.5} - (Vec2{abs(sp.x), abs(sp.y)} - p.scissor_ext) * p.scissor_scale
-	scissor := clamp(sc.x, 0, 1) * clamp(sc.y, 0, 1)
-
-	if p.shader_type != .Filter_Image {
-		result *= stroke_alpha * scissor
-	}
-	return result, true
 }
 
 // ---- texels -------------------------------------------------------------------------
@@ -1650,7 +1449,7 @@ Sw_Channels :: [PROGRAM_MAX_CHANNELS]Maybe(Sw_Texture)
 
 // GL texture() semantics over the channel images, for the CPU program.
 @(private = "file")
-sw_program_sample :: proc(data: rawptr, channel: int, uv: [2]f32, lod: f32) -> [4]f32 {
+sw_program_sample :: proc(data: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
 	channels := (^Sw_Channels)(data)
 	if channel < 0 || channel >= PROGRAM_MAX_CHANNELS {
 		return {}
@@ -1674,7 +1473,7 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	for id, i in cmd.channels {
 		if t, ok := lookup_texture(images, id); ok {
 			channels[i] = t
-			sampler.sizes[i] = {i32(t.width), i32(t.height)}
+			sampler.sizes[i] = {i32(t.width), i32(t.height), 1}
 		}
 	}
 	w, h := int(entry.info.width), int(entry.info.height)
@@ -1706,13 +1505,148 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	}
 }
 
-// The shader's `gradient_t`: box / linear / radial distance, or the focal
-// radial gradient, after the spread method.
+// ---- the shape shaders on oksl's CPU program ------------------------------------
+
+// A band's working memory for the shaders (in the band's temp arena):
+// oksl's registers, and a call's quads, inputs and outputs (at most
+// SW_SHADE_QUADS), reused from draw to draw.
 @(private = "file")
-gradient_t :: #force_inline proc "contextless" (p: ^Params, px, py: f32) -> f32 {
-	pt := paint_point(p.paint_mat, px, py)
-	if p.focal[0] != 0 {
-		return spread_t(focal_gradient_t(pt, p.extent[0], p.extent[1], {p.focal[1], p.focal[2]}), p.spread)
+Sw_Lanes :: struct {
+	scratch:  oksl.Scratch,
+	origins:  [dynamic][2]i32,
+	helpers:  [dynamic]oksl.Quad_Lanes,
+	shaded:   [dynamic]oksl.Quad_Lanes,
+	varyings: [dynamic]f32,
+	color:    [dynamic][4]f32,
+	motion:   [dynamic][4]f32,
+}
+
+@(private = "file")
+sw_lanes_make :: proc(allocator: mem.Allocator) -> Sw_Lanes {
+	return {
+		origins = make([dynamic][2]i32, allocator),
+		helpers = make([dynamic]oksl.Quad_Lanes, allocator),
+		shaded = make([dynamic]oksl.Quad_Lanes, allocator),
+		varyings = make([dynamic]f32, allocator),
+		color = make([dynamic][4]f32, allocator),
+		motion = make([dynamic][4]f32, allocator),
 	}
-	return spread_t((sd_round_rect(pt, p.extent, p.radius) + p.feather * 0.5) / p.feather, p.spread)
+}
+
+// The draw's image as the shaders' `tex` samples it; white without one, as
+// the GPU binds then.
+@(private = "file")
+Sw_Shader_Texture :: struct {
+	tex: Sw_Texture,
+	ok:  bool,
+}
+
+@(private = "file")
+sw_shader_sample :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
+	t := (^Sw_Shader_Texture)(user)
+	if channel != 0 || !t.ok {
+		return {1, 1, 1, 1}
+	}
+	return sample(t.tex, uv.x, uv.y)
+}
+
+// The pixels of `bounds` (drawing coordinates) in the raster: x0, y0, x1, y1.
+@(private = "file")
+sw_pixels :: proc "contextless" (r: ^Raster, bounds: Bounds) -> [4]i32 {
+	return {clamp_i32(math.floor(bounds.minx), r.x0, r.x1), clamp_i32(math.floor(bounds.miny), r.y0, r.y1), clamp_i32(math.ceil(bounds.maxx), r.x0, r.x1), clamp_i32(math.ceil(bounds.maxy), r.y0, r.y1)}
+}
+
+// Quads one run_fragment call shades: 16 of oksl's batches, so a call's
+// inputs and outputs (12 floats in and two colours out a pixel, about 80 KB)
+// stay small and in cache however wide the pixels are.
+@(private = "file")
+SW_SHADE_QUADS :: 16 * oksl.LANES / 4
+
+// Shades the raster's pixels `px` (x0, y0, x1, y1) in 2x2 quads with a shape
+// unit, as the GPU rasterizes a quad over them: rc at a pixel's centre by
+// `to_rc`, fpos the centre, uv and data the same at every pixel. Then each
+// pixel it shades blends in order (and with a twin, its motion over the
+// twin's pixel, premultiplied source-over, whatever the blend). The quads
+// go SW_SHADE_QUADS at a time, row by row.
+@(private = "file")
+sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i32, to_rc: Transform2D, uv: [4]f32, data: [4]u32, buffers: [][]u32, tex: ^Sw_Shader_Texture) {
+	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	m := prog.module
+	qx0, qy0 := x0 &~ 1, y0 &~ 1
+	nqx := int(x1 - qx0 + 1) / 2
+	quads := nqx * (int(y1 - qy0 + 1) / 2)
+	moves := len(m.stage_outputs) > 1
+	most := min(quads, SW_SHADE_QUADS)
+	resize(&L.origins, most)
+	resize(&L.helpers, most)
+	resize(&L.shaded, most)
+	resize(&L.color, most * 4)
+	if moves {
+		resize(&L.motion, most * 4)
+	}
+	resize(&L.varyings, m.varying_floats * most * 4)
+	for first := 0; first < quads; first += SW_SHADE_QUADS {
+		count := min(quads - first, SW_SHADE_QUADS)
+		total := count * 4
+		// The quads, the lanes off the pixels helpers, then each input a
+		// column at a time.
+		for q in 0 ..< count {
+			k := first + q
+			o := [2]i32{qx0 + i32(k % nqx) * 2, qy0 + i32(k / nqx) * 2}
+			L.origins[q] = o
+			h: oksl.Quad_Lanes
+			if o.x + 1 >= x1 {h += {1, 3}}
+			if o.x < x0 {h += {0, 2}}
+			if o.y + 1 >= y1 {h += {2, 3}}
+			if o.y < y0 {h += {0, 1}}
+			L.helpers[q] = h
+		}
+		col :: #force_inline proc(L: ^Sw_Lanes, at, total: int) -> []f32 {
+			return L.varyings[at * total:][:total]
+		}
+		if at := prog.inputs[0]; at >= 0 {
+			cx, cy := col(L, at, total), col(L, at + 1, total)
+			for j in 0 ..< total {
+				o := L.origins[j / 4]
+				p := transform_point(to_rc, f32(o.x + i32(j & 1)) + 0.5, f32(o.y + i32((j >> 1) & 1)) + 0.5)
+				cx[j], cy[j] = p.x, p.y
+			}
+		}
+		if at := prog.inputs[1]; at >= 0 {
+			cx, cy := col(L, at, total), col(L, at + 1, total)
+			for j in 0 ..< total {
+				o := L.origins[j / 4]
+				cx[j], cy[j] = f32(o.x + i32(j & 1)) + 0.5, f32(o.y + i32((j >> 1) & 1)) + 0.5
+			}
+		}
+		if at := prog.inputs[2]; at >= 0 {
+			for k in 0 ..< 4 {
+				slice.fill(col(L, at + k, total), uv[k])
+			}
+		}
+		if at := prog.inputs[3]; at >= 0 {
+			for k in 0 ..< 4 {
+				slice.fill(col(L, at + k, total), transmute(f32)data[k])
+			}
+		}
+		targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
+		shaded := L.shaded[:count]
+		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count], varyings = L.varyings[:m.varying_floats * total]}
+		oksl.run_fragment(&m.program, nil, in_, targets[:2 if moves else 1], shaded, &L.scratch, {sampler = sw_shader_sample, user = tex, buffers = buffers})
+		for lanes, q in shaded {
+			o := L.origins[q]
+			for l in lanes {
+				tx, ty := u32(o.x + i32(l & 1) - r.ox), u32(o.y + i32(l >> 1) - r.oy)
+				blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+				if moves {
+					mo := L.motion[q * 4 + l]
+					d := &r.twin.pixels[ty * r.twin.width + tx]
+					d^ = mo + d^ * (1 - mo[3])
+				}
+			}
+		}
+	}
 }

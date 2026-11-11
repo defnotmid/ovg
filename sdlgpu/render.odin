@@ -132,8 +132,8 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	// device) is dropped, not drawn from nil buffers.
 	if !stream_reserve(b, &b.vertex_stream, vert_count * size_of(Vertex), {.VERTEX}) ||
 	   !stream_reserve(b, &b.paint_stream, paint_count * size_of(Paint), {.GRAPHICS_STORAGE_READ}) ||
-	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(Gpu_Shape_Instance), {.GRAPHICS_STORAGE_READ}) ||
-	   (motion_count > 0 && !stream_reserve(b, &b.motion_stream, motion_count * size_of(Gpu_Shape_Motion), {.GRAPHICS_STORAGE_READ})) {
+	   !stream_reserve(b, &b.instance_stream, instance_count * size_of(vg.Shader_Instance), {.GRAPHICS_STORAGE_READ}) ||
+	   (motion_count > 0 && !stream_reserve(b, &b.motion_stream, motion_count * size_of(vg.Shader_Motion), {.GRAPHICS_STORAGE_READ})) {
 		return
 	}
 
@@ -179,23 +179,22 @@ sdl_render :: proc(data: rawptr, out: vg.Render_Output, images: ^vg.Image_Store,
 	}
 	if instance_count > 0 {
 		// Written once, straight into the mapped transfer buffer.
-		if out := ([^]Gpu_Shape_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
+		if out := ([^]vg.Shader_Instance)(stream_map(b, &b.instance_stream, instance_count)); out != nil {
 			for inst, i in frame.shapes {
-				out[i] = gpu_shape_instance(inst, frame.shape_words, b.shape_offsets[i], b.shape_clips[i])
+				out[i] = vg.shader_instance(inst, frame.shape_words, b.shape_offsets[i], b.shape_clips[i])
 			}
 			copy(out[len(frame.shapes):instance_count], b.groups[:])
-			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(Gpu_Shape_Instance))
+			stream_commit(b, &b.instance_stream, copy_pass, instance_count * size_of(vg.Shader_Instance))
 		} else {
 			uploaded = false
 		}
 	}
 	if motion_count > 0 {
-		if out := ([^]Gpu_Shape_Motion)(stream_map(b, &b.motion_stream, motion_count)); out != nil {
+		if out := ([^]vg.Shader_Motion)(stream_map(b, &b.motion_stream, motion_count)); out != nil {
 			for m, i in frame.motions {
-				v := m.velocity
-				out[i] = {{v[0], v[1], v[2], v[3]}, {v[4], v[5], m.nearness, 0}}
+				out[i] = vg.shader_motion(m)
 			}
-			stream_commit(b, &b.motion_stream, copy_pass, motion_count * size_of(Gpu_Shape_Motion))
+			stream_commit(b, &b.motion_stream, copy_pass, motion_count * size_of(vg.Shader_Motion))
 		} else {
 			uploaded = false
 		}
@@ -289,10 +288,6 @@ Planner :: struct {
 	// The target's velocity twin (texture nil: none).
 	twin:   Image,
 }
-
-// An instance's motion as the shaders read it (Shape_Motion in
-// shaders/shapes.glsl).
-Gpu_Shape_Motion :: [2][4]f32
 
 // Where the planner's next quad starts in the vertex buffer.
 @(private = "file")
@@ -614,100 +609,25 @@ plan_shape_rows :: proc(p: ^Planner, base: Row, instances: vg.Range) {
 @(private = "file")
 plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) {
 	b := p.b
-	n := int(c.instances.count)
-	resize(&b.group_bounds, n)
-	bounds := b.group_bounds[:]
-	area := vg.EMPTY_BOUNDS
-	for inst, k in p.frame.shapes[c.instances.start:][:n] {
-		bounds[k] = vg.instance_bounds(inst, p.frame.shape_words)
-		area = {min(area.minx, bounds[k].minx), min(area.miny, bounds[k].miny), max(area.maxx, bounds[k].maxx), max(area.maxy, bounds[k].maxy)}
-	}
-	w, h := max(area.maxx - area.minx, 1), max(area.maxy - area.miny, 1)
-	side: f32
-	for ib in bounds {
-		side += (ib.maxx - ib.minx) + (ib.maxy - ib.miny)
-	}
-	side = max(side / f32(2 * n), 1)
-	most := MARKER_MAX_CELLS if p.frame.shapes[c.instances.start].marker != .None else GROUP_MAX_CELLS
-	nx := clamp(int(math.ceil(w / side)), 1, most)
-	ny := clamp(int(math.ceil(h / side)), 1, most)
-	cw, ch := w / f32(nx), h / f32(ny)
-	cells :: proc(b: vg.Bounds, area: vg.Bounds, cw, ch: f32, nx, ny: int) -> (i0, j0, i1, j1: int) {
-		i0 = clamp(int((b.minx - area.minx) / cw), 0, nx - 1)
-		j0 = clamp(int((b.miny - area.miny) / ch), 0, ny - 1)
-		i1 = clamp(int((b.maxx - area.minx) / cw), 0, nx - 1)
-		j1 = clamp(int((b.maxy - area.miny) / ch), 0, ny - 1)
-		return
-	}
-	// Indices into `group_words` (it grows below): the grid's size, its
-	// starts, then lists. A frame's groups all append to it, so it grows
-	// geometrically.
-	grow :: proc(a: ^[dynamic]u32, n: int) {
-		if n > cap(a) {
-			reserve(a, max(n, 2 * cap(a)))
-		}
-		resize(a, n)
-	}
-	head := len(b.group_words)
-	at := head + 1
-	lists := at + nx * ny + 1
-	grow(&b.group_words, lists)
-	words := &b.group_words
-	words[head] = u32(nx) | u32(ny) << 16
-	for k in at ..< lists {
-		words[k] = 0
-	}
-	// Each member's cells, counted, then listed: the spans are clamped to the
-	// grid and the lists sized by the counts, so the indices need no checks.
-	resize(&b.group_spans, n)
-	spans := b.group_spans[:]
-	for ib, k in bounds {
-		i0, j0, i1, j1 := cells(ib, area, cw, ch, nx, ny)
-		spans[k] = {i32(i0), i32(j0), i32(i1), i32(j1)}
-		for j in j0 ..= j1 {
-			for i in i0 ..= i1 {
-				#no_bounds_check words[at + j * nx + i + 1] += 1
-			}
-		}
-	}
-	for k in at ..< lists - 1 {
-		words[k + 1] += words[k]
-	}
-	grow(words, lists + int(words[lists - 1]))
-	resize(&b.group_fill, nx * ny)
-	fill := b.group_fill[:]
-	copy(fill, words[at:lists - 1])
-	for sp, k in spans {
-		for j in int(sp[1]) ..= int(sp[3]) {
-			for i in int(sp[0]) ..= int(sp[2]) {
-				#no_bounds_check {
-					words[lists + int(fill[j * nx + i])] = u32(k)
-					fill[j * nx + i] += 1
-				}
-			}
-		}
-	}
+	g := vg.group_grid(&b.group_grid, &b.group_words, p.frame.shapes[c.instances.start:][:c.instances.count], p.frame.shape_words)
 	row := base
 	row.key.frag = .Marker_Group if p.frame.shapes[c.instances.start].marker != .None else .Shape_Group
 	first := len(b.groups)
-	listed :: proc(words: ^[dynamic]u32, cell: int) -> bool {
-		return words[cell] != words[cell + 1]
-	}
-	for j in 0 ..< ny {
-		for i := 0; i < nx; {
-			if !listed(words, at + j * nx + i) {
+	for j in 0 ..< g.ny {
+		for i := 0; i < g.nx; {
+			if !vg.group_cell_listed(b.group_words[:], g, i, j) {
 				i += 1
 				continue
 			}
 			i0 := i
-			for i < nx && listed(words, at + j * nx + i) {
+			for i < g.nx && vg.group_cell_listed(b.group_words[:], g, i, j) {
 				i += 1
 			}
-			append(&b.groups, Gpu_Shape_Instance {
-				m = {cw, 0, 0, ch},
-				t = {area.minx, area.miny, 0, 0},
+			append(&b.groups, vg.Shader_Instance {
+				m = {g.cell.x, 0, 0, g.cell.y},
+				t = {g.area.minx, g.area.miny, 0, 0},
 				bounds = {f32(i0), f32(j), f32(i), f32(j + 1)},
-				data = {u32(head), c.group - 1, c.instances.start, 0},
+				data = {u32(g.head), c.group - 1, c.instances.start, 0},
 				clip = clip,
 			})
 		}
@@ -715,13 +635,6 @@ plan_group :: proc(p: ^Planner, base: Row, c: vg.Cmd_Draw_Shapes, clip: [4]f32) 
 	row.verts = {u32(len(p.frame.shapes) + first), u32(len(b.groups) - first)}
 	append(&b.rows, row)
 }
-
-// A group's grid is at most this many cells a side; a group of markers'
-// (small, many, often piled up) takes cells about a marker's size.
-@(private = "file")
-GROUP_MAX_CELLS :: 64
-@(private = "file")
-MARKER_MAX_CELLS :: 256
 
 // One filter quad from `src` (and `backdrop`) into `dst`, a pass of its own
 // with Copy blend.
