@@ -139,9 +139,20 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 		restart(st)
 		b.stats.shape_restarts = 1
 	}
-	// Sizes in bytes are 32-bit.
-	return grids, st.top <= 1 << 28
+	// Sizes in bytes are 32-bit (store_capacity).
+	return grids, st.top <= STORE_MAX_CAPACITY / 2
 }
+
+// The words a fresh store holds for `top` placed: four times as many, a
+// power of two, but at most STORE_MAX_CAPACITY, whose size in bytes is
+// still 32-bit (store_place refuses a frame of more than half that).
+@(private)
+store_capacity :: proc "contextless" (top: u32) -> u32 {
+	return u32(min(math.next_power_of_two(int(max(4 * u64(top), 1 << 16))), STORE_MAX_CAPACITY))
+}
+
+@(private)
+STORE_MAX_CAPACITY :: 1 << 29
 
 // Uploads the words placed since the last upload, into a fresh buffer when
 // the store started over; false (nothing recorded) when the device fails.
@@ -149,7 +160,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 store_upload :: proc(b: ^SDL_Backend, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	st := &b.shapes
 	if st.top > st.capacity {
-		capacity := u32(math.next_power_of_two(int(max(4 * st.top, 1 << 16))))
+		capacity := store_capacity(st.top)
 		buffer := sdl.CreateGPUBuffer(b.device, {usage = {.GRAPHICS_STORAGE_READ}, size = capacity * 4})
 		if buffer == nil {
 			return false

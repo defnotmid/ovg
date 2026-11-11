@@ -65,3 +65,17 @@ test_store_recycled_slot :: proc(t: ^testing.T) {
 		testing.expect(t, raw_data(b.shapes.pending[0].data) == raw_data(n.data))
 	}
 }
+
+// A store's size in bytes fits 32 bits however many words a frame places
+// (store_place takes up to half of STORE_MAX_CAPACITY): past 2^27 words, four
+// times as many rounded to a power of two was 2^30 words, 2^32 bytes, which
+// wrapped to 0 and failed every frame.
+@(test)
+test_store_capacity :: proc(t: ^testing.T) {
+	for top in ([?]u32{0, 1, 1 << 16, 1 << 27 - 1, 1 << 27, 1 << 27 + 1, 197_423_087, STORE_MAX_CAPACITY / 2}) {
+		capacity := store_capacity(top)
+		testing.expectf(t, capacity >= top && capacity * 4 != 0 && u64(capacity) * 4 <= u64(max(u32)), "%d words placed: capacity %d", top, capacity)
+	}
+	testing.expect_value(t, store_capacity(1000), 1 << 16)
+	testing.expect_value(t, store_capacity(1 << 20), 1 << 22)
+}
