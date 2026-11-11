@@ -1,11 +1,14 @@
 package ovg
 
+import "core:log"
 import "core:math"
 import "core:mem"
+import "core:os"
 import "core:slice"
 import "core:testing"
 
 import cv "deps:ocurves"
+import ft "deps:oglyph/font"
 
 // ---- helpers ------------------------------------------------------------------
 
@@ -545,6 +548,186 @@ test_sw_text :: proc(t: ^testing.T) {
 	}
 	testing.expect(t, dark >= 4)
 	testing.expect_value(t, px(&s, 120, 4), [4]u8{255, 255, 255, 255})
+}
+
+// Text at a variable font instance no face of the collection is: the
+// layout makes it, its glyphs go into the frame (no shape kept), and it lays
+// out and draws as the same instance added to the collection does, each
+// distinct glyph built once a draw. Its
+// characters the face lacks fall back as the face's do; settings that
+// pick the face's own instance make none; two instances in a text get a
+// row each, and a later text keeps the row holding its instance. Animating
+// an axis changes the row in place, allocating nothing once warm.
+@(test)
+test_layout_instance :: proc(t: ^testing.T) {
+	// A system variable font: Linux's Adwaita Sans, macOS's Skia.
+	data: []u8
+	for path in ([?]string{"/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf", "/System/Library/Fonts/Supplemental/Skia.ttf"}) {
+		if d, err := os.read_entire_file(path, context.allocator); err == nil {
+			data = d
+			break
+		}
+	}
+	if data == nil {
+		log.info("no variable system font found: skipped")
+		return
+	}
+	defer delete(data)
+	probe, perr := font_load(data)
+	testing.expect_value(t, perr, Error.None)
+	family, _, _ := font_identity(&probe, context.temp_allocator)
+	// Its weight axis, and settings off the default on every axis.
+	wght: ft.Axis
+	heavy_axes: [4]Font_Variation
+	axes := min(probe.face.axis_count, len(heavy_axes))
+	for i in 0 ..< axes {
+		a, _ := ft.axis(&probe.face, i)
+		if a.tag == "wght" {
+			wght = a
+		}
+		heavy_axes[i] = {a.tag, a.min + 0.8 * (a.max - a.min)}
+	}
+	font_destroy(&probe)
+	testing.expect_value(t, wght.tag, "wght")
+	heavy := heavy_axes[:axes]
+	files: Font_Files
+	font_files_init(&files)
+	defer font_files_destroy(&files)
+	plain, added: Font_Collection
+	font_collection_init(&plain, files = &files)
+	defer font_collection_destroy(&plain)
+	font_collection_init(&added, files = &files)
+	defer font_collection_destroy(&added)
+	font_collection_add(&plain, data)
+	font_collection_add(&added, data)
+	font_collection_add(&added, data, variations = heavy)
+	testing.expect(t, font_collection_set_emoji(&plain, EMOJI_FONT_DATA) && font_collection_set_emoji(&added, EMOJI_FONT_DATA))
+
+	pieces := []Text_Piece{{text = "Wave wave ffi \U0001F600", style = {family = family, size = 30, variations = heavy}}}
+	l, la: Text_Layout
+	defer text_layout_destroy(&l)
+	defer text_layout_destroy(&la)
+	text_layout(&plain, pieces, {x = 4, y = 44}, &l)
+	text_layout(&added, pieces, {x = 4, y = 44}, &la)
+	testing.expect(t, slice.equal(l.glyphs[:], la.glyphs[:]))
+	testing.expect_value(t, len(l.runs), 2)
+	testing.expect_value(t, len(la.runs), 2)
+	if len(l.runs) != 2 || len(la.runs) != 2 {
+		return
+	}
+	font := text_layout_font(&l, l.runs[0])
+	testing.expect(t, font != nil && font.frame_shapes && font.instance == text_layout_font(&la, la.runs[0]).instance)
+	testing.expect(t, font_collection_font(&plain, l.runs[0].face) == nil)
+	testing.expect(t, font_glyph_shape(font, l.glyphs[0].glyph) == nil)
+	// The emoji fell back to the emoji face, as from the added instance.
+	testing.expect(t, l.runs[1].face == plain.emoji.id && la.runs[1].face == added.emoji.id)
+
+	// Drawn: filled and as hairlines, against the added instance's shapes.
+	draw :: proc(s: ^Sw, l: ^Text_Layout, hairline: bool) {
+		clear_rect(&s.canvas, 0, 0, 260, 60, WHITE)
+		scratch: Path
+		defer path_destroy(&scratch)
+		for run in l.runs {
+			glyphs := l.glyphs[run.first:][:run.count]
+			if hairline {
+				hairline_glyph_outlines(&s.canvas, text_layout_font(l, run), glyphs, run.em, paint_color(BLACK), 1)
+			} else {
+				fill_glyph_outlines(&s.canvas, text_layout_font(l, run), glyphs, run.em, paint_color(BLACK), &scratch)
+			}
+		}
+	}
+	for hairline in ([?]bool{false, true}) {
+		a, b: Sw
+		sw_open(&a, 260, 60)
+		defer sw_close(&a)
+		sw_open(&b, 260, 60)
+		defer sw_close(&b)
+		draw(&a, &l, hairline)
+		draw(&b, &la, hairline)
+		// Each glyph with an outline draws from frame words, built once
+		// per distinct glyph.
+		inked, unique, framed, built := 0, 0, 0, 0
+		for g, i in l.glyphs[:l.runs[0].count] {
+			x0, y0, x1, y1: i32
+			if font_glyph_box(font, g.glyph, &x0, &y0, &x1, &y1) {
+				inked += 1
+				first := true
+				for h in l.glyphs[:i] {
+					first &&= h.glyph != g.glyph
+				}
+				unique += 1 if first else 0
+			}
+		}
+		for inst, i in a.canvas.shapes {
+			if inst.shape == nil && inst.words.count > 0 {
+				framed += 1
+				first := true
+				for other in a.canvas.shapes[:i] {
+					first &&= other.shape != nil || other.words != inst.words
+				}
+				built += 1 if first else 0
+			}
+		}
+		testing.expect(t, unique < inked)
+		testing.expectf(t, framed == inked && built == unique, "%d of %d glyphs drawn from frame words, %d of %d built", framed, inked, built, unique)
+		testing.expect(t, font.shapes == nil || len(font.shapes.glyphs) == 0)
+		flush(&a.canvas)
+		flush(&b.canvas)
+		differ, most := 0, 0
+		for v, i in a.backend.pixels {
+			if d := abs(int(v) - int(b.backend.pixels[i])); d > 0 {
+				differ += 1
+				most = max(most, d)
+			}
+		}
+		// Frame words are built without grid search: a hairline's pieces
+		// meet in other cells, moving a few pixels by a level or so.
+		ok := most <= 1 if !hairline else most <= 3 && differ * 200 < len(a.backend.pixels)
+		testing.expectf(t, ok, "hairline %v: %d bytes differ, by at most %d", hairline, differ, most)
+	}
+
+	// Settings picking the face's own instance make none.
+	text_layout(&plain, {{text = "a", style = {family = family, size = 20, variations = {{"wght", wght.default}}}}}, {}, &l)
+	testing.expect(t, l.instance_count == 0 && l.runs[0].face == plain.faces[0].id)
+
+	// Two instances in one text, then the second alone: its row is kept.
+	light, bold := []Font_Variation{{"wght", wght.min + 0.25 * (wght.max - wght.min)}}, []Font_Variation{{"wght", wght.min + 0.75 * (wght.max - wght.min)}}
+	text_layout(&plain, {{text = "ab", style = {size = 20, variations = light}}, {text = "cd", style = {size = 20, variations = bold}}}, {}, &l)
+	testing.expect(t, l.instance_count == 2 && len(l.runs) == 2)
+	held := l.instances[1].font.shapes
+	bold_key := l.instances[1].font.instance
+	text_layout(&plain, {{text = "cd", style = {size = 20, variations = bold}}}, {}, &l)
+	testing.expect(t, l.instance_count == 1 && l.instances[0].font.instance == bold_key && l.instances[0].font.shapes == held)
+	testing.expect(t, text_layout_font(&l, l.runs[0]) == &l.instances[0].font)
+
+	// An animated weight: one row changed in place, no allocation once warm.
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	lt: Text_Layout
+	text_layout_init(&lt, mem.tracking_allocator(&track))
+	s: Sw
+	sw_open(&s, 260, 60)
+	defer sw_close(&s)
+	scratch: Path
+	defer path_destroy(&scratch)
+	warm: i64
+	for frame in 0 ..< 40 {
+		if frame == 20 {
+			warm = track.total_allocation_count
+		}
+		v := []Font_Variation{{"wght", wght.min + (wght.max - wght.min) * f32(frame % 10) / 9}}
+		text_layout(&plain, {{text = "Wave wave ffi", style = {size = 30, variations = v}}}, {x = 4, y = 44}, &lt)
+		testing.expect_value(t, len(lt.instances), 1)
+		clear_rect(&s.canvas, 0, 0, 260, 60, WHITE)
+		for run in lt.runs {
+			fill_glyph_outlines(&s.canvas, text_layout_font(&lt, run), lt.glyphs[run.first:][:run.count], run.em, paint_color(BLACK), &scratch)
+		}
+		flush(&s.canvas)
+	}
+	testing.expect_value(t, track.total_allocation_count, warm)
+	text_layout_destroy(&lt)
+	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
 @(test)

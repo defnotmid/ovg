@@ -1,5 +1,8 @@
 package ovg
 
+import "core:hash"
+import "core:mem"
+
 import fc "deps:oglyph/collection"
 import ft "deps:oglyph/font"
 import sh "deps:oglyph/shape"
@@ -52,7 +55,9 @@ Text_Style :: struct {
 	features:       []Font_Feature,
 	// The variable font instance to draw (CSS font-variation-settings):
 	// the family's face whose instance these settings pick (added with
-	// them, font_collection_add), else the face weight and style pick.
+	// them, font_collection_add), else the face weight and style pick at
+	// that instance, made by the layout (Text_Layout.instances). Axes they
+	// don't name take their default.
 	variations:     []Font_Variation,
 }
 
@@ -91,7 +96,9 @@ Text_Options :: struct {
 
 // Consecutive glyphs of one face, size and paint. The face is named by its
 // id in the collection laid out with (text_layout_font), so the layout
-// stays valid as faces are added to it.
+// stays valid as faces are added to it; an instance the layout made
+// (Text_Layout.instances) by an id of the layout's own, which only
+// text_layout_font resolves, until the layout's next text.
 Text_Run :: struct {
 	face:         Face_Id,
 	em:           f32, // font units to pixels
@@ -133,7 +140,30 @@ Text_Layout :: struct {
 	// Per glyph, once placed on a path (text_layout_on_path): its direction
 	// (cos, sin), {0, 0} when off the path. Empty for straight text.
 	turns:    [dynamic]Vec2,
+	// The variable font instances its pieces ask for that no face of the
+	// collection is (Text_Style.variations): rows of a face at an instance
+	// and its font, which keeps no glyph shapes (Font.frame_shapes), the
+	// first `instance_count` this text's. The next text keeps a row that
+	// holds an instance it asks for, and changes the others, so animating
+	// an axis allocates nothing once warm. Text kept past the layout's next
+	// text (drawn later from its runs) should add its instances to the
+	// collection (font_collection_add) instead.
+	instances:      [dynamic]Layout_Instance,
+	instance_count: int,
 }
+
+// A face of the collection at an instance it doesn't hold: a copy of the
+// face at those coordinates, sharing its file's tables and plans, and its
+// font. Made with the layout's allocator.
+@(private)
+Layout_Instance :: struct {
+	face: Font_Face,
+	font: Font,
+}
+
+// Face_Id.collection of the instances a layout makes (no collection's).
+@(private)
+LAYOUT_INSTANCE :: max(u32)
 
 // A layout allocating from `allocator`.
 text_layout_init :: proc(l: ^Text_Layout, allocator := context.allocator) {
@@ -141,6 +171,7 @@ text_layout_init :: proc(l: ^Text_Layout, allocator := context.allocator) {
 	l.glyphs.allocator, l.clusters.allocator, l.advances.allocator = allocator, allocator, allocator
 	l.runs.allocator = allocator
 	l.lines.allocator, l.missing.allocator, l.turns.allocator = allocator, allocator, allocator
+	l.instances.allocator = allocator
 }
 
 text_layout_destroy :: proc(l: ^Text_Layout) {
@@ -151,6 +182,10 @@ text_layout_destroy :: proc(l: ^Text_Layout) {
 	delete(l.lines)
 	delete(l.missing)
 	delete(l.turns)
+	for &inst in l.instances {
+		font_destroy(&inst.font)
+	}
+	delete(l.instances)
 	l^ = {}
 }
 
@@ -164,6 +199,7 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	clear(&l.lines)
 	clear(&l.missing)
 	clear(&l.turns)
+	l.instance_count = 0
 	l.min, l.max = {}, {}
 	if len(pieces) == 0 {
 		return
@@ -184,12 +220,18 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 	scratch_size(&s.chars, bytes)
 	n: i32
 	first: Face_Id
+	instanced := false
 	for piece, pi in pieces {
 		face, size := resolve_face(fonts, l, piece.style)
-		if pi == 0 {
-			first = face
+		instance: Face_Id
+		if len(piece.style.variations) > 0 {
+			instance = layout_instance(l, fonts, face, piece.style.variations)
+			instanced ||= instance != {}
 		}
-		s.pieces[pi] = {n, size, shaper_add_piece_features(s, piece.style)}
+		if pi == 0 {
+			first = instance if instance != {} else face
+		}
+		s.pieces[pi] = {n, size, shaper_add_piece_features(s, piece.style), face, instance}
 		for r in piece.text {
 			// The other columns are written before they're read.
 			s.chars.char[n], s.chars.piece[n], s.chars.face[n] = r, i32(pi), face
@@ -197,9 +239,19 @@ text_layout :: proc(fonts: ^Font_Collection, pieces: []Text_Piece, opts: Text_Op
 		}
 	}
 	scratch_size(&s.chars, int(n))
+	// Fallback reads the collection's faces: an instance has its face's
+	// characters, so what stays with that face takes the instance.
 	fc.collection_fallback(&fonts.collection, s.chars.char[:n], s.chars.piece[:n], s.chars.face[:n])
+	if instanced {
+		for i in 0 ..< n {
+			p := &s.pieces[s.chars.piece[i]]
+			if p.instance != {} && s.chars.face[i] == p.face {
+				s.chars.face[i] = p.instance
+			}
+		}
+	}
 
-	first_font, first_size := font_collection_font(fonts, first), s.pieces[0].size
+	first_font, first_size := layout_font(l, first), s.pieces[0].size
 	first_em := font_scale_for_em(first_font, first_size)
 	line_height := (opts.line_height if opts.line_height > 0 else 1.2) * first_size
 
@@ -273,9 +325,89 @@ rune_is_default_ignorable :: proc "contextless" (r: rune) -> bool {
 }
 
 // The font of a run's face, to draw it with (for immediate use, as
-// font_collection_font's); nil once the face is removed.
+// font_collection_font's); nil once the face is removed. An instance the
+// layout made holds until the layout's next text.
 text_layout_font :: proc(l: ^Text_Layout, run: Text_Run) -> ^Font {
-	return font_collection_font(l.fonts, run.face)
+	return layout_font(l, run.face)
+}
+
+// Face `id` as the layout reads it: the collection's, or an instance of
+// the layout's own.
+@(private)
+layout_face :: proc(l: ^Text_Layout, id: Face_Id) -> ^Font_Face {
+	if id.collection == LAYOUT_INSTANCE {
+		return &l.instances[id.index].face if int(id.index) < l.instance_count else nil
+	}
+	return font_collection_face(l.fonts, id)
+}
+
+// The font of `id` (layout_face).
+@(private)
+layout_font :: proc(l: ^Text_Layout, id: Face_Id) -> ^Font {
+	if id.collection == LAYOUT_INSTANCE {
+		return &l.instances[id.index].font if int(id.index) < l.instance_count else nil
+	}
+	return font_collection_font(l.fonts, id)
+}
+
+// The layout's instance of the collection's face `id` at `variations`
+// (Text_Style.variations): {} when the face is that instance already,
+// else a row of `instances` this text holds it in, kept from the last
+// text when one held it, else changed to it. Neither the face nor its
+// file is written: the instance is a copy, and its plans are its file's,
+// made on first use under the file table's lock.
+@(private = "file")
+layout_instance :: proc(l: ^Text_Layout, fonts: ^Font_Collection, id: Face_Id, variations: []Font_Variation) -> Face_Id {
+	base := font_collection_face(fonts, id)
+	if base == nil {
+		return {}
+	}
+	at := base.face
+	ft.set_variations(&at, variations)
+	if at.coords == base.face.coords {
+		return {}
+	}
+	holds :: proc(inst: ^Layout_Instance, base: ^Font_Face, at: ^ft.Face) -> bool {
+		return inst.face.file == base.file && raw_data(inst.face.data) == raw_data(base.data) && len(inst.face.data) == len(base.data) && inst.face.index == base.index && inst.face.face.coords == at.coords
+	}
+	// One this text asked for already; else the next row, or the first
+	// row past it that holds it (swapped in: rows only move between
+	// layouts).
+	for k in 0 ..< l.instance_count {
+		if holds(&l.instances[k], base, &at) {
+			return {LAYOUT_INSTANCE, u32(k)}
+		}
+	}
+	k := l.instance_count
+	if k == len(l.instances) {
+		append(&l.instances, Layout_Instance{})
+	}
+	for j in k + 1 ..< len(l.instances) {
+		if holds(&l.instances[j], base, &at) {
+			l.instances[k], l.instances[j] = l.instances[j], l.instances[k]
+			break
+		}
+	}
+	l.instance_count += 1
+	inst := &l.instances[k]
+	self := Face_Id{LAYOUT_INSTANCE, u32(k)}
+	if holds(inst, base, &at) {
+		inst.face.id = self
+		return self
+	}
+	allocator := l.instances.allocator
+	inst.face = base^
+	inst.face.face = at
+	inst.face.id = self
+	inst.face.instance = hash.fnv64a(mem.slice_to_bytes(at.coords[:at.axis_count])) | 1
+	inst.face.plan_records = sh.plan_variations(&inst.face.face)
+	// The font's scratch (Font_Shapes) stays; its colour glyphs follow the face.
+	colr_destroy(inst.font.colr)
+	shapes := inst.font.shapes
+	inst.font = font_from_face(&inst.face, allocator)
+	inst.font.shapes = shapes
+	inst.font.frame_shapes = true
+	return self
 }
 
 // Width of the widest line.
@@ -500,7 +632,7 @@ layout_line :: proc(fonts: ^Font_Collection, s: ^Text_Shaper, pieces: []Text_Pie
 		for j < b && s.chars[j].face == c.face && s.pieces[s.chars[j].piece].size == size && s.chars[j].script == c.script && s.chars[j].level == c.level {
 			j += 1
 		}
-		ff := font_collection_face(fonts, c.face)
+		ff := layout_face(l, c.face)
 		append(&s.segs, Shape_Segment{first = i, count = j - i, face = c.face, font = ff, em = ft.scale_for_em(&ff.face, size), script = c.script, level = c.level})
 		i = j
 	}
@@ -569,7 +701,7 @@ stack_line_boxes :: proc(l: ^Text_Layout, strut: ^Font, strut_size, line_height:
 			r += 1
 		}
 		for k := r; k < len(l.runs) && l.runs[k].first < end; k += 1 {
-			f := font_collection_font(l.fonts, l.runs[k].face)
+			f := text_layout_font(l, l.runs[k])
 			a, b := inline_box(f, l.runs[k].em * f32(f.face.units_per_em), line_height)
 			above_line, below_line = max(above_line, a), max(below_line, b)
 		}

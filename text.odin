@@ -5,6 +5,7 @@ import "core:math"
 import "core:mem"
 import "core:sync"
 
+import cv "deps:ocurves"
 import fc "deps:oglyph/collection"
 import ft "deps:oglyph/font"
 
@@ -32,6 +33,10 @@ Font :: struct {
 	// The variable font instance it draws, as a key: 0 for the default,
 	// else a hash of the face's coordinates.
 	instance:  u64,
+	// A layout's own instance (Text_Style.variations): it keeps no glyph
+	// shapes, as the layout's next text may change it. Its glyphs' shapes
+	// are built into each frame that draws them, once per draw call.
+	frame_shapes: bool,
 }
 
 @(private)
@@ -104,10 +109,18 @@ font_destroy :: proc(f: ^Font) {
 }
 
 // The glyph's shape, built on first use (safe from several threads) and
-// owned by the font until `font_destroy`; nil for glyphs without an outline. Shape units map to
-// font units, y down, the pen at the origin (`shape_local`). It fills, and
-// draws as the glyph's contours too (hairline_shape, hairline_glyph_outlines).
+// owned by the font until `font_destroy`; nil for glyphs without an outline,
+// and for a font that keeps none (a layout's instance, Font.frame_shapes).
+// Shape units map to font units, y down, the pen at the origin
+// (`shape_local`). It fills, and draws as the glyph's contours too
+// (hairline_shape, hairline_glyph_outlines).
 font_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
+	return nil if f.frame_shapes else kept_glyph_shape(f, g)
+}
+
+// `font_glyph_shape` of a font that keeps its shapes.
+@(private)
+kept_glyph_shape :: proc(f: ^Font, g: Glyph_Index) -> ^Shape {
 	fs := font_shapes(f)
 	sync.mutex_lock(&fs.lock)
 	defer sync.mutex_unlock(&fs.lock)
@@ -253,10 +266,13 @@ Positioned_Glyph :: struct {
 // Fills the glyph outlines: exact under any transform and any paint.
 // `scale` converts font units to pixels. Each glyph is the font's shape
 // (font_glyph_shape) drawn by coverage, all sharing one paint row, so a
-// run costs no outline work; a feathered or aliased paint fills the
-// outlines as one path instead (`scratch`, reset here). Colour glyphs
-// (COLR) draw their own colours, `paint` standing for the text colour.
+// run costs no outline work; a font that keeps no shapes (a layout's
+// instance) builds each glyph it draws into the frame, once for the call.
+// A feathered or aliased paint fills the outlines as one path instead
+// (`scratch`, reset here). Colour glyphs (COLR) draw their own colours,
+// `paint` standing for the text colour.
 fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, scale: f32, paint: Paint, scratch: ^Path) {
+	clear(&c.frame_glyphs)
 	if paint.feather == 0 && paint.anti_alias {
 		nz := paint
 		nz.fill_rule = .Non_Zero
@@ -271,12 +287,23 @@ fill_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph, sc
 		if f.colr != nil {
 			sync.mutex_lock(&f.colr.lock)
 		}
-		for g in glyphs {
-			if f.colr != nil && colr_draw_glyph(c, f, g, scale, paint) {
-				continue
+		if f.frame_shapes {
+			for g in glyphs {
+				if f.colr != nil && colr_draw_glyph(c, f, g, scale, paint) {
+					continue
+				}
+				if fg, ok := frame_glyph(c, f, g.glyph, false); ok {
+					push_words_at(c, cmd, fg, {scale, 0, 0, scale, g.x, g.y}, row, .Non_Zero, group)
+				}
 			}
-			if s := font_glyph_shape(f, g.glyph); s != nil {
-				push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, .Non_Zero, group)
+		} else {
+			for g in glyphs {
+				if f.colr != nil && colr_draw_glyph(c, f, g, scale, paint) {
+					continue
+				}
+				if s := kept_glyph_shape(f, g.glyph); s != nil {
+					push_shape_at(c, cmd, s, {scale, 0, 0, scale, g.x, g.y}, row, .Non_Zero, group)
+				}
 			}
 		}
 		if f.colr != nil {
@@ -317,11 +344,66 @@ hairline_glyph_outlines :: proc(c: ^Canvas, f: ^Font, glyphs: []Positioned_Glyph
 		return
 	}
 	slot: Paint_Slot
+	if f.frame_shapes {
+		clear(&c.frame_glyphs)
+		for g in glyphs {
+			if fg, ok := frame_glyph(c, f, g.glyph, true); ok {
+				push_words_instance(c, fg, paint, width, {scale, 0, 0, scale, g.x, g.y}, &slot)
+			}
+		}
+		return
+	}
 	for g in glyphs {
-		if s := font_glyph_shape(f, g.glyph); s != nil {
+		if s := kept_glyph_shape(f, g.glyph); s != nil {
 			push_shape_instance(c, s, paint, width, {scale, 0, 0, scale, g.x, g.y}, &slot)
 		}
 	}
+}
+
+// A glyph of a font that keeps no shapes (Font.frame_shapes), built into
+// the frame's shape words for the draw call that met it first: its words
+// (none when it has no outline), the map from them to font units (y down,
+// the pen at the origin) and their bounds.
+@(private)
+Frame_Glyph :: struct {
+	glyph:  Glyph_Index,
+	words:  Range,
+	local:  Transform2D,
+	bounds: Bounds,
+}
+
+// Glyph `g` of `f`, a font that keeps no shapes, as words of the frame:
+// those the call built for it already (Canvas.frame_glyphs, cleared by
+// the call), else built now, without grid search, with the glyph's
+// contours when `outline` (hairlines). False when it has no outline.
+@(private)
+frame_glyph :: proc(c: ^Canvas, f: ^Font, g: Glyph_Index, outline: bool) -> (Frame_Glyph, bool) {
+	for fg in c.frame_glyphs {
+		if fg.glyph == g {
+			return fg, fg.words.count > 0
+		}
+	}
+	fg := Frame_Glyph{glyph = g}
+	b := &c.scratch.builder
+	shape_builder_reset(b)
+	b.outline = outline
+	// Glyphs' default (font_glyph_shape's): 1/4096 of each cubic's size.
+	b.tol = 0
+	fs := font_shapes(f)
+	sync.mutex_lock(&fs.lock)
+	added := shape_add_glyph(b, f, g, &fs.outline)
+	sync.mutex_unlock(&fs.lock)
+	if added {
+		start := len(c.shape_words)
+		if origin, extent, ok := cv.build_append(b, &c.shape_words, search = false); ok {
+			words := c.shape_words[start:]
+			fg.words = {u32(start), u32(len(words))}
+			fg.local = {extent, 0, 0, extent, origin.x, origin.y}
+			fg.bounds = words_bounds(words)
+		}
+	}
+	append(&c.frame_glyphs, fg)
+	return fg, fg.words.count > 0
 }
 
 // Strokes the glyph outlines.

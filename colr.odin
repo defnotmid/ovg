@@ -206,9 +206,13 @@ colr_draw_glyph :: proc(c: ^Canvas, f: ^Font, g: Positioned_Glyph, em: f32, fg: 
 		}
 		paint.fill_rule = .Non_Zero
 		if fill.glyph >= 0 {
-			if s := font_glyph_shape(f, Glyph_Index(fill.glyph)); s != nil {
-				// Shape units are font units with y down; the layer's
-				// transform is in font units with y up.
+			// Shape units are font units with y down; the layer's
+			// transform is in font units with y up.
+			if f.frame_shapes {
+				if fg, ok := frame_glyph(c, f, Glyph_Index(fill.glyph), false); ok {
+					push_words_instance(c, fg, paint, 0, {1, 0, 0, -1, 0, 0})
+				}
+			} else if s := kept_glyph_shape(f, Glyph_Index(fill.glyph)); s != nil {
 				fill_shape(c, s, paint, {1, 0, 0, -1, 0, 0})
 			}
 			continue

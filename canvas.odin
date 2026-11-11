@@ -30,6 +30,9 @@ Canvas :: struct {
 	shape_words:           [dynamic]u32,
 	// Building the shapes of paths filled and stroked.
 	scratch:               Shape_Scratch,
+	// The glyphs a text draw call built into `shape_words`, for a font that
+	// keeps no shapes (frame_glyph); each call clears it.
+	frame_glyphs:          [dynamic]Frame_Glyph,
 	images:                Image_Store,
 	programs:              Slot_Map(Backend_Program),
 	gradients:             Gradient_Store,
@@ -67,6 +70,7 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		bytes           = make([dynamic]u8, allocator),
 		filters         = make([dynamic]Image_Filter, allocator),
 		runs            = make([dynamic]Program_Run, allocator),
+		frame_glyphs    = make([dynamic]Frame_Glyph, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
 		device_px_ratio = 1,
@@ -101,6 +105,7 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.shapes)
 	delete(c.shape_words)
 	delete(c.motions)
+	delete(c.frame_glyphs)
 	shape_scratch_destroy(&c.scratch)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
@@ -760,6 +765,40 @@ push_shape_at :: proc(c: ^Canvas, cmd: Command, s: ^Shape, local: Transform2D, r
 		return
 	}
 	push_shape(c, cmd, {shape = s, transform = t, paint = row, rule = rule}, group)
+}
+
+// `push_shape_at` for a glyph built into the frame (frame_glyph).
+@(private)
+push_words_at :: proc(c: ^Canvas, cmd: Command, fg: Frame_Glyph, local: Transform2D, row: u32, rule: Fill_Rule, group: u32 = 0) {
+	t := transform_multiply(fg.local, transform_multiply(local, state(c).transform))
+	if outside_target(c, device_bounds(fg.bounds, t, 1)) {
+		return
+	}
+	push_shape(c, cmd, {words = fg.words, transform = t, paint = row, rule = rule}, group)
+}
+
+// `push_shape_instance` for a glyph built into the frame (frame_glyph): a
+// fill with `paint`, or a hairline `hairline` pixels wide.
+@(private)
+push_words_instance :: proc(c: ^Canvas, fg: Frame_Glyph, paint: Paint, hairline: f32, local: Transform2D, slot: ^Paint_Slot = nil) {
+	to := transform_multiply(local, state(c).transform)
+	inst := Shape_Instance{hairline = hairline} if hairline > 0 else paint_instance(paint, to)
+	inst.transform = transform_multiply(fg.local, to)
+	if outside_target(c, device_bounds(fg.bounds, inst.transform, instance_reach(inst))) {
+		return
+	}
+	inst.words = fg.words
+	if slot != nil && slot.canvas == c && slot.gen == c.paint_gen {
+		inst.paint = slot.row
+		push_shape(c, slot.cmd, inst)
+		return
+	}
+	cmd: Command
+	cmd, inst.paint = shape_paint(c, paint)
+	if slot != nil {
+		slot^ = {c, c.paint_gen, inst.paint, cmd}
+	}
+	push_shape(c, cmd, inst)
 }
 
 // Device bounds of a shape under `t` (shape units to drawing coordinates),

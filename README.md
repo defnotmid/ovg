@@ -67,7 +67,7 @@ packages:
 
 | package | needs |
 | --- | --- |
-| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.14), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
+| `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.0.13), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.0.15), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.0.26) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
 
@@ -76,7 +76,7 @@ packages:
 ```sh
 git clone https://github.com/defnotmid/ovg
 git clone -b v0.0.13 https://github.com/defnotmid/oglyph
-git clone -b v0.0.14 https://github.com/defnotmid/ocurves
+git clone -b v0.0.15 https://github.com/defnotmid/ocurves
 git clone -b v0.0.26 https://github.com/defnotmid/oicut
 ```
 
@@ -1041,8 +1041,17 @@ every part follows:
   face the instance's weight (wght) and style (ital, slnt) so text picks it
   by weight; `Text_Style.variations` (CSS font-variation-settings) picks
   the face whose instance those settings select, so instances apart in any
-  axis (wdth, opsz) are told apart. A font is one instance for its life
-  (add another for another instance; text never makes one): its outlines, advances, glyph boxes and shaping follow it
+  axis (wdth, opsz) are told apart. Settings no face of the collection is
+  make that instance of the face weight and style pick, the layout's own
+  (`Text_Layout.instances`: a copy of the face sharing its file's tables
+  and plans, kept for the layout's next text and changed in place, so an
+  animated axis allocates nothing once warm). Its glyphs are built into
+  each frame that draws them instead of kept as shapes: on an M4, 13 us of
+  recording for a 20-glyph headline and 30 us for a 600-glyph paragraph
+  where kept shapes take 0.4 and 9, the GPU's time within 2%. Text at one
+  instance for many frames, or drawn after the layout's next text from its
+  runs, should add the instance to the collection. A font is one instance
+  for its life: its outlines, advances, glyph boxes and shaping follow it
   (oglyph/font lists a
   face's axes and named instances, and `ft.name_string` names them:
   "Weight", "Bold"). Not handled: explicit bidi controls

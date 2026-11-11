@@ -49,12 +49,15 @@ Shape_Char :: struct {
 
 // A piece of the text: its first codepoint, size and feature settings
 // (features[first:][:count]: letter spacing's, then Text_Style.features;
-// the last of a tag wins).
+// the last of a tag wins), the collection's face it asks for and the
+// layout's instance of it it draws (Face_Id{}: none).
 @(private)
 Shape_Piece :: struct {
 	start:    i32,
 	size:     f32,
 	features: [2]i32,
+	face:     Face_Id,
+	instance: Face_Id,
 }
 
 // Shaping state for one layout at a time (pooled by Font_Collection).
