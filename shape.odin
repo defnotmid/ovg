@@ -33,7 +33,7 @@ Shape :: struct {
 	// Coarser copies of its curves, for drawing it much smaller than its
 	// detail (shape_level): blocks of `data` after its own words, coarser
 	// down the list.
-	levels:      [len(SHAPE_LEVEL_ERRORS)]Shape_Level,
+	levels:      [SHAPE_LEVELS]Shape_Level,
 	level_count: int,
 }
 
@@ -44,12 +44,17 @@ Shape_Level :: struct {
 	err: f32,
 }
 
-// The errors coarse levels are made at, in shape units (the shape spans
-// 1 across), finest first. A level is kept when it has at most a quarter
-// of the curves of the last one kept (the shape's own at first), so a
-// shape's levels hold at most a third more words than it does, and a
-// shape whose curves don't thin out keeps none.
-SHAPE_LEVEL_ERRORS :: [3]f32{1.0 / 1024, 1.0 / 128, 1.0 / 16}
+// The errors coarse levels are tried at, in shape units (the shape spans
+// 1 across): every power of two from the finest to the coarsest. A level
+// is kept when it has at most a quarter of the curves of the last one
+// kept (the shape's own at first), so a shape's levels hold at most a
+// third more words than it does, and a shape whose curves don't thin out
+// keeps none; trying every power of two, a shape's level lies within
+// twice the error at which its curves first thin out that far. A shape
+// keeps SHAPE_LEVELS at most.
+SHAPE_LEVEL_FINEST :: 1.0 / 8192
+SHAPE_LEVEL_COARSEST :: 1.0 / 16
+SHAPE_LEVELS :: 6
 
 // How far, in pixels, a level drawn may lie from its shape: below a
 // pixel's coverage step at an edge, so neighbouring shapes stay joined
@@ -292,7 +297,7 @@ level_scratch_destroy :: proc(ls: ^Level_Scratch) {
 	ls^ = {}
 }
 
-// Appends the shape's levels to `out` (SHAPE_LEVEL_ERRORS). Each contour
+// Appends the shape's levels to `out` (SHAPE_LEVEL_FINEST). Each contour
 // is simplified between pinned points (its start, its extreme points and
 // the ends of curves closing contours left open, which its outline skips):
 // first a linear pass merges each run of curves lying within a quarter of
@@ -318,11 +323,10 @@ shape_add_levels :: proc(b: ^Shape_Builder, out: ^[dynamic]u32, origin: Vec2, ex
 	defer if scratch == nil {
 		level_scratch_destroy(&temp)
 	}
-	errors := SHAPE_LEVEL_ERRORS
-	pre := errors[0] * extent / 4
-	level_split_all(ls, b.curves[:], b.unstroked[:], pre, errors[0] * extent - pre)
+	pre := SHAPE_LEVEL_FINEST * extent / 4
+	level_split_all(ls, b.curves[:], b.unstroked[:], pre, SHAPE_LEVEL_FINEST * extent - pre)
 	kept := len(b.curves)
-	for err in errors {
+	for err := f32(SHAPE_LEVEL_FINEST); err <= SHAPE_LEVEL_COARSEST && s.level_count < SHAPE_LEVELS; err *= 2 {
 		tol := err * extent - pre
 		// The curves it would have: each contour's ends kept past its start.
 		n, base := 0, 0

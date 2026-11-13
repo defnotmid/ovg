@@ -41,7 +41,7 @@ Store_Place :: struct {
 	gen:     u32,
 	// Per level (vg.shape_level: 0 the shape's own words), where its words
 	// lie, PLACE_NONE when no frame of this generation drew it.
-	offsets: [1 + len(vg.SHAPE_LEVEL_ERRORS)]u32,
+	offsets: [1 + vg.SHAPE_LEVELS]u32,
 }
 
 @(private = "file")

@@ -176,7 +176,9 @@ test_shape_levels_draw :: proc(t: ^testing.T) {
 		defer shape_destroy(&s)
 		testing.expect(t, s.level_count > 0)
 		fine := level_fine(s)
-		for scale in ([?]f32{30, 400}) {
+		// Large: just past where its finest level is within SHAPE_LEVEL_PIXELS.
+		large := 1.05 * SHAPE_LEVEL_PIXELS / (s.levels[0].err * s.extent)
+		for scale in ([?]f32{30, large}) {
 			a, b := render(&s, scale, rule), render(&fine, scale, rule)
 			defer delete(a)
 			defer delete(b)
@@ -184,7 +186,7 @@ test_shape_levels_draw :: proc(t: ^testing.T) {
 			for v, i in a {
 				most = max(most, abs(int(v) - int(b[i])))
 			}
-			if scale >= 400 {
+			if scale == large {
 				testing.expectf(t, most == 0, "%v at %v: %d levels apart", rule, scale, most)
 			} else {
 				testing.expectf(t, most <= 40, "%v at %v: %d levels apart", rule, scale, most)
@@ -280,7 +282,8 @@ test_shape_levels_layer :: proc(t: ^testing.T) {
 	defer canvas_destroy(&c)
 	ls: Layer_Stack
 	defer layer_stack_destroy(&ls, &c)
-	for scale in ([2]f32{100, 2}) {
+	large := 1.05 * SHAPE_LEVEL_PIXELS / (s.levels[0].err * s.extent)
+	for scale in ([2]f32{large, 2}) {
 		set_size(&c, 64, 64)
 		layer_stack_begin(&ls, &c, 64, 64)
 		layer_push(&ls, &c, {opacity = 0.5})
@@ -299,7 +302,7 @@ test_shape_levels_layer :: proc(t: ^testing.T) {
 				grouped = true
 			}
 		}
-		testing.expectf(t, grouped == (scale < 10), "at %v: %d words, grouped %v", scale, words, grouped)
+		testing.expectf(t, grouped == (scale < large), "at %v: %d words, grouped %v", scale, words, grouped)
 		flush(&c)
 	}
 }

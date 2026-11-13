@@ -842,8 +842,9 @@ every part follows:
   add 29% to building the shapes and 20% to their words.
 - **Coarse levels for shapes drawn small.** A kept shape whose detail
   thins out (`shape_build`: `shape_from_path`, `shape_from_stroke`, glyph
-  shapes) also keeps up to three coarser copies of its curves, within
-  1/1024, 1/128 and 1/16 of its size (`SHAPE_LEVEL_ERRORS`). Each contour
+  shapes) also keeps up to six coarser copies of its curves (`SHAPE_LEVELS`),
+  each within a power of two of its size from 1/8192 to 1/16
+  (`SHAPE_LEVEL_FINEST`, `SHAPE_LEVEL_COARSEST`). Each contour
   is simplified between pinned points (its start, its extreme points, the
   ends of edges its outline skips): runs of tiny curves merge into lines,
   then farthest-point splits (Ramer-Douglas-Peucker), run once for every
