@@ -5,6 +5,7 @@ import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:strings"
+import "core:sync"
 import common "deps:oicut/common"
 import "deps:oksl"
 
@@ -33,9 +34,7 @@ Software_Backend :: struct {
 	transient: []u8,
 	// The caller's pool a frame's row bands run on (oicut's Work_Pool: one
 	// band a range); nil runs them all on the calling thread. A band takes
-	// the shaders' working memory from context.temp_allocator, so each of
-	// the pool's threads must have its own (an Odin thread's default, as
-	// oicut's Static_Pool's workers do).
+	// its shading memory from `lanes_free`.
 	pool:      ^common.Work_Pool,
 	// Motion blur (Frame.motion): the velocity twins of the screen and of
 	// each image a frame draws into with `velocity`, one block carved for a
@@ -66,6 +65,13 @@ Software_Backend :: struct {
 	groups:        [dynamic]Sw_Group,
 	group_of:      [dynamic]i32,
 	group_grid:    Group_Grid_Scratch,
+	// The bands' shading memory, kept warm across frames: a band takes a set
+	// off `lanes_free` (making one when none is) and puts it back, so there
+	// are as many as bands ever drew at once. On the heap, which the pool's
+	// threads can grow from together, and not in their temp arenas, where a
+	// band's 150 KB or so would open a first block of 4 MiB, zeroed.
+	lanes_free:    [dynamic]^Sw_Lanes,
+	lanes_lock:    sync.Mutex,
 }
 
 // The units the software backend runs on oksl's CPU program.
@@ -120,6 +126,7 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.groups = make([dynamic]Sw_Group, allocator)
 	b.group_of = make([dynamic]i32, allocator)
 	b.group_grid = {make([dynamic]Bounds, allocator), make([dynamic][4]i32, allocator), make([dynamic]u32, allocator)}
+	b.lanes_free = make([dynamic]^Sw_Lanes, runtime.heap_allocator())
 }
 
 // Compiles the units `needs` (their motion variants with `motion`) that
@@ -171,6 +178,10 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.groups)
 	delete(b.group_of)
 	group_grid_scratch_destroy(&b.group_grid)
+	for L in b.lanes_free {
+		sw_lanes_destroy(L)
+	}
+	delete(b.lanes_free)
 	for variants in b.programs {
 		for p in variants {
 			if p.module != nil {
@@ -673,26 +684,29 @@ sw_bin :: proc(run: ^Sw_Run, fill: bool, item: Sw_Binned, y0, y1: i32) {
 	}
 }
 
-// One band of a run: its draws, a command's together. The shaders' working
-// memory is in the temp arena of the thread drawing the band.
+// One band of a run: its draws, a command's together, with a set of the
+// backend's shading memory (lanes_free).
 @(private = "file")
 sw_run_band :: proc(data: rawptr, y0, y1: int) {
-	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	run := (^Sw_Run)(data)
 	b := run.b
 	k := y0 / SW_BAND_ROWS
 	items := b.binned[b.starts[k]:b.starts[k + 1]]
 	top, bottom := i32(y0) + run.origin.y, i32(y1) + run.origin.y
-	context.allocator = context.temp_allocator
-	lanes := sw_lanes_make(context.temp_allocator)
+	lanes := sw_lanes_take(b)
+	// oksl's Scratch grows from context.allocator.
+	context.allocator = runtime.heap_allocator()
 	for i := 0; i < len(items); {
 		j := i + 1
 		for j < len(items) && items[j].cmd == items[i].cmd {
 			j += 1
 		}
-		sw_band_command(run, items[i].cmd, items[i:j], top, bottom, &lanes)
+		sw_band_command(run, items[i].cmd, items[i:j], top, bottom, lanes)
 		i = j
 	}
+	sync.lock(&b.lanes_lock)
+	append(&b.lanes_free, lanes)
+	sync.unlock(&b.lanes_lock)
 }
 
 // Pixels are addressed in drawing coordinates: (x, y) is target pixel
@@ -1517,9 +1531,9 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 
 // ---- the shape shaders on oksl's CPU program ------------------------------------
 
-// A band's working memory for the shaders (in the band's temp arena):
-// oksl's registers, and a call's quads, inputs and outputs (at most
-// SW_SHADE_QUADS), reused from draw to draw.
+// A band's working memory for the shaders: oksl's registers, and a call's
+// quads, inputs and outputs (at most SW_SHADE_QUADS), reused from draw to
+// draw and frame to frame (Software_Backend.lanes_free).
 @(private = "file")
 Sw_Lanes :: struct {
 	scratch:  oksl.Scratch,
@@ -1531,16 +1545,39 @@ Sw_Lanes :: struct {
 	motion:   [dynamic][4]f32,
 }
 
+// A free set of the backend's shading memory, or a new one on the heap.
 @(private = "file")
-sw_lanes_make :: proc(allocator: mem.Allocator) -> Sw_Lanes {
-	return {
-		origins = make([dynamic][2]i32, allocator),
-		helpers = make([dynamic]oksl.Quad_Lanes, allocator),
-		shaded = make([dynamic]oksl.Quad_Lanes, allocator),
-		varyings = make([dynamic]f32, allocator),
-		color = make([dynamic][4]f32, allocator),
-		motion = make([dynamic][4]f32, allocator),
+sw_lanes_take :: proc(b: ^Software_Backend) -> ^Sw_Lanes {
+	sync.lock(&b.lanes_lock)
+	free_set, ok := pop_safe(&b.lanes_free)
+	sync.unlock(&b.lanes_lock)
+	if ok {
+		return free_set
 	}
+	heap := runtime.heap_allocator()
+	L := new(Sw_Lanes, heap)
+	L^ = {
+		origins = make([dynamic][2]i32, heap),
+		helpers = make([dynamic]oksl.Quad_Lanes, heap),
+		shaded = make([dynamic]oksl.Quad_Lanes, heap),
+		varyings = make([dynamic]f32, heap),
+		color = make([dynamic][4]f32, heap),
+		motion = make([dynamic][4]f32, heap),
+	}
+	return L
+}
+
+@(private = "file")
+sw_lanes_destroy :: proc(L: ^Sw_Lanes) {
+	context.allocator = runtime.heap_allocator()
+	oksl.scratch_destroy(&L.scratch)
+	delete(L.origins)
+	delete(L.helpers)
+	delete(L.shaded)
+	delete(L.varyings)
+	delete(L.color)
+	delete(L.motion)
+	free(L)
 }
 
 // The draw's image as the shaders' `tex` samples it; white without one, as
