@@ -44,10 +44,19 @@ uint curves_word(uint i) { return shapes.words[i]; }
 layout(location = 0) in vec2 rc;
 // Drawing coordinates.
 layout(location = 1) in vec2 fpos;
+// uv and data are the same at every pixel of an instance: the software
+// backend passes them as uniforms (SHADER_CPU_DEFINES), so oksl's CPU program
+// works out what follows from them alone once a call instead of at every
+// pixel.
+#ifdef SHAPE_FLAT_UNIFORMS
+uniform vec4 uv;
+uniform uvec4 data;
+#else
 layout(location = 2) flat in vec4 uv;
 // The instance's data, its w the instance's index, with bit 31 set when its
 // quad reaches out of its scissor.
 layout(location = 3) flat in uvec4 data;
+#endif
 
 layout(location = 0) out vec4 color;
 #ifdef MOTION

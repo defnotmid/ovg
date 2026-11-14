@@ -4,6 +4,7 @@ import "base:runtime"
 import "core:math"
 import "core:mem"
 import "core:slice"
+import "core:strings"
 import common "deps:oicut/common"
 import "deps:oksl"
 
@@ -84,13 +85,15 @@ SW_UNITS := [Sw_Unit]Shader_Unit {
 	.Marker_Group = .Marker_Group,
 }
 
-// A unit's CPU program, and where each stage input (shapes.glsl's rc, fpos,
-// uv, data: locations 0 to 3) is in its varyings' record (-1: it reads
-// none).
+// A unit's CPU program, where each stage input (shapes.glsl's rc and fpos:
+// locations 0 and 1) is in its varyings' record, and where its uniforms uv
+// and data are in its uniform block (-1: it reads none).
 @(private = "file")
 Sw_Program_Unit :: struct {
-	module: ^oksl.Module,
-	inputs: [4]int,
+	module:  ^oksl.Module,
+	inputs:  [2]int,
+	uv_at:   int,
+	data_at: int,
 }
 
 // A group of a run: its grid in `group_words` and its first member's row
@@ -131,13 +134,20 @@ sw_programs_need :: proc(b: ^Software_Backend, needs: bit_set[Sw_Unit], motion: 
 			continue
 		}
 		unit := SW_UNITS[u]
-		prelude := shader_prelude(unit, motion == 1, context.temp_allocator)
+		prelude := strings.concatenate({SHADER_CPU_DEFINES, shader_prelude(unit, motion == 1, context.temp_allocator)}, context.temp_allocator)
 		context.allocator = b.allocator
 		m, _, ok := oksl.compile(SHADER_SOURCES[unit].source, {profile = .Glsl, prelude = prelude, no_spirv = true, no_msl = true})
 		assert(ok, "ovg's shape shaders compile for oksl's CPU program")
-		p^ = {module = m, inputs = {-1, -1, -1, -1}}
+		assert(m.block_size <= SW_UNIFORM_BYTES)
+		p^ = {module = m, inputs = {-1, -1}, uv_at = -1, data_at = -1}
 		for v in m.stage_inputs {
 			p.inputs[v.location] = v.offset
+		}
+		if u, has := oksl.find_uniform(m, "uv"); has {
+			p.uv_at = u.offset
+		}
+		if u, has := oksl.find_uniform(m, "data"); has {
+			p.data_at = u.offset
 		}
 	}
 }
@@ -1557,14 +1567,18 @@ sw_pixels :: proc "contextless" (r: ^Raster, bounds: Bounds) -> [4]i32 {
 }
 
 // Quads one run_fragment call shades: 16 of oksl's batches, so a call's
-// inputs and outputs (12 floats in and two colours out a pixel, about 80 KB)
+// inputs and outputs (4 floats in and two colours out a pixel, about 48 KB)
 // stay small and in cache however wide the pixels are.
 @(private = "file")
 SW_SHADE_QUADS :: 16 * oksl.LANES / 4
 
+// The shape units' uniform block: uv and data.
+@(private = "file")
+SW_UNIFORM_BYTES :: 32
+
 // Shades the raster's pixels `px` (x0, y0, x1, y1) in 2x2 quads with a shape
 // unit, as the GPU rasterizes a quad over them: rc at a pixel's centre by
-// `to_rc`, fpos the centre, uv and data the same at every pixel. Then each
+// `to_rc`, fpos the centre, uv and data the uniforms. Then each
 // pixel it shades blends in order (and with a twin, its motion over the
 // twin's pixel, premultiplied source-over, whatever the blend). The quads
 // go SW_SHADE_QUADS at a time, row by row.
@@ -1588,6 +1602,13 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 		resize(&L.motion, most * 4)
 	}
 	resize(&L.varyings, m.varying_floats * most * 4)
+	uniforms: [SW_UNIFORM_BYTES]u8
+	if prog.uv_at >= 0 {
+		(^[4]f32)(&uniforms[prog.uv_at])^ = uv
+	}
+	if prog.data_at >= 0 {
+		(^[4]u32)(&uniforms[prog.data_at])^ = data
+	}
 	for first := 0; first < quads; first += SW_SHADE_QUADS {
 		count := min(quads - first, SW_SHADE_QUADS)
 		total := count * 4
@@ -1622,20 +1643,10 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 				cx[j], cy[j] = f32(o.x + i32(j & 1)) + 0.5, f32(o.y + i32((j >> 1) & 1)) + 0.5
 			}
 		}
-		if at := prog.inputs[2]; at >= 0 {
-			for k in 0 ..< 4 {
-				slice.fill(col(L, at + k, total), uv[k])
-			}
-		}
-		if at := prog.inputs[3]; at >= 0 {
-			for k in 0 ..< 4 {
-				slice.fill(col(L, at + k, total), transmute(f32)data[k])
-			}
-		}
 		targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
 		shaded := L.shaded[:count]
 		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count], varyings = L.varyings[:m.varying_floats * total]}
-		oksl.run_fragment(&m.program, nil, in_, targets[:2 if moves else 1], shaded, &L.scratch, {sampler = sw_shader_sample, user = tex, buffers = buffers})
+		oksl.run_fragment(&m.program, uniforms[:m.block_size], in_, targets[:2 if moves else 1], shaded, &L.scratch, {sampler = sw_shader_sample, user = tex, buffers = buffers})
 		for lanes, q in shaded {
 			o := L.origins[q]
 			for l in lanes {

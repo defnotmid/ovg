@@ -1,5 +1,6 @@
 package ovg
 
+import "core:strings"
 import "core:testing"
 import "deps:oksl"
 
@@ -32,6 +33,22 @@ test_shaders_compile :: proc(t: ^testing.T) {
 			want := 2 if k == 1 || u == .Resolve_Velocity else 1
 			testing.expectf(t, len(m.stage_outputs) == want, "%v (motion %v): %v outputs", u, k == 1, len(m.stage_outputs))
 			oksl.destroy_pipeline(p)
+			if !src.shapes {
+				continue
+			}
+			// The software backend's compile: uv and data uniforms, rc and
+			// fpos the only inputs.
+			cpu, cpu_errors, cpu_ok := oksl.compile(src.source, {profile = .Glsl, prelude = strings.concatenate({SHADER_CPU_DEFINES, prelude}, context.temp_allocator), no_spirv = true, no_msl = true})
+			if !testing.expectf(t, cpu_ok, "%v (motion %v) on the CPU: %s", u, k == 1, oksl.format_errors(cpu_errors, context.temp_allocator)) {
+				continue
+			}
+			_, has_uv := oksl.find_uniform(cpu, "uv")
+			_, has_data := oksl.find_uniform(cpu, "data")
+			testing.expectf(t, has_data && (has_uv || u != .Shape), "%v: uv %v, data %v uniforms", u, has_uv, has_data)
+			for v in cpu.stage_inputs {
+				testing.expectf(t, v.location < 2, "%v: input at location %v", u, v.location)
+			}
+			oksl.destroy(cpu)
 		}
 	}
 	// A unit reading past what's bound, or out of order, fails the check.

@@ -55,6 +55,12 @@ SHADER_SOURCES := [Shader_Unit]Shader_Source {
 	.Resolve_Velocity   = {#load("shaders/velocity.frag", string), false, "#define RESOLVE\n", false},
 }
 
+// What the software backend defines ahead of a shape unit's prelude:
+// shapes.glsl's uv and data, the same at every pixel of an instance, are
+// uniforms there, so oksl's CPU program works out the paint's row and the
+// branches that follow from them once a call instead of at every pixel.
+SHADER_CPU_DEFINES :: "#define SHAPE_FLAT_UNIFORMS\n"
+
 // The vertex shaders: quads (position, texture coordinates, paint row) and
 // shape instances (pulled from a storage buffer by gl_VertexID).
 SHADER_QUAD_VERT :: #load("shaders/quad.vert", string)

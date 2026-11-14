@@ -882,7 +882,9 @@ every part follows:
   `markers.frag`) on [oksl](https://github.com/defnotmid/oksl)'s CPU
   program, over 2x2 quads of each instance's pixels as a GPU rasterizes
   them, compiled from the same sources the first time a frame draws with
-  them; the filters evaluate the same formulas in Odin. It samples
+  them, an instance's `uv` and `data` (the same at each of its pixels)
+  passed as uniforms where the GPU interpolates them flat
+  (`SHADER_CPU_DEFINES`); the filters evaluate the same formulas in Odin. It samples
   textures like the GPU and uses the top-left fill rule.
   `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
   and diffs them; on an RX 9070 XT (Vulkan, RADV) all 35 checks match, with
