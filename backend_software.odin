@@ -3,6 +3,7 @@ package ovg
 import "base:runtime"
 import "core:math"
 import "core:mem"
+import "core:simd"
 import "core:slice"
 import "core:strings"
 import "core:sync"
@@ -799,7 +800,7 @@ sw_clear_rect :: proc(r: ^Raster, c: Cmd_Clear_Rect) {
 	}
 	col := color_to_array(premultiplied(c.color))
 	if r.target.format == .RGBA8 {
-		packed := transmute(u32)[4]u8{to_unorm8(col[0]), to_unorm8(col[1]), to_unorm8(col[2]), to_unorm8(col[3])}
+		packed := transmute(u32)to_unorm8x4(col)
 		px := slice.reinterpret([]u32, r.target.pixels)
 		w := int(r.target.width)
 		tx0, tx1 := int(x0 - r.ox), int(x1 - r.ox)
@@ -967,13 +968,24 @@ to_unorm8 :: #force_inline proc "contextless" (v: f32) -> u8 {
 	return u8(clamp(v * 255 + 0.5, 0, 255))
 }
 
+// to_unorm8 of each of the four at once.
+@(private = "file")
+to_unorm8x4 :: #force_inline proc "contextless" (c: [4]f32) -> [4]u8 {
+	return simd.to_array(cast(#simd[4]u8)simd.clamp(simd.from_array(c) * 255 + 0.5, 0, 255))
+}
+
+// clamp(c, 0, 1) for each of the four at once.
+@(private = "file")
+saturate4 :: #force_inline proc "contextless" (c: [4]f32) -> [4]f32 {
+	return simd.to_array(simd.clamp(simd.from_array(c), 0, 1))
+}
+
 @(private = "file")
 store_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, c: [4]f32) {
 	i := int(y * t.width + x)
 	switch t.format {
 	case .RGBA8:
-		p := t.pixels[i * 4:]
-		p[0], p[1], p[2], p[3] = to_unorm8(c[0]), to_unorm8(c[1]), to_unorm8(c[2]), to_unorm8(c[3])
+		(^[4]u8)(raw_data(t.pixels[i * 4:][:4]))^ = to_unorm8x4(c)
 	case .Gray8:
 		t.pixels[i] = to_unorm8(c[0])
 	case .Gray16:
@@ -1041,7 +1053,7 @@ factor_alpha :: #force_inline proc "contextless" (f: Blend_Factor, sa, da: f32) 
 blend_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, s: Composite_Operation_State, src: [4]f32) {
 	src := src
 	if t.format != .RGBA16F {
-		src = {clamp(src[0], 0, 1), clamp(src[1], 0, 1), clamp(src[2], 0, 1), clamp(src[3], 0, 1)}
+		src = saturate4(src)
 	}
 	if s.src_rgb == .One && s.src_alpha == .One {
 		if (s.dst_rgb == .Zero && s.dst_alpha == .Zero) || (s.dst_rgb == .One_Minus_Src_Alpha && s.dst_alpha == .One_Minus_Src_Alpha && src[3] >= 1) {
