@@ -851,6 +851,10 @@ lookup_texture :: proc(images: ^Image_Store, id: Image_Id) -> (Sw_Texture, bool)
 	if entry == nil || entry.image.pixels == nil {
 		return {}, false
 	}
+	// `sample` reads it unchecked: every texel must be there.
+	if len(entry.image.pixels) < int(entry.info.width) * int(entry.info.height) * int(bytes_per_pixel(entry.info.format)) {
+		return {}, false
+	}
 	return {entry.image.pixels, entry.info.width, entry.info.height, entry.info.format, entry.info.flags}, true
 }
 
@@ -876,16 +880,23 @@ apply_tex_type :: #force_inline proc "contextless" (c: [4]f32, tex_type: f32) ->
 @(private = "file")
 fetch :: #force_inline proc "contextless" (t: Sw_Texture, x, y: u32) -> [4]f32 {
 	i := int(y * t.width + x)
-	switch t.format {
+	_ = t.pixels[(i + 1) * int(bytes_per_pixel(t.format)) - 1]
+	return decode_texel(raw_data(t.pixels), i, t.format)
+}
+
+// Texel `i` of pixels in `format`, unchecked: the caller knows it is there.
+@(private = "file")
+decode_texel :: #force_inline proc "contextless" (pixels: [^]u8, i: int, format: Pixel_Format) -> [4]f32 {
+	switch format {
 	case .RGBA8:
-		p := t.pixels[i * 4:]
+		p := pixels[i * 4:]
 		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])} / 255
 	case .Gray8:
-		return {f32(t.pixels[i]) / 255, 0, 0, 1}
+		return {f32(pixels[i]) / 255, 0, 0, 1}
 	case .Gray16:
-		return {f32(u16(t.pixels[i * 2]) | u16(t.pixels[i * 2 + 1]) << 8) / 65535, 0, 0, 1}
+		return {f32(u16(pixels[i * 2]) | u16(pixels[i * 2 + 1]) << 8) / 65535, 0, 0, 1}
 	case .RGBA16F:
-		p := (^[4]u16)(&t.pixels[i * 8])^
+		p := (^[4]u16)(&pixels[i * 8])^
 		return {half_to_f32(p[0]), half_to_f32(p[1]), half_to_f32(p[2]), half_to_f32(p[3])}
 	}
 	return {}
@@ -909,7 +920,18 @@ wrap_coord :: #force_inline proc "contextless" (c: i32, dim: u32, repeat: bool) 
 	return u32(clamp(c, 0, d - 1))
 }
 
+// i32(math.floor(x)) without the call: the conversion truncates toward 0,
+// one less below 0 unless x is whole. Out of range it is min(i32) as the
+// conversion of the floor is.
+@(private = "file")
+floor_i32 :: #force_inline proc "contextless" (x: f32) -> i32 {
+	i := i32(x)
+	return i - 1 if f32(i) > x && i != min(i32) else i
+}
+
 // GPU texture lookup at normalized (u, v) honouring repeat and nearest flags.
+// Unchecked: lookup_texture made `t` whole, and wrap_coord keeps every texel
+// it reads inside it.
 @(private = "file")
 sample :: proc "contextless" (t: Sw_Texture, u, v: f32) -> [4]f32 {
 	if t.width == 0 || t.height == 0 {
@@ -919,22 +941,23 @@ sample :: proc "contextless" (t: Sw_Texture, u, v: f32) -> [4]f32 {
 	ry := .Repeat_Y in t.flags
 	fw, fh := f32(t.width), f32(t.height)
 	if .Nearest in t.flags {
-		x := wrap_coord(i32(math.floor(u * fw)), t.width, rx)
-		y := wrap_coord(i32(math.floor(v * fh)), t.height, ry)
-		return fetch(t, x, y)
+		x := wrap_coord(floor_i32(u * fw), t.width, rx)
+		y := wrap_coord(floor_i32(v * fh), t.height, ry)
+		return decode_texel(raw_data(t.pixels), int(y * t.width + x), t.format)
 	}
 	fx := u * fw - 0.5
 	fy := v * fh - 0.5
-	ix := i32(math.floor(fx))
-	iy := i32(math.floor(fy))
+	ix := floor_i32(fx)
+	iy := floor_i32(fy)
 	tx := fx - f32(ix)
 	ty := fy - f32(iy)
 	x0 := wrap_coord(ix, t.width, rx)
 	x1 := wrap_coord(ix + 1, t.width, rx)
 	y0 := wrap_coord(iy, t.height, ry)
 	y1 := wrap_coord(iy + 1, t.height, ry)
-	top := mix4(fetch(t, x0, y0), fetch(t, x1, y0), tx)
-	bot := mix4(fetch(t, x0, y1), fetch(t, x1, y1), tx)
+	p, w := raw_data(t.pixels), t.width
+	top := mix4(decode_texel(p, int(y0 * w + x0), t.format), decode_texel(p, int(y0 * w + x1), t.format), tx)
+	bot := mix4(decode_texel(p, int(y1 * w + x0), t.format), decode_texel(p, int(y1 * w + x1), t.format), tx)
 	return mix4(top, bot, ty)
 }
 
