@@ -36,8 +36,8 @@ test_shaders_compile :: proc(t: ^testing.T) {
 			if !src.shapes {
 				continue
 			}
-			// The software backend's compile: uv and data uniforms, rc and
-			// fpos the only inputs.
+			// The software backend's compile: uv and data uniforms, and no
+			// stage inputs (rc and fpos from gl_FragCoord).
 			cpu, cpu_errors, cpu_ok := oksl.compile(src.source, {profile = .Glsl, prelude = strings.concatenate({SHADER_CPU_DEFINES, prelude}, context.temp_allocator), no_spirv = true, no_msl = true})
 			if !testing.expectf(t, cpu_ok, "%v (motion %v) on the CPU: %s", u, k == 1, oksl.format_errors(cpu_errors, context.temp_allocator)) {
 				continue
@@ -45,9 +45,7 @@ test_shaders_compile :: proc(t: ^testing.T) {
 			_, has_uv := oksl.find_uniform(cpu, "uv")
 			_, has_data := oksl.find_uniform(cpu, "data")
 			testing.expectf(t, has_data && (has_uv || u != .Shape), "%v: uv %v, data %v uniforms", u, has_uv, has_data)
-			for v in cpu.stage_inputs {
-				testing.expectf(t, v.location < 2, "%v: input at location %v", u, v.location)
-			}
+			testing.expectf(t, len(cpu.stage_inputs) == 0, "%v: stage inputs %v", u, cpu.stage_inputs)
 			oksl.destroy(cpu)
 		}
 	}

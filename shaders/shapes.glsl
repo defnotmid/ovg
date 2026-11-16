@@ -40,18 +40,27 @@ layout(std430) readonly buffer Motions { Shape_Motion rows[]; } motions;
 
 uint curves_word(uint i) { return shapes.words[i]; }
 
+// uv and data are the same at every pixel of an instance: the software
+// backend passes them as uniforms (SHADER_CPU_DEFINES), so oksl's CPU program
+// works out what follows from them alone once a call instead of at every
+// pixel. There rc and fpos are no stage inputs either: shape_clip sets them
+// from gl_FragCoord, rc by the backend's map to shape units (rc_linear,
+// rc_offset), as the vertex shader's quad interpolates them.
+#ifdef SHAPE_FLAT_UNIFORMS
+uniform vec4 uv;
+uniform uvec4 data;
+// ovg.Transform2D {a, b, c, d, e, f}: rc_linear (a, b, c, d), rc_offset (e, f).
+uniform vec4 rc_linear;
+uniform vec2 rc_offset;
+// Shape units.
+vec2 rc;
+// Drawing coordinates.
+vec2 fpos;
+#else
 // Shape units.
 layout(location = 0) in vec2 rc;
 // Drawing coordinates.
 layout(location = 1) in vec2 fpos;
-// uv and data are the same at every pixel of an instance: the software
-// backend passes them as uniforms (SHADER_CPU_DEFINES), so oksl's CPU program
-// works out what follows from them alone once a call instead of at every
-// pixel.
-#ifdef SHAPE_FLAT_UNIFORMS
-uniform vec4 uv;
-uniform uvec4 data;
-#else
 layout(location = 2) flat in vec4 uv;
 // The instance's data, its w the instance's index, with bit 31 set when its
 // quad reaches out of its scissor.
@@ -65,8 +74,13 @@ layout(location = 1) out vec4 motion;
 
 // Leaves the pixels outside the instance's scissor, as a scissored draw
 // would, before any coverage work; only an instance whose quad reaches out
-// of it reads it.
+// of it reads it. Every unit's main calls it first; on the CPU it sets rc
+// and fpos too.
 void shape_clip() {
+#ifdef SHAPE_FLAT_UNIFORMS
+    fpos = gl_FragCoord.xy;
+    rc = fpos.x * rc_linear.xy + fpos.y * rc_linear.zw + rc_offset;
+#endif
     if ((data.w & 0x80000000u) != 0u) {
         vec4 clip = members.rows[data.w & 0x7fffffffu].clip;
         if (any(lessThan(gl_FragCoord.xy, clip.xy)) || any(greaterThanEqual(gl_FragCoord.xy, clip.zw))) {

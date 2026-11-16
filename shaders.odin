@@ -58,7 +58,9 @@ SHADER_SOURCES := [Shader_Unit]Shader_Source {
 // What the software backend defines ahead of a shape unit's prelude:
 // shapes.glsl's uv and data, the same at every pixel of an instance, are
 // uniforms there, so oksl's CPU program works out the paint's row and the
-// branches that follow from them once a call instead of at every pixel.
+// branches that follow from them once a call instead of at every pixel;
+// and rc and fpos come from gl_FragCoord (rc by the uniforms rc_linear and
+// rc_offset) instead of a column per stage input the backend fills.
 SHADER_CPU_DEFINES :: "#define SHAPE_FLAT_UNIFORMS\n"
 
 // The vertex shaders: quads (position, texture coordinates, paint row) and

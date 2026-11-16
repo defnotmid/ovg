@@ -91,15 +91,16 @@ SW_UNITS := [Sw_Unit]Shader_Unit {
 	.Marker_Group = .Marker_Group,
 }
 
-// A unit's CPU program, where each stage input (shapes.glsl's rc and fpos:
-// locations 0 and 1) is in its varyings' record, and where its uniforms uv
-// and data are in its uniform block (-1: it reads none).
+// A unit's CPU program and where its uniforms are in its uniform block
+// (-1: it reads none): uv, data, and the map from drawing coordinates to
+// rc (rc_linear, rc_offset). It has no stage inputs.
 @(private = "file")
 Sw_Program_Unit :: struct {
-	module:  ^oksl.Module,
-	inputs:  [2]int,
-	uv_at:   int,
-	data_at: int,
+	module:        ^oksl.Module,
+	uv_at:         int,
+	data_at:       int,
+	rc_linear_at:  int,
+	rc_offset_at:  int,
 }
 
 // A group of a run: its grid in `group_words` and its first member's row
@@ -145,17 +146,12 @@ sw_programs_need :: proc(b: ^Software_Backend, needs: bit_set[Sw_Unit], motion: 
 		context.allocator = b.allocator
 		m, _, ok := oksl.compile(SHADER_SOURCES[unit].source, {profile = .Glsl, prelude = prelude, no_spirv = true, no_msl = true})
 		assert(ok, "ovg's shape shaders compile for oksl's CPU program")
-		assert(m.block_size <= SW_UNIFORM_BYTES)
-		p^ = {module = m, inputs = {-1, -1}, uv_at = -1, data_at = -1}
-		for v in m.stage_inputs {
-			p.inputs[v.location] = v.offset
+		assert(m.block_size <= SW_UNIFORM_BYTES && len(m.stage_inputs) == 0)
+		at :: proc(m: ^oksl.Module, name: string) -> int {
+			u, has := oksl.find_uniform(m, name)
+			return u.offset if has else -1
 		}
-		if u, has := oksl.find_uniform(m, "uv"); has {
-			p.uv_at = u.offset
-		}
-		if u, has := oksl.find_uniform(m, "data"); has {
-			p.data_at = u.offset
-		}
+		p^ = {module = m, uv_at = at(m, "uv"), data_at = at(m, "data"), rc_linear_at = at(m, "rc_linear"), rc_offset_at = at(m, "rc_offset")}
 	}
 }
 
@@ -1555,15 +1551,14 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 // ---- the shape shaders on oksl's CPU program ------------------------------------
 
 // A band's working memory for the shaders: oksl's registers, and a call's
-// quads, inputs and outputs (at most SW_SHADE_QUADS), reused from draw to
-// draw and frame to frame (Software_Backend.lanes_free).
+// quads and outputs (at most SW_SHADE_QUADS), reused from draw to draw and
+// frame to frame (Software_Backend.lanes_free).
 @(private = "file")
 Sw_Lanes :: struct {
 	scratch:  oksl.Scratch,
 	origins:  [dynamic][2]i32,
 	helpers:  [dynamic]oksl.Quad_Lanes,
 	shaded:   [dynamic]oksl.Quad_Lanes,
-	varyings: [dynamic]f32,
 	color:    [dynamic][4]f32,
 	motion:   [dynamic][4]f32,
 }
@@ -1583,7 +1578,6 @@ sw_lanes_take :: proc(b: ^Software_Backend) -> ^Sw_Lanes {
 		origins = make([dynamic][2]i32, heap),
 		helpers = make([dynamic]oksl.Quad_Lanes, heap),
 		shaded = make([dynamic]oksl.Quad_Lanes, heap),
-		varyings = make([dynamic]f32, heap),
 		color = make([dynamic][4]f32, heap),
 		motion = make([dynamic][4]f32, heap),
 	}
@@ -1597,7 +1591,6 @@ sw_lanes_destroy :: proc(L: ^Sw_Lanes) {
 	delete(L.origins)
 	delete(L.helpers)
 	delete(L.shaded)
-	delete(L.varyings)
 	delete(L.color)
 	delete(L.motion)
 	free(L)
@@ -1627,18 +1620,18 @@ sw_pixels :: proc "contextless" (r: ^Raster, bounds: Bounds) -> [4]i32 {
 }
 
 // Quads one run_fragment call shades: 16 of oksl's batches, so a call's
-// inputs and outputs (4 floats in and two colours out a pixel, about 48 KB)
-// stay small and in cache however wide the pixels are.
+// outputs (two colours a pixel, 32 KB) stay small and in cache however wide
+// the pixels are.
 @(private = "file")
 SW_SHADE_QUADS :: 16 * oksl.LANES / 4
 
-// The shape units' uniform block: uv and data.
+// The shape units' uniform block: uv, data, rc_linear and rc_offset.
 @(private = "file")
-SW_UNIFORM_BYTES :: 32
+SW_UNIFORM_BYTES :: 64
 
 // Shades the raster's pixels `px` (x0, y0, x1, y1) in 2x2 quads with a shape
-// unit, as the GPU rasterizes a quad over them: rc at a pixel's centre by
-// `to_rc`, fpos the centre, uv and data the uniforms. Then each
+// unit, as the GPU rasterizes a quad over them: uv, data and `to_rc` (the
+// map from fpos, a pixel's centre, to rc) the uniforms. Then each
 // pixel it shades blends in order (and with a twin, its motion over the
 // twin's pixel, premultiplied source-over, whatever the blend). The quads
 // go SW_SHADE_QUADS at a time, row by row.
@@ -1661,7 +1654,6 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 	if moves {
 		resize(&L.motion, most * 4)
 	}
-	resize(&L.varyings, m.varying_floats * most * 4)
 	uniforms: [SW_UNIFORM_BYTES]u8
 	if prog.uv_at >= 0 {
 		(^[4]f32)(&uniforms[prog.uv_at])^ = uv
@@ -1669,11 +1661,16 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 	if prog.data_at >= 0 {
 		(^[4]u32)(&uniforms[prog.data_at])^ = data
 	}
+	if prog.rc_linear_at >= 0 {
+		(^[4]f32)(&uniforms[prog.rc_linear_at])^ = {to_rc[0], to_rc[1], to_rc[2], to_rc[3]}
+	}
+	if prog.rc_offset_at >= 0 {
+		(^[2]f32)(&uniforms[prog.rc_offset_at])^ = {to_rc[4], to_rc[5]}
+	}
 	for first := 0; first < quads; first += SW_SHADE_QUADS {
 		count := min(quads - first, SW_SHADE_QUADS)
 		total := count * 4
-		// The quads, the lanes off the pixels helpers, then each input a
-		// column at a time.
+		// The quads, the lanes off the pixels helpers.
 		for q in 0 ..< count {
 			k := first + q
 			o := [2]i32{qx0 + i32(k % nqx) * 2, qy0 + i32(k / nqx) * 2}
@@ -1685,27 +1682,9 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 			if o.y < y0 {h += {0, 1}}
 			L.helpers[q] = h
 		}
-		col :: #force_inline proc(L: ^Sw_Lanes, at, total: int) -> []f32 {
-			return L.varyings[at * total:][:total]
-		}
-		if at := prog.inputs[0]; at >= 0 {
-			cx, cy := col(L, at, total), col(L, at + 1, total)
-			for j in 0 ..< total {
-				o := L.origins[j / 4]
-				p := transform_point(to_rc, f32(o.x + i32(j & 1)) + 0.5, f32(o.y + i32((j >> 1) & 1)) + 0.5)
-				cx[j], cy[j] = p.x, p.y
-			}
-		}
-		if at := prog.inputs[1]; at >= 0 {
-			cx, cy := col(L, at, total), col(L, at + 1, total)
-			for j in 0 ..< total {
-				o := L.origins[j / 4]
-				cx[j], cy[j] = f32(o.x + i32(j & 1)) + 0.5, f32(o.y + i32((j >> 1) & 1)) + 0.5
-			}
-		}
 		targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
 		shaded := L.shaded[:count]
-		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count], varyings = L.varyings[:m.varying_floats * total]}
+		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count]}
 		oksl.run_fragment(&m.program, uniforms[:m.block_size], in_, targets[:2 if moves else 1], shaded, &L.scratch, {sampler = sw_shader_sample, user = tex, buffers = buffers})
 		for lanes, q in shaded {
 			o := L.origins[q]
