@@ -386,8 +386,9 @@ vec4 convolve(ivec2 p) {
 
 // ---- feTurbulence (the spec's reference noise) -------------------------------
 //
-// `tex` is the lattice image (turbulence_lattice_pixels): row 0 the
-// permutation, row 1 + k channel k's gradients in 16-bit fixed point.
+// `tex` is the lattice image (turbulence_lattice_pixels, whole numbers in
+// RGBA16F): row 0 the permutation, row 1 + k channel k's gradients in
+// 16-bit fixed point, each as its high byte times 256 and its low byte.
 // Uniforms: see turbulence_uniforms in image.odin. In f32 rather
 // than the spec's f64: lattice indices are kept PerlinN (4096, a multiple
 // of 256) lower than the spec's, so the cell fraction keeps f32 precision;
@@ -400,12 +401,12 @@ vec4 lattice_texel(int x, int y) {
 }
 
 int lattice_select(int i) {
-    return int(round(lattice_texel(i & 255, 0).x * 255.0));
+    return int(lattice_texel(i & 255, 0).x);
 }
 
 vec2 lattice_gradient(int k, int i) {
-    vec4 t = round(lattice_texel(i, k + 1) * 255.0);
-    return vec2(t.x * 256.0 + t.y, t.z * 256.0 + t.w) / 32767.5 - 1.0;
+    vec4 t = lattice_texel(i, k + 1);
+    return vec2(t.x + t.y, t.z + t.w) / 32767.5 - 1.0;
 }
 
 // The spec's noise2 for the four channels at lattice point v; st = stitch

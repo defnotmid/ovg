@@ -310,7 +310,7 @@ GPU sampler returns them) and write premultiplied color.
 | `Tile{rect}` | feTile | the source's `rect` repeated |
 | `Displacement_Map{displacement, scale, channels, valid}` | feDisplacementMap | nearest pixel at p + scale (map - 0.5) (map premultiplied, as resvg) |
 | `Convolve_Matrix{kernel, order, target, divisor, bias, edge, preserve_alpha, valid}` | feConvolveMatrix | up to `CONVOLVE_MAX_KERNEL` (36) values, edge duplicate / wrap / none |
-| `Turbulence{params, seed, offset, scale, region}` | feTurbulence | the spec's reference noise over the whole target, from the seed's lattice image (`turbulence_lattice_pixels`); f32 on the GPU, f64 on the software backend; `region` is the stitch tile |
+| `Turbulence{params, offset, scale, region}` | feTurbulence | the spec's reference noise over the whole target, from the seed's lattice image (`turbulence_lattice_pixels`), in f32 on every backend; `region` is the stitch tile |
 
 Blur kernels span 3 sigma each side and are exact up to `BLUR_MAX_EXACT_SIGMA`
 (8); beyond that both backends keep `BLUR_MAX_TAPS` (24) taps each side, a
@@ -332,11 +332,10 @@ filter's images are RGBA16F (8-bit linear light keeps 9 of sRGB's first 49
 levels), each released after the last primitive reading it; an sRGB
 filter's are the layer's (RGBA8, or RGBA16F in an RGBA16F offscreen
 image). feTurbulence is the
-spec's reference Perlin noise: a filter pass in f32 on SDL_GPU, reading the
-seed's lattice (computed once on the CPU, kept by `Layer_Stack`), and f64
-row bands as resvg on the software backend (on the caller's
-`Software_Backend.pool`, as all its drawing); both round it to 8 bits as
-resvg does, and keep it unrounded in an RGBA16F offscreen image. The transfer tables are computed on the CPU and
+spec's reference Perlin noise: a filter pass in f32 on every backend,
+reading the seed's lattice (computed once on the CPU, kept by
+`Layer_Stack`, its whole numbers in RGBA16F); it rounds to 8 bits as resvg
+does, and stays unrounded in an RGBA16F offscreen image. The transfer tables are computed on the CPU and
 uploaded; the other primitives are filter passes. `Filter.region`
 (`Filter_Region{units, x, y, w, h, bbox}`, `.User_Space_On_Use` or
 `.Object_Bounding_Box` with the caller's bounding box;

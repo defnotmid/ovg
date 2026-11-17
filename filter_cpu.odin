@@ -135,26 +135,27 @@ turbulence_init :: proc "contextless" (lattice: ^Turbulence_Lattice, seed: i32) 
 	}
 }
 
-// The lattice image a `Turbulence` filter reads on the GPU (RGBA8). Row 0
-// holds the permutation (in red); row 1 + k channel k's gradients as 16-bit
-// fixed point, round((g + 1) / 2 * 65535), bytes x high, x low, y high,
-// y low (an error under 2e-5, far below 8-bit output). The spec's tables
-// repeat with period 256, so 256 entries are all a shader needs.
+// The lattice image a `Turbulence` filter reads (RGBA16F, whole numbers,
+// which a half holds exactly, so the shader reads them with no decode).
+// Row 0 holds the permutation (in red); row 1 + k channel k's gradients as
+// 16-bit fixed point q = round((g + 1) / 2 * 65535), x as (q &~ 255, q &
+// 255) and y the same (an error under 2e-5, far below 8-bit output). The
+// spec's tables repeat with period 256, so 256 entries are all a shader
+// needs.
 TURBULENCE_LATTICE_W :: 256
 TURBULENCE_LATTICE_H :: 5
 
-turbulence_lattice_pixels :: proc "contextless" (seed: i32) -> (px: [TURBULENCE_LATTICE_W * TURBULENCE_LATTICE_H * 4]u8) {
+turbulence_lattice_pixels :: proc "contextless" (seed: i32) -> (px: [TURBULENCE_LATTICE_W * TURBULENCE_LATTICE_H][4]f16) {
 	l: Turbulence_Lattice
 	turbulence_init(&l, seed)
 	for i in 0 ..< TURB_B {
-		px[i * 4] = u8(l.selector[i])
-		px[i * 4 + 3] = 255
+		px[i] = {f16(l.selector[i]), 0, 0, 1}
 		for k in 0 ..< 4 {
-			o := px[((k + 1) * TURB_B + i) * 4:]
+			o := &px[(k + 1) * TURB_B + i]
 			for j in 0 ..< 2 {
 				q := u16(math.round((l.gradient[k][i][j] + 1) * 32767.5))
-				o[j * 2] = u8(q >> 8)
-				o[j * 2 + 1] = u8(q)
+				o[j * 2] = f16(q &~ 255)
+				o[j * 2 + 1] = f16(q & 255)
 			}
 		}
 	}

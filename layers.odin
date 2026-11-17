@@ -1,6 +1,7 @@
 package ovg
 
 import "core:math"
+import "core:slice"
 
 // Offscreen layers for group effects, like Skia's saveLayer: drawing between
 // `layer_push` and `layer_pop` goes to a transparent layer, which is then
@@ -1073,8 +1074,8 @@ layer_turbulence_lattice :: proc(ls: ^Layer_Stack, c: ^Canvas, seed: i32) -> Ima
 		}
 	}
 	px := turbulence_lattice_pixels(seed)
-	id, _ := create_image_empty(c, TURBULENCE_LATTICE_W, TURBULENCE_LATTICE_H, .RGBA8, {.Premultiplied, .Nearest})
-	update_image(c, id, image_source_rgba(px[:], TURBULENCE_LATTICE_W, TURBULENCE_LATTICE_H), 0, 0)
+	id, _ := create_image_empty(c, TURBULENCE_LATTICE_W, TURBULENCE_LATTICE_H, .RGBA16F, {.Premultiplied, .Nearest})
+	update_image(c, id, {.RGBA16F, slice.to_bytes(px[:]), TURBULENCE_LATTICE_W, TURBULENCE_LATTICE_H, 0}, 0, 0)
 	append(&ls.lattices, Lattice_Image{seed, id, ls.frame})
 	return id
 }
