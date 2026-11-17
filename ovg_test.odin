@@ -1573,6 +1573,49 @@ test_morphology_erode_outside_valid :: proc(t: ^testing.T) {
 	testing.expect_value(t, d[(1 * 16 + 1) * 4 + 3], 0)
 }
 
+// The software backend's pixels are aligned whatever its allocator gives a
+// []u8: oksl reads half and f32 texels in place and refuses them unaligned.
+// An arena left at an odd address hands the next []u8 out odd.
+@(test)
+test_software_pixels_aligned :: proc(t: ^testing.T) {
+	buf := make([]u8, 1 << 20)
+	defer delete(buf)
+	arena: mem.Arena
+	mem.arena_init(&arena, buf)
+	odd := mem.arena_allocator(&arena)
+	b: Software_Backend
+	software_backend_init(&b, odd)
+	defer software_backend_destroy(&b)
+	c: Canvas
+	canvas_init(&c, software_backend(&b))
+	defer canvas_destroy(&c)
+	set_size(&c, 8, 8)
+	odd_next :: proc(a: mem.Allocator) {
+		for {
+			p, _ := mem.alloc(1, 1, a)
+			if uintptr(p) & 1 == 0 {
+				return
+			}
+		}
+	}
+	half: [8 * 8][4]f16
+	for &h in half {
+		h = {1, 0.5, 0.25, 1}
+	}
+	odd_next(odd)
+	src, _ := create_image_empty(&c, 8, 8, .RGBA16F)
+	update_image(&c, src, {.RGBA16F, slice.to_bytes(half[:]), 8, 8, 0}, 0, 0)
+	odd_next(odd)
+	dst, _ := create_image_empty(&c, 8, 8, .RGBA16F)
+	filter_image(&c, dst, Gaussian_Blur{sigma = 1}, src)
+	flush(&c)
+	for id in ([?]Image_Id{src, dst}) {
+		testing.expect_value(t, uintptr(raw_data(image_store_get(&c.images, id).image.pixels)) % 64, 0)
+	}
+	got := (^[4]f16)(&image_store_get(&c.images, dst).image.pixels[(4 * 8 + 4) * 8])^
+	testing.expect_value(t, got, [4]f16{1, 0.5, 0.25, 1})
+}
+
 // A gradient whose stops change every frame draws each frame as a fresh
 // canvas would, its ramps taken from the spares of frames before rather
 // than made anew, and the images kept stay few.

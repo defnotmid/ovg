@@ -188,6 +188,8 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 		sw_lanes_destroy(L)
 	}
 	delete(b.lanes_free)
+	// The modules were compiled from b.allocator (sw_programs_need).
+	context.allocator = b.allocator
 	for variants in b.programs {
 		for p in variants {
 			if p.module != nil {
@@ -235,9 +237,20 @@ sw_set_size :: proc(data: rawptr, width, height: u32, dpi: f32) {
 		return
 	}
 	delete(b.pixels, b.allocator)
-	b.pixels = make([]u8, int(width * height * 4), b.allocator)
+	b.pixels, _ = sw_make_pixels(int(width * height * 4), b.allocator)
 	b.width = width
 	b.height = height
+}
+
+// Pixels the backend owns, SW_PIXEL_ALIGN-aligned whatever the allocator
+// gives a []u8: oksl reads half and f32 texels in place and requires them
+// aligned, and a lent image's span is aligned within its block (sw_span).
+@(private = "file")
+SW_PIXEL_ALIGN :: 64
+
+@(private = "file")
+sw_make_pixels :: proc(n: int, allocator: mem.Allocator) -> ([]u8, mem.Allocator_Error) {
+	return mem.make_aligned([]u8, n, SW_PIXEL_ALIGN, allocator)
 }
 
 @(private = "file")
@@ -247,7 +260,7 @@ sw_alloc_image :: proc(data: rawptr, info: Image_Info) -> (Backend_Image, Error)
 		// Pixels are lent for each render (sw_lend).
 		return {}, nil
 	}
-	pixels, err := make([]u8, int(info.width * info.height * bytes_per_pixel(info.format)), b.allocator)
+	pixels, err := sw_make_pixels(int(info.width * info.height * bytes_per_pixel(info.format)), b.allocator)
 	if err != nil {
 		return {}, .Out_Of_Memory
 	}
@@ -496,7 +509,7 @@ sw_lend :: proc(b: ^Software_Backend, images: ^Image_Store) {
 	}
 	if len(b.transient) < total {
 		delete(b.transient, b.allocator)
-		b.transient, _ = make([]u8, total, b.allocator)
+		b.transient, _ = sw_make_pixels(total, b.allocator)
 	}
 	at := 0
 	for &slot in images.entries.slots {
@@ -1094,7 +1107,7 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 sw_blur_tmp :: proc(b: ^Software_Backend, n: int) -> []u8 {
 	if len(b.blur_tmp) < n {
 		delete(b.blur_tmp, b.allocator)
-		b.blur_tmp = make([]u8, n, b.allocator)
+		b.blur_tmp, _ = sw_make_pixels(n, b.allocator)
 	}
 	return b.blur_tmp[:n]
 }
