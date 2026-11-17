@@ -342,7 +342,7 @@ scene_filters_more :: proc(c: ^vg.Canvas, r: ^Resources) {
 }
 
 // feTurbulence: both types, many octaves, stitching, under scale and
-// rotation (the GPU's f32 noise against the software backend's f64).
+// rotation (the filter shader's f32 noise on both backends).
 scene_turbulence :: proc(c: ^vg.Canvas, r: ^Resources) {
 	ls := &r.layers
 	vg.layer_stack_begin(ls, c, W, H)

@@ -60,9 +60,8 @@ Shader_Type :: enum u8 {
 	Filter_Bloom_Add          = 22,
 }
 
-// A draw's paint (a row of `Frame.paints`). GPU backends upload these
-// packed (`pack_frag_uniforms`); the software backend evaluates the same
-// formulas.
+// A draw's paint (a row of `Frame.paints`). Every backend's shaders read
+// it packed (`pack_frag_uniforms`).
 Params :: struct {
 	scissor_mat:                 [12]f32,
 	paint_mat:                   [12]f32,

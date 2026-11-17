@@ -818,7 +818,7 @@ Program_Cpu :: struct {
 program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: vg.Pixel_Format, sampler: vg.Program_Sampler) {
 	p := (^Program_Cpu)(user)
 	s := sampler
-	oksl.run(&p.frag.program, uniforms, width, height, out, stride, &p.scratch, {sampler = s.sample, user = s.data, channel_sizes = s.sizes[:]})
+	oksl.run(&p.frag.program, uniforms, width, height, out, stride, &p.scratch, {channel_images = s.images[:], channel_sizes = s.sizes[:]})
 }
 
 scene_program :: proc(c: ^vg.Canvas, r: ^Resources) {

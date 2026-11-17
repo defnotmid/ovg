@@ -3,16 +3,18 @@ package ovg
 import "core:mem"
 import "core:slice"
 import "core:testing"
+import "deps:oksl"
 
 // Writes uv-derived colors, with the first uniform float as alpha, plus
-// channel 0 sampled at the pixel's uv.
+// channel 0's texel under the pixel (as a nearest lookup at its uv reads
+// it; transparent black unbound).
 @(private = "file")
 test_program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: []u8, stride: int, format: Pixel_Format, sampler: Program_Sampler) {
 	alpha := slice.reinterpret([]f32, uniforms)[0]
 	for y in 0 ..< height {
 		for x in 0 ..< width {
 			uv := [2]f32{(f32(x) + 0.5) / f32(width), (f32(y) + 0.5) / f32(height)}
-			s := sampler.sample(sampler.data, 0, uv, 0, 0)
+			s := test_channel_texel(sampler.images[0], uv)
 			if format == .RGBA16F {
 				// Unclamped: the channel doubled, alpha as given.
 				(^[4]f16)(&out[y * stride + x * 8])^ = {f16(s.r * 2), f16(s.g * 2), f16(uv.x * 4), f16(alpha)}
@@ -25,6 +27,23 @@ test_program_cpu :: proc(user: rawptr, uniforms: []u8, width, height: int, out: 
 			p[3] = u8(alpha * 255)
 		}
 	}
+}
+
+@(private = "file")
+test_channel_texel :: proc(img: oksl.Channel_Image, uv: [2]f32) -> [4]f32 {
+	if len(img.pixels) == 0 {
+		return {}
+	}
+	i := int(uv.y * f32(img.height)) * img.width + int(uv.x * f32(img.width))
+	#partial switch img.format {
+	case .Rgba8:
+		p := img.pixels[i * 4:]
+		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])} / 255
+	case .Rgba16f:
+		p := (^[4]f16)(&img.pixels[i * 8])^
+		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])}
+	}
+	return {}
 }
 
 // Keeps the channel sizes the sampler carries in `user`.

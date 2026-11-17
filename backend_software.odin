@@ -10,10 +10,10 @@ import "core:sync"
 import common "deps:oicut/common"
 import "deps:oksl"
 
-// CPU rasterizer writing RGBA8. It runs the GPU's shape shaders (shaders/)
-// on oksl's CPU program and the filters' same formulas, so its output is a
-// pixel reference for GPU backends: one sample at each pixel center,
-// blending in [0, 1] with rounding to 8 bits.
+// CPU rasterizer writing RGBA8. It runs the GPU backends' shaders
+// (shaders/) on oksl's CPU program, textures bound to oksl as images, so its
+// output is a pixel reference for GPU backends: one sample at each pixel
+// center, blending in [0, 1] with rounding to 8 bits.
 Software_Backend :: struct {
 	allocator: mem.Allocator,
 	pixels:    []u8,
@@ -22,7 +22,7 @@ Software_Backend :: struct {
 	target:    Image_Id,
 	// The target's `Cmd_Set_Render_Target.origin`.
 	origin:    [2]i32,
-	// The intermediate of a blur's two passes, reused.
+	// A filter's intermediate (filter_plan), reused.
 	blur_tmp:  []u8,
 	// A run's draws by band (sw_draw_run): band k's are
 	// `binned[starts[k]:starts[k + 1]]`, in drawing order; `bounds` holds
@@ -50,9 +50,9 @@ Software_Backend :: struct {
 	// The last frame's velocity and nearness (software_backend_velocity).
 	velocity:  [dynamic][2]f32,
 	nearness:  [dynamic]f32,
-	// The shape units (shaders.odin) as oksl's CPU programs, [1] each's
-	// motion variant: the shading the SDL_GPU backend's shaders do, from the
-	// same source. Each is compiled the first time a run draws with it.
+	// The units (shaders.odin) as oksl's CPU programs, [1] each's motion
+	// variant: the shading the SDL_GPU backend's shaders do, from the same
+	// source. Each is compiled the first time a run draws with it.
 	programs:  [Sw_Unit][2]Sw_Program_Unit,
 	// The frame's paints and motions as the shaders read them.
 	paint_rows:  [dynamic][14][4]f32,
@@ -75,26 +75,33 @@ Software_Backend :: struct {
 	lanes_lock:    sync.Mutex,
 }
 
-// The units the software backend runs on oksl's CPU program.
+// The units the software backend runs on oksl's CPU program: every one but
+// the clears' (sw_clear_rect) and the velocity resolve's (a copy out of the
+// screen's twin, sw_resolve_velocity).
 @(private = "file")
 Sw_Unit :: enum u8 {
 	Shape,
 	Shape_Box,
 	Shape_Group,
 	Marker_Group,
+	Filter,
+	Composite_Velocity,
 }
 
 @(private = "file", rodata)
 SW_UNITS := [Sw_Unit]Shader_Unit {
-	.Shape        = .Shape,
-	.Shape_Box    = .Shape_Box,
-	.Shape_Group  = .Shape_Group,
-	.Marker_Group = .Marker_Group,
+	.Shape              = .Shape,
+	.Shape_Box          = .Shape_Box,
+	.Shape_Group        = .Shape_Group,
+	.Marker_Group       = .Marker_Group,
+	.Filter             = .Filter,
+	.Composite_Velocity = .Composite_Velocity,
 }
 
 // A unit's CPU program and where its uniforms are in its uniform block
-// (-1: it reads none): uv, data, and the map from drawing coordinates to
-// rc (rc_linear, rc_offset). It has no stage inputs.
+// (-1: it reads none): the shape units' uv, data and map from drawing
+// coordinates to rc (rc_linear, rc_offset), the quad units' quad_tc and
+// paint. It has no stage inputs.
 @(private = "file")
 Sw_Program_Unit :: struct {
 	module:        ^oksl.Module,
@@ -102,6 +109,8 @@ Sw_Program_Unit :: struct {
 	data_at:       int,
 	rc_linear_at:  int,
 	rc_offset_at:  int,
+	quad_tc_at:    int,
+	paint_at:      int,
 }
 
 // A group of a run: its grid in `group_words` and its first member's row
@@ -143,16 +152,16 @@ sw_programs_need :: proc(b: ^Software_Backend, needs: bit_set[Sw_Unit], motion: 
 			continue
 		}
 		unit := SW_UNITS[u]
-		prelude := strings.concatenate({SHADER_CPU_DEFINES, shader_prelude(unit, motion == 1, context.temp_allocator)}, context.temp_allocator)
+		prelude := strings.concatenate({shader_cpu_defines(unit), shader_prelude(unit, motion == 1, context.temp_allocator)}, context.temp_allocator)
 		context.allocator = b.allocator
 		m, _, ok := oksl.compile(SHADER_SOURCES[unit].source, {profile = .Glsl, prelude = prelude, no_spirv = true, no_msl = true})
-		assert(ok, "ovg's shape shaders compile for oksl's CPU program")
+		assert(ok, "ovg's shaders compile for oksl's CPU program")
 		assert(m.block_size <= SW_UNIFORM_BYTES && len(m.stage_inputs) == 0)
 		at :: proc(m: ^oksl.Module, name: string) -> int {
 			u, has := oksl.find_uniform(m, name)
 			return u.offset if has else -1
 		}
-		p^ = {module = m, uv_at = at(m, "uv"), data_at = at(m, "data"), rc_linear_at = at(m, "rc_linear"), rc_offset_at = at(m, "rc_offset")}
+		p^ = {module = m, uv_at = at(m, "uv"), data_at = at(m, "data"), rc_linear_at = at(m, "rc_linear"), rc_offset_at = at(m, "rc_offset"), quad_tc_at = at(m, "quad_tc"), paint_at = at(m, "quad_paint")}
 	}
 }
 
@@ -434,26 +443,31 @@ sw_twin_of :: proc(b: ^Software_Backend, images: ^Image_Store, target: Render_Ta
 	return {b.twins[b.twin_at[id.key.idx]:][:e.info.width * e.info.height], e.info.width, e.info.height}
 }
 
-// A layer's motion onto the target's twin (Cmd_Composite_Velocity), over
-// the part of its window inside the target.
+// A layer's motion onto the target's twin (Cmd_Composite_Velocity) with
+// velocity.frag, over the part of its window inside the target: its twin and
+// its coverage read nearest at the pixel, as the GPU draws it.
 @(private = "file")
 sw_composite_velocity :: proc(b: ^Software_Backend, images: ^Image_Store, c: Cmd_Composite_Velocity) {
 	src := sw_twin_of(b, images, c.source, true)
 	alpha, ok := lookup_texture(images, c.alpha)
-	if b.twin.pixels == nil || src.pixels == nil || !ok {
+	if b.twin.pixels == nil || src.pixels == nil || !ok || c.w <= 0 || c.h <= 0 {
 		return
 	}
+	sw_programs_need(b, {.Composite_Velocity}, 0)
 	// The window's corner on the target.
 	wx, wy := i32(c.x) - b.origin.x, i32(c.y) - b.origin.y
-	x0, y0 := max(wx, 0), max(wy, 0)
-	x1 := min(wx + i32(c.w), i32(b.twin.width), wx + i32(src.width), wx + i32(alpha.width))
-	y1 := min(wy + i32(c.h), i32(b.twin.height), wy + i32(src.height), wy + i32(alpha.height))
-	for y in y0 ..< y1 {
-		for x in x0 ..< x1 {
-			sx, sy := u32(x - wx), u32(y - wy)
-			twin_composite(&b.twin.pixels[int(y) * int(b.twin.width) + int(x)], src.pixels[int(sy) * int(src.width) + int(sx)], fetch(alpha, sx, sy)[3], c.opacity)
-		}
+	coverage := sw_channel(alpha)
+	coverage.filter, coverage.wrap = .Nearest, {}
+	job := Sw_Quad_Pass {
+		b       = b,
+		unit    = b.programs[.Composite_Velocity][0],
+		raster  = {twin = b.twin, x0 = max(wx, 0), y0 = max(wy, 0), x1 = min(wx + i32(c.w), i32(b.twin.width)), y1 = min(wy + i32(c.h), i32(b.twin.height))},
+		quad_tc = {1 / c.w, 1 / c.h, -f32(wx) / c.w, -f32(wy) / c.h},
+		images  = {oksl.channel_image(src.pixels, int(src.width), int(src.height)), coverage},
 	}
+	// The opacity rides in the paint's first word.
+	job.paint[0] = {c.opacity, 0, 0, 0}
+	sw_bands(b, int(b.twin.height), &job, sw_quad_band)
 }
 
 // The screen's twin as velocity and nearness (software_backend_velocity).
@@ -466,19 +480,6 @@ sw_resolve_velocity :: proc(b: ^Software_Backend) {
 		b.velocity[i] = t.xy
 		b.nearness[i] = t.z
 	}
-}
-
-// A layer's or a group's motion `g` (a twin pixel) over the twin's pixel
-// `d`, faded by `opacity` and cut to the coverage `a` it composites with
-// where that is less (a clip or mask): its motion at the layer's coverage,
-// or where a filter spread the layer, at its content's own.
-@(private = "file")
-twin_composite :: #force_inline proc "contextless" (d: ^[4]f32, g: [4]f32, a, opacity: f32) {
-	s := opacity
-	if g[3] > a {
-		s *= a / g[3]
-	}
-	d^ = g * s + d^ * (1 - g[3] * s)
 }
 
 // Gives every `.Transient` image of the store pixels for this render,
@@ -701,9 +702,7 @@ sw_run_band :: proc(data: rawptr, y0, y1: int) {
 		sw_band_command(run, items[i].cmd, items[i:j], top, bottom, lanes)
 		i = j
 	}
-	sync.lock(&b.lanes_lock)
-	append(&b.lanes_free, lanes)
-	sync.unlock(&b.lanes_lock)
+	sw_lanes_give(b, lanes)
 }
 
 // Pixels are addressed in drawing coordinates: (x, y) is target pixel
@@ -762,8 +761,11 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i
 		sw_clear_rect(&r, c)
 	case Cmd_Draw_Shapes:
 		b := run.b
-		tex: Sw_Shader_Texture
-		tex.tex, tex.ok = lookup_texture(run.images, cmd.image)
+		// The draw's image as `tex`; white without one, as the GPU binds then.
+		textures := [2]oksl.Channel_Image{sw_white(), sw_white()}
+		if tex, ok := lookup_texture(run.images, cmd.image); ok {
+			textures[0] = sw_channel(tex)
+		}
 		// With a twin, the units' motion variants, whose motion goes over it.
 		motion := int(r.twin.pixels != nil)
 		paints := slice.reinterpret([]u32, b.paint_rows[:])
@@ -775,7 +777,9 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i
 			// drawing coordinates.
 			to_cells := Transform2D{1 / grid.cell.x, 0, 0, 1 / grid.cell.y, -grid.area.minx / grid.cell.x, -grid.area.miny / grid.cell.y}
 			buffers := [4][]u32{paints, b.group_words[:], slice.reinterpret([]u32, b.group_rows[:]), slice.reinterpret([]u32, b.group_motions[:])}
-			sw_shade_rect(lanes, &r, b.programs[unit][motion], sw_pixels(&r, grid.area), to_cells, {}, {u32(grid.head), c.group - 1, group.first, 0}, buffers[:], &tex)
+			prog := b.programs[unit][motion]
+			uniforms := sw_shape_uniforms(prog, to_cells, {}, {u32(grid.head), c.group - 1, group.first, 0})
+			sw_shade_rect(lanes, &r, prog, sw_pixels(&r, grid.area), uniforms[:], buffers[:], textures[:])
 			return
 		}
 		for it in items {
@@ -784,7 +788,9 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i
 			uv, data := shader_instance_inputs(inst, 0)
 			data.w = it.inst
 			buffers := [4][]u32{paints, instance_words(inst, frame.shape_words), nil, slice.reinterpret([]u32, b.motion_rows[:])}
-			sw_shade_rect(lanes, &r, b.programs[unit][motion], sw_pixels(&r, b.bounds[it.inst]), transform_inverse(inst.transform), uv, data, buffers[:], &tex)
+			prog := b.programs[unit][motion]
+			uniforms := sw_shape_uniforms(prog, transform_inverse(inst.transform), uv, data)
+			sw_shade_rect(lanes, &r, prog, sw_pixels(&r, b.bounds[it.inst]), uniforms[:], buffers[:], textures[:])
 		}
 	}
 }
@@ -848,27 +854,43 @@ lookup_texture :: proc(images: ^Image_Store, id: Image_Id) -> (Sw_Texture, bool)
 	if entry == nil || entry.image.pixels == nil {
 		return {}, false
 	}
-	// `sample` reads it unchecked: every texel must be there.
-	if len(entry.image.pixels) < int(entry.info.width) * int(entry.info.height) * int(bytes_per_pixel(entry.info.format)) {
+	// Bound to oksl, and `fetch` reads it unchecked: every texel must be
+	// there.
+	if entry.info.width == 0 || entry.info.height == 0 || len(entry.image.pixels) < int(entry.info.width) * int(entry.info.height) * int(bytes_per_pixel(entry.info.format)) {
 		return {}, false
 	}
 	return {entry.image.pixels, entry.info.width, entry.info.height, entry.info.format, entry.info.flags}, true
 }
 
+// `t` as a shader's texture (a channel oksl reads itself), filtered and
+// wrapped by its flags as the GPU backends' samplers are (Nearest, Repeat_X,
+// Repeat_Y), its texels as stored (Gray8 and Gray16 are (g, 0, 0, 1)).
 @(private = "file")
-mix4 :: #force_inline proc "contextless" (a, b: [4]f32, t: f32) -> [4]f32 {
-	return a * (1 - t) + b * t
+sw_channel :: proc "contextless" (t: Sw_Texture) -> oksl.Channel_Image {
+	@(static, rodata)
+	FORMATS := [Pixel_Format]oksl.Channel_Format {
+		.RGBA8   = .Rgba8,
+		.Gray8   = .Gray8,
+		.Gray16  = .Gray16,
+		.RGBA16F = .Rgba16f,
+	}
+	return {
+		format = FORMATS[t.format],
+		pixels = t.pixels,
+		width  = int(t.width),
+		height = int(t.height),
+		filter = .Nearest if .Nearest in t.flags else .Linear,
+		wrap   = {.Repeat if .Repeat_X in t.flags else .Clamp, .Repeat if .Repeat_Y in t.flags else .Clamp},
+	}
 }
 
+@(private = "file", rodata)
+SW_WHITE := [4]u8{255, 255, 255, 255}
+
+// One white texel: the texture of a draw without an image.
 @(private = "file")
-apply_tex_type :: #force_inline proc "contextless" (c: [4]f32, tex_type: f32) -> [4]f32 {
-	switch int(tex_type) {
-	case 1:
-		return {c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]}
-	case 2:
-		return {c[0], c[0], c[0], c[0]}
-	}
-	return c
+sw_white :: proc "contextless" () -> oksl.Channel_Image {
+	return {format = .Rgba8, pixels = SW_WHITE[:], width = 1, height = 1}
 }
 
 // ---- texels -------------------------------------------------------------------------
@@ -905,57 +927,6 @@ decode_texel :: #force_inline proc "contextless" (pixels: [^]u8, i: int, format:
 @(private = "file")
 half_to_f32 :: #force_inline proc "contextless" (h: u16) -> f32 {
 	return transmute(f32)(transmute(u32)(transmute(f32)(u32(h & 0x7fff) << 13) * 0h77800000) | u32(h & 0x8000) << 16)
-}
-
-@(private = "file")
-wrap_coord :: #force_inline proc "contextless" (c: i32, dim: u32, repeat: bool) -> u32 {
-	d := i32(dim)
-	if repeat {
-		r := c % d
-		return u32(r + d if r < 0 else r)
-	}
-	return u32(clamp(c, 0, d - 1))
-}
-
-// i32(math.floor(x)) without the call: the conversion truncates toward 0,
-// one less below 0 unless x is whole. Out of range it is min(i32) as the
-// conversion of the floor is.
-@(private = "file")
-floor_i32 :: #force_inline proc "contextless" (x: f32) -> i32 {
-	i := i32(x)
-	return i - 1 if f32(i) > x && i != min(i32) else i
-}
-
-// GPU texture lookup at normalized (u, v) honouring repeat and nearest flags.
-// Unchecked: lookup_texture made `t` whole, and wrap_coord keeps every texel
-// it reads inside it.
-@(private = "file")
-sample :: proc "contextless" (t: Sw_Texture, u, v: f32) -> [4]f32 {
-	if t.width == 0 || t.height == 0 {
-		return {}
-	}
-	rx := .Repeat_X in t.flags
-	ry := .Repeat_Y in t.flags
-	fw, fh := f32(t.width), f32(t.height)
-	if .Nearest in t.flags {
-		x := wrap_coord(floor_i32(u * fw), t.width, rx)
-		y := wrap_coord(floor_i32(v * fh), t.height, ry)
-		return decode_texel(raw_data(t.pixels), int(y * t.width + x), t.format)
-	}
-	fx := u * fw - 0.5
-	fy := v * fh - 0.5
-	ix := floor_i32(fx)
-	iy := floor_i32(fy)
-	tx := fx - f32(ix)
-	ty := fy - f32(iy)
-	x0 := wrap_coord(ix, t.width, rx)
-	x1 := wrap_coord(ix + 1, t.width, rx)
-	y0 := wrap_coord(iy, t.height, ry)
-	y1 := wrap_coord(iy + 1, t.height, ry)
-	p, w := raw_data(t.pixels), t.width
-	top := mix4(decode_texel(p, int(y0 * w + x0), t.format), decode_texel(p, int(y0 * w + x1), t.format), tx)
-	bot := mix4(decode_texel(p, int(y1 * w + x0), t.format), decode_texel(p, int(y1 * w + x1), t.format), tx)
-	return mix4(top, bot, ty)
 }
 
 @(private = "file")
@@ -1071,11 +1042,10 @@ blend_texel :: #force_inline proc "contextless" (t: Sw_Target, x, y: u32, s: Com
 
 // ---- image filters -------------------------------------------------------------------
 
-// Runs one image filter (see `Image_Filter`). Inputs are read as a GPU
-// sampler returns them and converted to premultiplied color by their
-// `tex_type`, as the shader does; every pixel is computed before it is
-// written, so the target may alias an input. Each pass is a sweep of row
-// bands (sw_bands); a two-pass filter's second reads the whole first.
+// Runs one image filter with the filter unit (shaders/filter.frag), in the
+// passes `filter_plan` lays out for every backend: each a quad over its
+// output in row bands (sw_quad_band), a two-pass filter's second reading
+// the whole first from the intermediate.
 @(private = "file")
 sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Image_Id, filter: Image_Filter) {
 	src, src_ok := lookup_texture(images, cmd.image)
@@ -1083,100 +1053,43 @@ sw_filter_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command
 	if !src_ok || dst_entry == nil || dst_entry.image.pixels == nil {
 		return
 	}
+	backdrop := filter_backdrop(filter)
+	back, back_ok := lookup_texture(images, backdrop)
+	back_info: Maybe(Image_Info)
+	if back_ok {
+		back_info = Image_Info{back.flags, back.width, back.height, back.format}
+	}
+	src_info := Image_Info{src.flags, src.width, src.height, src.format}
+	plan, ok := filter_plan(filter, src_info, dst_entry.info, back_info, target == cmd.image || target == backdrop)
+	if !ok {
+		return
+	}
 	dst := Sw_Target{dst_entry.image.pixels, dst_entry.info.width, dst_entry.info.height, dst_entry.info.format}
-	if t, is_turbulence := filter.(Turbulence); is_turbulence {
-		// The source is the GPU's lattice image; the seed makes the f64 one.
-		if dst.format == .RGBA8 || dst.format == .RGBA16F {
-			sw_turbulence(b, dst, t)
+	mid: Sw_Texture
+	if plan.count == 2 || plan.copy {
+		info := src_info if plan.count == 2 else dst_entry.info
+		mid = {sw_blur_tmp(b, int(info.width * info.height * bytes_per_pixel(info.format))), info.width, info.height, info.format, info.flags}
+	}
+	sw_programs_need(b, {.Filter}, 0)
+	for pass in plan.passes[:plan.count] {
+		from := mid if pass.from_mid else src
+		to := Sw_Target{mid.pixels, mid.width, mid.height, mid.format} if pass.to_mid else dst
+		job := Sw_Quad_Pass {
+			b       = b,
+			unit    = b.programs[.Filter][0],
+			raster  = {target = to, x1 = i32(to.width), y1 = i32(to.height), blend = composite_state_from_op(.Copy)},
+			quad_tc = {1 / f32(to.width), 1 / f32(to.height), 0, 0},
+			paint   = pass.paint,
+			images  = {sw_channel(from), sw_channel(back) if back_ok else {}},
 		}
-		return
+		sw_bands(b, int(to.height), &job, sw_quad_band)
 	}
-	_, is_bright := filter.(Bloom_Bright)
-	if !is_bright && (dst.width != src.width || dst.height != src.height) {
-		return
+	if plan.copy {
+		copy(dst.pixels, mid.pixels)
 	}
-	src_tt := tex_type_for({src.flags, src.width, src.height, src.format})
-	job := Sw_Filter{src = src, src_tt = src_tt, dst = dst, filter = filter}
-	rows := int(dst.height)
-	if is_bright {
-		sw_bands(b, rows, &job, sw_bloom_bright_band)
-		return
-	}
-
-	if sx, sy, edge, is_blur := blur_params(filter); is_blur {
-		tmp := sw_blur_tmp(b, len(src.pixels))
-		job.edge = edge
-		job.dst = {tmp, src.width, src.height, src.format}
-		job.dir, job.sigma, job.tex_type = {1, 0}, sx, src_tt
-		sw_bands(b, rows, &job, sw_blur_band)
-		// The intermediate already holds premultiplied color.
-		job.src = {tmp, src.width, src.height, src.format, src.flags}
-		job.dst = dst
-		job.dir, job.sigma, job.tex_type = {0, 1}, sy, 2 if src.format == .Gray8 || src.format == .Gray16 else 0
-		sw_bands(b, rows, &job, sw_blur_band)
-		return
-	}
-
-	if m, is_morph := filter.(Morphology); is_morph {
-		tmp := sw_blur_tmp(b, len(src.pixels))
-		job.morph = m
-		job.dst = {tmp, src.width, src.height, src.format}
-		job.axis, job.tex_type = 0, src_tt
-		sw_bands(b, rows, &job, sw_morphology_band)
-		job.src = {tmp, src.width, src.height, src.format, src.flags}
-		job.dst = dst
-		job.axis, job.tex_type = 1, 2 if src.format == .Gray8 || src.format == .Gray16 else 0
-		sw_bands(b, rows, &job, sw_morphology_band)
-		return
-	}
-
-	if id := filter_backdrop(filter); image_id_valid(id) {
-		ok: bool
-		job.back, ok = lookup_texture(images, id)
-		_, is_lut := filter.(Component_Transfer)
-		_, is_glow := filter.(Bloom_Add)
-		if !ok || (!is_lut && !is_glow && (job.back.width != src.width || job.back.height != src.height)) {
-			return
-		}
-		job.back_tt = tex_type_for({job.back.flags, job.back.width, job.back.height, job.back.format})
-	}
-	#partial switch v in filter {
-	case Lighting, Tile, Displacement_Map, Convolve_Matrix:
-		// Neighbourhood filters: the target may alias the source.
-		if raw_data(dst.pixels) == raw_data(src.pixels) || raw_data(dst.pixels) == raw_data(job.back.pixels) {
-			job.dst.pixels = sw_blur_tmp(b, len(dst.pixels))
-		}
-		sw_bands(b, rows, &job, proc(data: rawptr, y0, y1: int) {
-			j := (^Sw_Filter)(data)
-			neighbourhood_filter(j.src, j.src_tt, j.back, j.back_tt, j.dst, j.filter, y0, y1)
-		})
-		if raw_data(job.dst.pixels) != raw_data(dst.pixels) {
-			copy(dst.pixels, job.dst.pixels)
-		}
-		return
-	}
-	sw_bands(b, rows, &job, sw_pixel_filter_band)
 }
 
-// One filter pass's inputs and output, shared by its bands.
-@(private = "file")
-Sw_Filter :: struct {
-	src:      Sw_Texture,
-	src_tt:   f32,
-	back:     Sw_Texture,
-	back_tt:  f32,
-	dst:      Sw_Target,
-	filter:   Image_Filter,
-	// A blur or morphology pass.
-	tex_type: f32,
-	dir:      [2]i32,
-	sigma:    f32,
-	edge:     Blur_Edge,
-	morph:    Morphology,
-	axis:     int,
-}
-
-// The scratch between a two-pass filter's passes, `n` bytes.
+// The intermediate of a filter's passes, `n` bytes.
 @(private = "file")
 sw_blur_tmp :: proc(b: ^Software_Backend, n: int) -> []u8 {
 	if len(b.blur_tmp) < n {
@@ -1186,98 +1099,42 @@ sw_blur_tmp :: proc(b: ^Software_Backend, n: int) -> []u8 {
 	return b.blur_tmp[:n]
 }
 
+// A quad unit drawn over the raster's area as the GPU draws a quad over it
+// (its pixels are drawing coordinates): its paint `paint`, `quad_tc`
+// the map from a pixel's centre to ftcoord, `images` its `tex` and
+// `glyphtex`. A raster without a target takes the unit's output as motion
+// over its twin.
 @(private = "file")
-sw_blur_band :: proc(data: rawptr, y0, y1: int) {
-	j := (^Sw_Filter)(data)
-	blur_pass(j.src, j.dst, j.dir, j.sigma, j.tex_type, j.edge, y0, y1)
+Sw_Quad_Pass :: struct {
+	b:       ^Software_Backend,
+	unit:    Sw_Program_Unit,
+	raster:  Raster,
+	quad_tc: [4]f32,
+	paint:   [14][4]f32,
+	images:  [2]oksl.Channel_Image,
 }
 
+// Rows [y0, y1) of a quad pass, with a set of the backend's shading memory.
 @(private = "file")
-sw_morphology_band :: proc(data: rawptr, y0, y1: int) {
-	j := (^Sw_Filter)(data)
-	morphology_pass(j.src, j.dst, j.morph, j.axis, j.tex_type, y0, y1)
-}
-
-// The filters that read only the pixel under them (and the backdrop's).
-@(private = "file")
-sw_bloom_bright_band :: proc(data: rawptr, y0, y1: int) {
-	j := (^Sw_Filter)(data)
-	v := j.filter.(Bloom_Bright)
-	above :: proc "contextless" (t: Sw_Texture, tt: f32, v: Bloom_Bright, x, y: u32) -> [4]f32 {
-		c := apply_tex_type(fetch(t, x, y), tt)
-		if v.encoded {
-			c = color_space_pixel(c, true)
-		}
-		return {max(c.r - v.threshold, 0), max(c.g - v.threshold, 0), max(c.b - v.threshold, 0), max(c.a - v.threshold, 0)}
-	}
-	for y in u32(y0) ..< u32(y1) {
-		for x in 0 ..< j.dst.width {
-			ax, ay := min(x * 2, j.src.width - 1), min(y * 2, j.src.height - 1)
-			bx, by := min(ax + 1, j.src.width - 1), min(ay + 1, j.src.height - 1)
-			sum := above(j.src, j.src_tt, v, ax, ay) + above(j.src, j.src_tt, v, bx, ay) + above(j.src, j.src_tt, v, ax, by) + above(j.src, j.src_tt, v, bx, by)
-			store_texel(j.dst, x, y, sum * 0.25)
-		}
-	}
-}
-
-sw_pixel_filter_band :: proc(data: rawptr, y0, y1: int) {
-	j := (^Sw_Filter)(data)
-	src, src_tt, back, back_tt, dst := j.src, j.src_tt, j.back, j.back_tt, j.dst
-	for y in u32(y0) ..< u32(y1) {
-		for x in 0 ..< dst.width {
-			s := apply_tex_type(fetch(src, x, y), src_tt)
-			out: [4]f32
-			#partial switch v in j.filter {
-			case Color_Matrix:
-				out = color_matrix_pixel(v.m, s)
-			case Color_Space_Convert:
-				out = color_space_pixel(s, v.to_linear)
-			case Blend:
-				out = blend_pixel(v.mode, s, apply_tex_type(fetch(back, x, y), back_tt))
-			case Composite:
-				out = composite_pixel(v.op, v.k, s, apply_tex_type(fetch(back, x, y), back_tt))
-			case Bloom_Add:
-				glow := apply_tex_type(sample(back, (f32(x) + 0.5) * v.uv.x + v.uv.z, (f32(y) + 0.5) * v.uv.y + v.uv.w), back_tt)
-				light := color_space_pixel(s, true) if v.encoded else s
-				out = composite_pixel(.Arithmetic, {0, 1, v.intensity, 0}, light, glow)
-				if v.encoded {
-					out = color_space_pixel(out, false)
-				}
-			case Component_Transfer:
-				us := unpremultiply(s)
-				for k in 0 ..< 4 {
-					us[k] = fetch(back, u32(component_transfer_index(us[k])), 0)[k]
-				}
-				out = premultiply(us)
-			}
-			store_texel(dst, x, y, out)
-		}
-	}
-}
-
-@(private = "file")
-Sw_Turbulence :: struct {
-	dst:     Sw_Target,
-	t:       Turbulence,
-	lattice: ^Turbulence_Lattice,
-}
-
-@(private = "file")
-sw_turbulence :: proc(b: ^Software_Backend, dst: Sw_Target, t: Turbulence) {
-	lattice: Turbulence_Lattice
-	turbulence_init(&lattice, t.seed)
-	job := Sw_Turbulence{dst, t, &lattice}
-	if dst.format == .RGBA16F {
-		sw_bands(b, int(dst.height), &job, proc(data: rawptr, y0, y1: int) {
-			j := (^Sw_Turbulence)(data)
-			turbulence_fill(j.dst.pixels, int(j.dst.width), int(j.dst.height), j.t, j.lattice, y0, y1, true)
-		})
+sw_quad_band :: proc(data: rawptr, y0, y1: int) {
+	job := (^Sw_Quad_Pass)(data)
+	r := job.raster
+	r.y0, r.y1 = max(r.y0, i32(y0)), min(r.y1, i32(y1))
+	if r.y0 >= r.y1 || r.x0 >= r.x1 {
 		return
 	}
-	sw_bands(b, int(dst.height), &job, proc(data: rawptr, y0, y1: int) {
-		j := (^Sw_Turbulence)(data)
-		turbulence_fill(j.dst.pixels, int(j.dst.width), int(j.dst.height), j.t, j.lattice, y0, y1, false)
-	})
+	lanes := sw_lanes_take(job.b)
+	// oksl's Scratch grows from context.allocator.
+	context.allocator = runtime.heap_allocator()
+	uniforms: [SW_UNIFORM_BYTES]u8
+	if job.unit.quad_tc_at >= 0 {
+		(^[4]f32)(&uniforms[job.unit.quad_tc_at])^ = job.quad_tc
+	}
+	if job.unit.paint_at >= 0 {
+		(^[14][4]f32)(&uniforms[job.unit.paint_at])^ = job.paint
+	}
+	sw_shade_rect(lanes, &r, job.unit, {r.x0, r.y0, r.x1, r.y1}, uniforms[:job.unit.module.block_size], nil, job.images[:])
+	sw_lanes_give(job.b, lanes)
 }
 
 // ---- row bands -----------------------------------------------------------------------
@@ -1315,165 +1172,6 @@ sw_band_range :: proc(data: rawptr, first, end: int) {
 	}
 }
 
-// One direction (`axis` 0 = x) of a morphology box: min or max over the
-// taps inside the valid rectangle.
-@(private = "file")
-morphology_pass :: proc(src: Sw_Texture, dst: Sw_Target, m: Morphology, axis: int, tex_type: f32, y0, y1: int) {
-	rf := clamp(m.radius[axis], 0, MORPHOLOGY_MAX_RADIUS)
-	r := i32(rf)
-	frac := rf - f32(r)
-	op :: #force_inline proc(a, b: [4]f32, dilate: bool) -> [4]f32 {
-		return {max(a.r, b.r), max(a.g, b.g), max(a.b, b.b), max(a.a, b.a)} if dilate else {min(a.r, b.r), min(a.g, b.g), min(a.b, b.b), min(a.a, b.a)}
-	}
-	lo, hi := i32(m.valid[axis]), i32(m.valid[axis + 2]) - 1
-	for y in u32(y0) ..< u32(y1) {
-		for x in 0 ..< dst.width {
-			p := [2]i32{i32(x), i32(y)}
-			c := p[axis]
-			t0, t1 := max(c - r, lo), min(c + r, hi)
-			if t0 > t1 {
-				store_texel(dst, x, y, {})
-				continue
-			}
-			acc: [4]f32 = 0 if m.dilate else 1
-			for t in t0 ..= t1 {
-				q := p
-				q[axis] = t
-				acc = op(acc, fetch(src, u32(q.x), u32(q.y)), m.dilate)
-			}
-			if frac > 0 {
-				ring := acc
-				for t in ([2]i32{c - r - 1, c + r + 1}) {
-					if t < lo || t > hi do continue
-					q := p
-					q[axis] = t
-					ring = op(ring, fetch(src, u32(q.x), u32(q.y)), m.dilate)
-				}
-				acc += (ring - acc) * frac
-			}
-			store_texel(dst, x, y, apply_tex_type(acc, tex_type))
-		}
-	}
-}
-
-// Lighting, tiling, displacement and convolution, pixel by pixel as the
-// shader's `render_neighbourhood` does.
-@(private = "file")
-neighbourhood_filter :: proc(src: Sw_Texture, src_tt: f32, back: Sw_Texture, back_tt: f32, dst: Sw_Target, filter: Image_Filter, y0, y1: int) {
-	texel :: #force_inline proc(t: Sw_Texture, tt: f32, x, y: i32) -> [4]f32 {
-		if x < 0 || y < 0 || x >= i32(t.width) || y >= i32(t.height) {
-			return {}
-		}
-		return apply_tex_type(fetch(t, u32(x), u32(y)), tt)
-	}
-	for y in i32(y0) ..< i32(y1) {
-		for x in 0 ..< i32(dst.width) {
-			out: [4]f32
-			#partial switch v in filter {
-			case Lighting:
-				vr := v.valid
-				fx, fy := f32(x), f32(y)
-				left, right := fx - 1 >= vr[0], fx + 1 < vr[2]
-				up, down := fy - 1 >= vr[1], fy + 1 < vr[3]
-				a: [3][3]f32
-				for j in 0 ..< 3 {
-					for i in 0 ..< 3 {
-						a[j][i] = texel(src, src_tt, x + i32(i) - 1, y + i32(j) - 1).a
-					}
-				}
-				out = lighting_pixel(v, a, left, right, up, down, fx, fy)
-			case Tile:
-				r := [4]i32{i32(math.round(v.rect[0])), i32(math.round(v.rect[1])), i32(math.round(v.rect[2])), i32(math.round(v.rect[3]))}
-				if r[2] >= 1 && r[3] >= 1 {
-					tx := ((x - r[0]) % r[2] + r[2]) % r[2]
-					ty := ((y - r[1]) % r[3] + r[3]) % r[3]
-					out = texel(src, src_tt, r[0] + tx, r[1] + ty)
-				}
-			case Displacement_Map:
-				m := texel(back, back_tt, x, y)
-				o := displacement_offset(v, m, f32(x), f32(y))
-				vr := v.valid
-				if o.x >= vr[0] && o.y >= vr[1] && o.x < vr[2] && o.y < vr[3] {
-					out = texel(src, src_tt, i32(o.x), i32(o.y))
-				}
-			case Convolve_Matrix:
-				out = convolve_pixel(v, src, src_tt, x, y)
-			}
-			store_texel(dst, u32(x), u32(y), out)
-		}
-	}
-}
-
-@(private = "file")
-convolve_pixel :: proc(v: Convolve_Matrix, src: Sw_Texture, src_tt: f32, x, y: i32) -> [4]f32 {
-	vr := [4]i32{i32(v.valid[0]), i32(v.valid[1]), i32(v.valid[2]), i32(v.valid[3])}
-	vw, vh := vr[2] - vr[0], vr[3] - vr[1]
-	if vw <= 0 || vh <= 0 {
-		return {}
-	}
-	load :: #force_inline proc(src: Sw_Texture, tt: f32, x, y: i32, unpremul: bool) -> [4]f32 {
-		c := apply_tex_type(fetch(src, u32(x), u32(y)), tt)
-		return unpremultiply(c) if unpremul else c
-	}
-	sum: [4]f32
-	for oy in 0 ..< v.order.y {
-		for ox in 0 ..< v.order.x {
-			tx := x - v.target.x + ox
-			ty := y - v.target.y + oy
-			switch v.edge {
-			case 2:
-				if tx < vr[0] || tx >= vr[2] || ty < vr[1] || ty >= vr[3] {
-					continue
-				}
-			case 1:
-				tx = vr[0] + ((tx - vr[0]) % vw + vw) % vw
-				ty = vr[1] + ((ty - vr[1]) % vh + vh) % vh
-			case:
-				tx = clamp(tx, vr[0], vr[2] - 1)
-				ty = clamp(ty, vr[1], vr[3] - 1)
-			}
-			k := v.kernel[(v.order.y - oy - 1) * v.order.x + (v.order.x - ox - 1)]
-			sum += load(src, src_tt, tx, ty, v.preserve_alpha) * k
-		}
-	}
-	center := apply_tex_type(fetch(src, u32(x), u32(y)), src_tt)
-	return convolve_finish(v, sum, center.a)
-}
-
-// One direction of a separable gaussian, with the GPU shader's incremental
-// coefficients and tap count. Transparent edges count the missing taps as
-// black (keeping their weight).
-@(private = "file")
-blur_pass :: proc(src: Sw_Texture, dst: Sw_Target, dir: [2]i32, sigma: f32, tex_type: f32, edge: Blur_Edge, y0, y1: int) {
-	coeff, taps := blur_pass_coefficients(sigma)
-	w, h := i32(src.width), i32(src.height)
-	tap :: #force_inline proc(src: Sw_Texture, x, y, w, h: i32, edge: Blur_Edge) -> [4]f32 {
-		if edge == .Clamp {
-			return fetch(src, u32(clamp(x, 0, w - 1)), u32(clamp(y, 0, h - 1)))
-		}
-		if x < 0 || y < 0 || x >= w || y >= h {
-			return {}
-		}
-		return fetch(src, u32(x), u32(y))
-	}
-	for y in u32(y0) ..< u32(y1) {
-		for x in 0 ..< dst.width {
-			g := coeff
-			sum := fetch(src, x, y) * g[0]
-			weight := g[0]
-			g.xy *= g.yz
-			for i in 1 ..= taps {
-				o := i32(i)
-				sum += tap(src, i32(x) - o * dir.x, i32(y) - o * dir.y, w, h, edge) * g[0]
-				sum += tap(src, i32(x) + o * dir.x, i32(y) + o * dir.y, w, h, edge) * g[0]
-				weight += 2 * g[0]
-				g.xy *= g.yz
-			}
-			store_texel(dst, x, y, apply_tex_type(sum / weight, tex_type))
-		}
-	}
-}
-
 // ---- custom programs ------------------------------------------------------------------
 
 @(private = "file")
@@ -1500,34 +1198,16 @@ sw_delete_program :: proc(data: rawptr, program: Backend_Program) {
 }
 
 @(private = "file")
-Sw_Channels :: [PROGRAM_MAX_CHANNELS]Maybe(Sw_Texture)
-
-// GL texture() semantics over the channel images, for the CPU program.
-@(private = "file")
-sw_program_sample :: proc(data: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
-	channels := (^Sw_Channels)(data)
-	if channel < 0 || channel >= PROGRAM_MAX_CHANNELS {
-		return {}
-	}
-	t, ok := channels[channel].?
-	if !ok {
-		return {}
-	}
-	return sample(t, uv.x, uv.y)
-}
-
-@(private = "file")
 sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 	p := (^Sw_Program)(cmd.program.user)
 	entry := image_store_get(images, cmd.target)
 	if p == nil || entry == nil || entry.image.pixels == nil || (entry.info.format != .RGBA8 && entry.info.format != .RGBA16F) {
 		return
 	}
-	channels: Sw_Channels
-	sampler := Program_Sampler{&channels, sw_program_sample, {}}
+	sampler: Program_Sampler
 	for id, i in cmd.channels {
 		if t, ok := lookup_texture(images, id); ok {
-			channels[i] = t
+			sampler.images[i] = sw_channel(t)
 			sampler.sizes[i] = {i32(t.width), i32(t.height), 1}
 		}
 	}
@@ -1596,6 +1276,14 @@ sw_lanes_take :: proc(b: ^Software_Backend) -> ^Sw_Lanes {
 	return L
 }
 
+// Puts a set back on `lanes_free`.
+@(private = "file")
+sw_lanes_give :: proc(b: ^Software_Backend, L: ^Sw_Lanes) {
+	sync.lock(&b.lanes_lock)
+	append(&b.lanes_free, L)
+	sync.unlock(&b.lanes_lock)
+}
+
 @(private = "file")
 sw_lanes_destroy :: proc(L: ^Sw_Lanes) {
 	context.allocator = runtime.heap_allocator()
@@ -1606,23 +1294,6 @@ sw_lanes_destroy :: proc(L: ^Sw_Lanes) {
 	delete(L.color)
 	delete(L.motion)
 	free(L)
-}
-
-// The draw's image as the shaders' `tex` samples it; white without one, as
-// the GPU binds then.
-@(private = "file")
-Sw_Shader_Texture :: struct {
-	tex: Sw_Texture,
-	ok:  bool,
-}
-
-@(private = "file")
-sw_shader_sample :: proc(user: rawptr, channel: int, uv: [2]f32, lod: f32, layer: int) -> [4]f32 {
-	t := (^Sw_Shader_Texture)(user)
-	if channel != 0 || !t.ok {
-		return {1, 1, 1, 1}
-	}
-	return sample(t.tex, uv.x, uv.y)
 }
 
 // The pixels of `bounds` (drawing coordinates) in the raster: x0, y0, x1, y1.
@@ -1637,36 +1308,15 @@ sw_pixels :: proc "contextless" (r: ^Raster, bounds: Bounds) -> [4]i32 {
 @(private = "file")
 SW_SHADE_QUADS :: 16 * oksl.LANES / 4
 
-// The shape units' uniform block: uv, data, rc_linear and rc_offset.
+// A unit's uniform block: the shape units' uv, data, rc_linear and
+// rc_offset, or the quad units' quad_tc and paint.
 @(private = "file")
-SW_UNIFORM_BYTES :: 64
+SW_UNIFORM_BYTES :: 256
 
-// Shades the raster's pixels `px` (x0, y0, x1, y1) in 2x2 quads with a shape
-// unit, as the GPU rasterizes a quad over them: uv, data and `to_rc` (the
-// map from fpos, a pixel's centre, to rc) the uniforms. Then each
-// pixel it shades blends in order (and with a twin, its motion over the
-// twin's pixel, premultiplied source-over, whatever the blend). The quads
-// go SW_SHADE_QUADS at a time, row by row.
+// A shape unit's uniforms: uv, data and `to_rc` (the map from fpos, a
+// pixel's centre, to rc).
 @(private = "file")
-sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i32, to_rc: Transform2D, uv: [4]f32, data: [4]u32, buffers: [][]u32, tex: ^Sw_Shader_Texture) {
-	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
-	if x0 >= x1 || y0 >= y1 {
-		return
-	}
-	m := prog.module
-	qx0, qy0 := x0 &~ 1, y0 &~ 1
-	nqx := int(x1 - qx0 + 1) / 2
-	quads := nqx * (int(y1 - qy0 + 1) / 2)
-	moves := len(m.stage_outputs) > 1
-	most := min(quads, SW_SHADE_QUADS)
-	resize(&L.origins, most)
-	resize(&L.helpers, most)
-	resize(&L.shaded, most)
-	resize(&L.color, most * 4)
-	if moves {
-		resize(&L.motion, most * 4)
-	}
-	uniforms: [SW_UNIFORM_BYTES]u8
+sw_shape_uniforms :: proc "contextless" (prog: Sw_Program_Unit, to_rc: Transform2D, uv: [4]f32, data: [4]u32) -> (uniforms: [SW_UNIFORM_BYTES]u8) {
 	if prog.uv_at >= 0 {
 		(^[4]f32)(&uniforms[prog.uv_at])^ = uv
 	}
@@ -1678,6 +1328,36 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 	}
 	if prog.rc_offset_at >= 0 {
 		(^[2]f32)(&uniforms[prog.rc_offset_at])^ = {to_rc[4], to_rc[5]}
+	}
+	return
+}
+
+// Shades the raster's pixels `px` (x0, y0, x1, y1) in 2x2 quads with a
+// unit, as the GPU rasterizes a quad over them, from its uniform block,
+// storage buffers and textures (bound by channel). Then each pixel it
+// shades blends in order (and with a twin, its motion over the twin's
+// pixel, premultiplied source-over, whatever the blend); a raster without
+// a target takes the unit's one output as that motion. The quads go
+// SW_SHADE_QUADS at a time, row by row.
+@(private = "file")
+sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i32, uniforms: []u8, buffers: [][]u32, textures: []oksl.Channel_Image) {
+	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	m := prog.module
+	qx0, qy0 := x0 &~ 1, y0 &~ 1
+	nqx := int(x1 - qx0 + 1) / 2
+	quads := nqx * (int(y1 - qy0 + 1) / 2)
+	colour := r.target.pixels != nil
+	moves := len(m.stage_outputs) > 1 || !colour
+	most := min(quads, SW_SHADE_QUADS)
+	resize(&L.origins, most)
+	resize(&L.helpers, most)
+	resize(&L.shaded, most)
+	resize(&L.color, most * 4)
+	if moves {
+		resize(&L.motion, most * 4)
 	}
 	for first := 0; first < quads; first += SW_SHADE_QUADS {
 		count := min(quads - first, SW_SHADE_QUADS)
@@ -1695,14 +1375,20 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 			L.helpers[q] = h
 		}
 		targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
+		outputs := targets[:2 if moves else 1]
+		if !colour {
+			outputs = targets[1:]
+		}
 		shaded := L.shaded[:count]
 		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count]}
-		oksl.run_fragment(&m.program, uniforms[:m.block_size], in_, targets[:2 if moves else 1], shaded, &L.scratch, {sampler = sw_shader_sample, user = tex, buffers = buffers})
+		oksl.run_fragment(&m.program, uniforms, in_, outputs, shaded, &L.scratch, {buffers = buffers, channel_images = textures})
 		for lanes, q in shaded {
 			o := L.origins[q]
 			for l in lanes {
 				tx, ty := u32(o.x + i32(l & 1) - r.ox), u32(o.y + i32(l >> 1) - r.oy)
-				blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+				if colour {
+					blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+				}
 				if moves {
 					mo := L.motion[q * 4 + l]
 					d := &r.twin.pixels[ty * r.twin.width + tx]

@@ -1,7 +1,7 @@
-// What every fragment shader of ovg's SDL_GPU backend shares, in GLSL ES 3.0
-// as oksl compiles it: the paints and the paint's colour. The backend
-// compiles each unit with this ahead of it (oksl's Options.prelude); the
-// math must stay identical to the software backend's.
+// What every fragment shader of ovg's backends shares, in GLSL ES 3.0 as
+// oksl compiles it: the paints and the paint's colour. Each backend
+// compiles each unit with this ahead of it (oksl's Options.prelude): the
+// SDL_GPU backend for the GPU, the software backend for oksl's CPU program.
 //
 // A draw's paint is a row of `paints` (ovg.Params packed as 14 vec4s by
 // ovg.pack_frag_uniforms), so draws with different paints share one draw
@@ -36,12 +36,18 @@ const float TAU = 6.28318530717958647692528676655900577;
 uniform sampler2D tex;
 uniform sampler2D glyphtex;
 
-layout(std430) readonly buffer Paints { vec4 rows[]; } paints;
-
 // The fragment's paint row (set by each unit's main).
 uint paint_index;
 
+#ifdef QUAD_FLAT_UNIFORMS
+// The software backend's quads (filters, the motion composite): their one
+// paint, a uniform.
+uniform vec4 quad_paint[14];
+vec4 P(int i) { return quad_paint[i]; }
+#else
+layout(std430) readonly buffer Paints { vec4 rows[]; } paints;
 vec4 P(int i) { return paints.rows[paint_index * 14u + uint(i)]; }
+#endif
 
 // `mat3(P(base).xyz, P(base + 1).xyz, P(base + 2).xyz) * vec3(p, 1)`.
 vec2 transform_point(int base, vec2 p) {
@@ -101,7 +107,7 @@ float spread_t(float t) {
 
 // Two-point conical (focal) radial gradient: the largest t whose circle,
 // from the focal circle (focal, fr) to the outer one (origin, r), passes
-// through pt. Matches `focal_gradient_t` in filter_math.odin.
+// through pt.
 float focal_t(vec2 pt) {
     float r = extent().x;
     float fr = extent().y;

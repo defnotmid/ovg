@@ -352,14 +352,13 @@ Convolve_Matrix :: struct {
 CONVOLVE_MAX_KERNEL :: 36
 
 // SVG feTurbulence (the spec's reference noise) over the whole target; the
-// filter's source is the lattice image of `params.seed` (see
+// filter's source is the lattice image of its seed (see
 // `turbulence_lattice_pixels`). Target pixel (x, y) is user point
 // ((x + offset.x) / scale.x, (y + offset.y) / scale.y); `region` (x, y, w,
-// h in target pixels) is the stitching tile. GPU backends evaluate it in
-// f32 from the lattice image, the software backend in f64 from the seed.
+// h in target pixels) is the stitching tile. Every backend evaluates it in
+// f32 from the lattice image (shaders/filter.frag).
 Turbulence :: struct {
 	params: Turbulence_Params,
-	seed:   i32,
 	offset: [2]f64,
 	scale:  [2]f64,
 	region: [4]f64,
@@ -405,6 +404,176 @@ filter_backdrop :: proc "contextless" (f: Image_Filter) -> Image_Id {
 		return v.glow
 	}
 	return {}
+}
+
+// One pass of an image filter as every backend draws it with the filter
+// unit (shaders/filter.frag): a quad over the whole of its output, reading
+// `tex` (the filter's source, or the intermediate) and `glyphtex` (the
+// backdrop) through `paint`, a paint row as `pack_frag_uniforms` packs one.
+// `from_mid` reads the intermediate for the source, `to_mid` writes it for
+// the target.
+Filter_Pass :: struct {
+	paint:    [14][4]f32,
+	from_mid: bool,
+	to_mid:   bool,
+}
+
+// A filter's passes. Blurs and morphology run two through an intermediate
+// the source's size and format; a one-pass filter whose target is also an
+// input (`aliased`) draws into an intermediate the target's size and
+// format, then `copy`s it to the target. Not ok: the images don't fit the
+// filter, and nothing draws. `back` is the backdrop's info when it has one.
+Filter_Plan :: struct {
+	passes: [2]Filter_Pass,
+	count:  int,
+	copy:   bool,
+}
+
+filter_plan :: proc "contextless" (filter: Image_Filter, src, dst: Image_Info, back: Maybe(Image_Info), aliased: bool) -> (plan: Filter_Plan, ok: bool) {
+	extent := [2]f32{f32(src.width), f32(src.height)}
+	gray := src.format == .Gray8 || src.format == .Gray16
+	if t, is_turbulence := filter.(Turbulence); is_turbulence {
+		// The source is the lattice image, not the target's size.
+		frag := turbulence_uniforms(t, dst.format == .RGBA16F)
+		frag[9] = {f32(dst.width), f32(dst.height), 0, 0}
+		frag[10] = {0, 0, 0, f32(Shader_Type.Filter_Turbulence)}
+		plan.passes[0].paint = frag
+		plan.count = 1
+		return plan, true
+	}
+	_, is_bright := filter.(Bloom_Bright)
+	if !is_bright && (src.width != dst.width || src.height != dst.height) {
+		return {}, false
+	}
+
+	if sx, sy, edge, is_blur := blur_params(filter); is_blur {
+		dirs := [2][2]f32{{1, 0}, {0, 1}}
+		sigmas := [2]f32{sx, sy}
+		// The intermediate already holds premultiplied color.
+		tts := [2]f32{tex_type_for(src), 2 if gray else 0}
+		for k in 0 ..< 2 {
+			coeff, taps := blur_pass_coefficients(sigmas[k])
+			params := default_params()
+			params.shader_type = .Filter_Image
+			params.extent = extent
+			params.paint_mat = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}
+			params.image_blur_filter_coeff = coeff
+			params.image_blur_filter_taps = f32(taps)
+			params.image_blur_filter_edge = f32(edge)
+			params.image_blur_filter_direction = dirs[k]
+			params.tex_type = tts[k]
+			plan.passes[k] = {pack_frag_uniforms(params), k == 1, k == 0}
+		}
+		plan.count = 2
+		return plan, true
+	}
+
+	if m, is_morph := filter.(Morphology); is_morph {
+		tts := [2]f32{tex_type_for(src), 2 if gray else 0}
+		for axis in 0 ..< 2 {
+			frag: [14][4]f32
+			frag[0] = {m.radius[axis], 1 if m.dilate else 0, f32(axis), 0}
+			frag[9] = {extent.x, extent.y, m.valid[0], m.valid[1]}
+			frag[10] = {m.valid[2], m.valid[3], tts[axis], f32(Shader_Type.Filter_Morphology)}
+			plan.passes[axis] = {frag, axis == 1, axis == 0}
+		}
+		plan.count = 2
+		return plan, true
+	}
+
+	back_tt: f32
+	if image_id_valid(filter_backdrop(filter)) {
+		info, has_back := back.?
+		_, is_lut := filter.(Component_Transfer)
+		_, is_glow := filter.(Bloom_Add)
+		if !has_back || (!is_lut && !is_glow && (info.width != src.width || info.height != src.height)) {
+			return {}, false
+		}
+		back_tt = tex_type_for(info)
+	}
+
+	// Paint rows: frag[0..3] matrix rows, frag[4] offsets or k1..k4,
+	// frag[9] = (extent, op), frag[10].zw = (tex type, shader type),
+	// frag[13].x = the backdrop's tex type.
+	frag: [14][4]f32
+	frag[9] = {extent.x, extent.y, 0, 0}
+	frag[10] = {0, 0, tex_type_for(src), 0}
+	frag[13] = {back_tt, 0, 0, 0}
+	set_valid :: proc "contextless" (frag: ^[14][4]f32, v: [4]f32) {
+		frag[9].zw = v.xy
+		frag[10].xy = v.zw
+	}
+	switch v in filter {
+	case Color_Matrix:
+		frag[10].w = f32(Shader_Type.Filter_Color_Matrix)
+		for row in 0 ..< 4 {
+			frag[row] = {v.m[row * 5], v.m[row * 5 + 1], v.m[row * 5 + 2], v.m[row * 5 + 3]}
+			frag[4][row] = v.m[row * 5 + 4]
+		}
+	case Color_Space_Convert:
+		frag[10].w = f32(Shader_Type.Filter_Color_Space)
+		frag[9].z = 1 if v.to_linear else 0
+	case Blend:
+		frag[10].w = f32(Shader_Type.Filter_Blend)
+		frag[9].z = f32(v.mode)
+	case Composite:
+		frag[10].w = f32(Shader_Type.Filter_Composite)
+		frag[9].z = f32(v.op)
+		frag[4] = v.k
+	case Component_Transfer:
+		frag[10].w = f32(Shader_Type.Filter_Component_Transfer)
+	case Lighting:
+		frag[10].w = f32(Shader_Type.Filter_Lighting)
+		frag[0] = {v.color.r, v.color.g, v.color.b, v.surface_scale}
+		frag[1] = {1 if v.specular else 0, f32(v.light), v.constant, v.specular_exponent}
+		frag[2] = {v.position.x, v.position.y, v.position.z, v.spot_exponent}
+		frag[3] = {v.points_at.x, v.points_at.y, v.points_at.z, v.cone_cos}
+		set_valid(&frag, v.valid)
+	case Tile:
+		frag[10].w = f32(Shader_Type.Filter_Tile)
+		frag[0] = v.rect
+	case Displacement_Map:
+		frag[10].w = f32(Shader_Type.Filter_Displacement)
+		frag[0] = {v.scale.x, v.scale.y, f32(v.channels.x), f32(v.channels.y)}
+		set_valid(&frag, v.valid)
+	case Convolve_Matrix:
+		frag[10].w = f32(Shader_Type.Filter_Convolve)
+		for k, i in v.kernel {
+			frag[i / 4][i % 4] = k
+		}
+		frag[11] = {f32(v.order.x), f32(v.order.y), f32(v.target.x), f32(v.target.y)}
+		frag[12] = {v.divisor, v.bias, f32(v.edge), 1 if v.preserve_alpha else 0}
+		set_valid(&frag, v.valid)
+	case Bloom_Bright:
+		frag[10].w = f32(Shader_Type.Filter_Bloom_Bright)
+		frag[0] = {v.threshold, 1 if v.encoded else 0, f32(src.width), f32(src.height)}
+	case Bloom_Add:
+		frag[10].w = f32(Shader_Type.Filter_Bloom_Add)
+		frag[0] = v.uv
+		frag[1] = {v.intensity, 1 if v.encoded else 0, 0, 0}
+	case Gaussian_Blur, Blur_XY, Morphology, Turbulence:
+		return {}, false
+	}
+	plan.passes[0] = {frag, false, aliased}
+	plan.count = 1
+	plan.copy = aliased
+	return plan, true
+}
+
+// feTurbulence's uniforms (see `turbulence` in shaders/filter.frag): frag[0] the
+// lattice coordinate of target pixel x, y as (x + a) * b, frag[1] =
+// (octaves, fractal, stitch, 0); stitching: frag[2] the tile size in
+// cells and the region origin, frag[3].xy the frequencies; frag[3].z is 1
+// for an RGBA16F target, which takes the noise unrounded. Computed in
+// f64 here, so the shader's f32 starts from rounded exact values.
+@(private = "file")
+turbulence_uniforms :: proc "contextless" (t: Turbulence, half: bool) -> (frag: [14][4]f32) {
+	freq, cells := turbulence_frequency(t.params, {t.region[2], t.region[3]})
+	frag[0] = {f32(t.offset.x), f32(t.offset.y), f32(freq.x / t.scale.x), f32(freq.y / t.scale.y)}
+	frag[1] = {f32(t.params.octaves), 1 if t.params.fractal_noise else 0, 1 if t.params.stitch else 0, 0}
+	frag[2] = {f32(cells.x), f32(cells.y), f32(t.region[0]), f32(t.region[1])}
+	frag[3] = {f32(freq.x), f32(freq.y), 1 if half else 0, 0}
+	return
 }
 
 // Backend-owned state for one image. CPU backends keep `pixels`; GPU

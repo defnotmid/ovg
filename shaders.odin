@@ -55,13 +55,17 @@ SHADER_SOURCES := [Shader_Unit]Shader_Source {
 	.Resolve_Velocity   = {#load("shaders/velocity.frag", string), false, "#define RESOLVE\n", false},
 }
 
-// What the software backend defines ahead of a shape unit's prelude:
-// shapes.glsl's uv and data, the same at every pixel of an instance, are
-// uniforms there, so oksl's CPU program works out the paint's row and the
-// branches that follow from them once a call instead of at every pixel;
-// and rc and fpos come from gl_FragCoord (rc by the uniforms rc_linear and
-// rc_offset) instead of a column per stage input the backend fills.
-SHADER_CPU_DEFINES :: "#define SHAPE_FLAT_UNIFORMS\n"
+// What the software backend defines ahead of unit `u`'s prelude. A shape
+// unit's uv and data (shapes.glsl), the same at every pixel of an instance,
+// are uniforms there, and a quad unit's one paint row (common.glsl), so
+// oksl's CPU program works out the paint and the branches that follow from
+// it once a call instead of at every pixel; a shape unit's rc and fpos come
+// from gl_FragCoord (rc by the uniforms rc_linear and rc_offset), a quad
+// unit's inputs from gl_FragCoord and the uniform quad_tc, instead of a
+// column per stage input the backend fills.
+shader_cpu_defines :: proc "contextless" (u: Shader_Unit) -> string {
+	return "#define SHAPE_FLAT_UNIFORMS\n" if SHADER_SOURCES[u].shapes else "#define QUAD_FLAT_UNIFORMS\n"
+}
 
 // The vertex shaders: quads (position, texture coordinates, paint row) and
 // shape instances (pulled from a storage buffer by gl_VertexID).

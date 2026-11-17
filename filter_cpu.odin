@@ -5,8 +5,7 @@ import "core:math"
 // Filter inputs computed on the CPU and uploaded as images (the same bytes
 // on every backend): feComponentTransfer lookup tables and the feTurbulence
 // lattice. The noise itself is the Filter Effects spec's reference Perlin
-// code: here in f64 (as resvg, so it matches resvg and browsers) for the
-// software backend, in the GPU backends' shader in f32.
+// code, in the filter shader (shaders/filter.frag) in f32.
 
 Transfer_Kind :: enum u8 {
 	Identity,
@@ -162,59 +161,6 @@ turbulence_lattice_pixels :: proc "contextless" (seed: i32) -> (px: [TURBULENCE_
 	return
 }
 
-@(private = "file")
-Stitch :: struct {
-	width, height, wrap_x, wrap_y: i32,
-}
-
-// The spec's noise2 for all four channels (they share the lattice cell).
-// Indices are masked to 0..255 before every lookup, which stays inside the
-// 514-entry tables.
-@(private = "file")
-noise2 :: #force_inline proc "contextless" (l: ^Turbulence_Lattice, x, y: f64, stitch: ^Stitch) -> (n: [4]f64) #no_bounds_check {
-	s_curve :: #force_inline proc "contextless" (t: f64) -> f64 {return t * t * (3 - 2 * t)}
-	lerp :: #force_inline proc "contextless" (t, a, b: f64) -> f64 {return a + t * (b - a)}
-	t := x + TURB_PERLIN_N
-	bx0 := i32(t)
-	bx1 := bx0 + 1
-	rx0 := t - f64(i64(t))
-	rx1 := rx0 - 1
-	t = y + TURB_PERLIN_N
-	by0 := i32(t)
-	by1 := by0 + 1
-	ry0 := t - f64(i64(t))
-	ry1 := ry0 - 1
-	if stitch != nil {
-		if bx0 >= stitch.wrap_x {bx0 -= stitch.width}
-		if bx1 >= stitch.wrap_x {bx1 -= stitch.width}
-		if by0 >= stitch.wrap_y {by0 -= stitch.height}
-		if by1 >= stitch.wrap_y {by1 -= stitch.height}
-	}
-	bx0 &= TURB_BM
-	bx1 &= TURB_BM
-	by0 &= TURB_BM
-	by1 &= TURB_BM
-	i := l.selector[bx0]
-	j := l.selector[bx1]
-	b00 := l.selector[i + by0]
-	b10 := l.selector[j + by0]
-	b01 := l.selector[i + by1]
-	b11 := l.selector[j + by1]
-	sx := s_curve(rx0)
-	sy := s_curve(ry0)
-	for k in 0 ..< 4 {
-		g := &l.gradient[k]
-		u := rx0 * g[b00][0] + ry0 * g[b00][1]
-		v := rx1 * g[b10][0] + ry0 * g[b10][1]
-		a := lerp(sx, u, v)
-		u = rx0 * g[b01][0] + ry1 * g[b01][1]
-		v = rx1 * g[b11][0] + ry1 * g[b11][1]
-		b := lerp(sx, u, v)
-		n[k] = lerp(sy, a, b)
-	}
-	return
-}
-
 // feTurbulence parameters (base frequencies per user unit).
 Turbulence_Params :: struct {
 	base_frequency: [2]f64,
@@ -240,88 +186,4 @@ turbulence_frequency :: proc "contextless" (tp: Turbulence_Params, tile: [2]f64)
 		cells[a] = i32(tile[a] * freq[a] + 0.5)
 	}
 	return
-}
-
-// The octave sum at user-space `p` for frequencies `freq` (see
-// `turbulence_frequency`); `origin` is the stitching tile's origin.
-@(private = "file")
-turbulence_sum :: #force_inline proc "contextless" (l: ^Turbulence_Lattice, tp: Turbulence_Params, freq: [2]f64, cells: [2]i32, p, origin: [2]f64) -> (sum: [4]f64) {
-	st: Stitch
-	stitch: ^Stitch
-	if tp.stitch {
-		st.width = cells.x
-		st.height = cells.y
-		st.wrap_x = i32(origin.x * freq.x + TURB_PERLIN_N + f64(st.width))
-		st.wrap_y = i32(origin.y * freq.y + TURB_PERLIN_N + f64(st.height))
-		stitch = &st
-	}
-	x, y := p.x * freq.x, p.y * freq.y
-	ratio := 1.0
-	for _ in 0 ..< tp.octaves {
-		n := noise2(l, x, y, stitch)
-		for k in 0 ..< 4 {
-			sum[k] += (n[k] if tp.fractal_noise else abs(n[k])) / ratio
-		}
-		x *= 2
-		y *= 2
-		ratio *= 2
-		if stitch != nil {
-			st.width *= 2
-			st.wrap_x = 2 * st.wrap_x - TURB_PERLIN_N
-			st.height *= 2
-			st.wrap_y = 2 * st.wrap_y - TURB_PERLIN_N
-		}
-	}
-	return
-}
-
-// The spec's turbulence(channel, point) for the four channels at user-space
-// `p`; `tile` is the stitching tile (x, y, w, h), as resvg passes it.
-turbulence :: proc "contextless" (l: ^Turbulence_Lattice, tp: Turbulence_Params, p: [2]f64, tile: [4]f64) -> [4]f64 {
-	freq, cells := turbulence_frequency(tp, {tile[2], tile[3]})
-	return turbulence_sum(l, tp, freq, cells, p, {tile[0], tile[1]})
-}
-
-// Fills rows y0 ..< y1 of `out` (w x h, premultiplied: RGBA8 rounded as
-// resvg's apply_turbulence, or RGBA16F unrounded if `half`) with `t`: pixel
-// (x, y) is user point ((x + offset.x) / scale.x, (y + offset.y) /
-// scale.y); the stitching tile is `t.region`.
-turbulence_fill :: proc "contextless" (out: []u8, w, h: int, t: Turbulence, l: ^Turbulence_Lattice, y0, y1: int, $half: bool) {
-	tp, region := t.params, t.region
-	freq, cells := turbulence_frequency(tp, {region[2], region[3]})
-	if len(out) < w * h * (8 if half else 4) || y0 < 0 || y1 > h {
-		return
-	}
-	for y in y0 ..< y1 {
-		for x in 0 ..< w {
-			p := [2]f64{(f64(x) + t.offset.x) / t.scale.x, (f64(y) + t.offset.y) / t.scale.y}
-			// resvg passes the pixel's place in the region as the tile origin.
-			n := turbulence_sum(l, tp, freq, cells, p, {f64(x) - region[0], f64(y) - region[1]})
-			when half {
-				// RGBA16F: the noise unrounded, premultiplied.
-				c: [4]f32
-				for k in 0 ..< 4 {
-					c[k] = clamp(f32((n[k] + 1) / 2 if tp.fractal_noise else n[k]), 0, 1)
-				}
-				#no_bounds_check {
-					(^[4]f16)(&out[(y * w + x) * 8])^ = {f16(c[0] * c[3]), f16(c[1] * c[3]), f16(c[2] * c[3]), f16(c[3])}
-				}
-				continue
-			}
-			px: [4]u8
-			for k in 0 ..< 4 {
-				v := (n[k] * 255 + 255) / 2 if tp.fractal_noise else n[k] * 255
-				px[k] = u8(clamp(f32(v), 0, 255) + 0.5)
-			}
-			// Premultiply as resvg's multiply_alpha.
-			a := f32(px[3]) / 255
-			#no_bounds_check {
-				o := out[(y * w + x) * 4:]
-				for k in 0 ..< 3 {
-					o[k] = u8(f32(px[k]) * a + 0.5)
-				}
-				o[3] = px[3]
-			}
-		}
-	}
 }

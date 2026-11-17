@@ -1145,7 +1145,7 @@ test_rgba16f_target_levels :: proc(t: ^testing.T) {
 	defer layer_stack_destroy(&ls, c)
 	noise, nerr := create_image_empty(c, 64, 4, .RGBA16F, {.Premultiplied})
 	testing.expect_value(t, nerr, nil)
-	turbulence := Turbulence{{{0.05, 0.05}, 2, true, false}, 3, {}, {1, 1}, {0, 0, 64, 4}}
+	turbulence := Turbulence{{{0.05, 0.05}, 2, true, false}, {}, {1, 1}, {0, 0, 64, 4}}
 	filter_image(c, noise, turbulence, layer_turbulence_lattice(&ls, c, 3))
 	flush(c)
 	nbytes, nrerr := read_image(c, noise)
@@ -1477,18 +1477,6 @@ test_sw_zero_length_round_half_smooth :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, u32(outside.x), u32(outside.y)), [4]u8{255, 255, 255, 255})
 	// The square side reaches the corner.
 	testing.expect_value(t, px(&s, 35, 35), [4]u8{0, 0, 0, 255})
-}
-
-@(test)
-test_focal_gradient :: proc(t: ^testing.T) {
-	// At the focal point the gradient is at its first stop, at the outer
-	// circle at its last, whatever the offset.
-	pt := Vec2{-3, 0}
-	testing.expect(t, abs(focal_gradient_t(pt, 10, 0, {-3, 0})) < 1e-4)
-	testing.expect(t, abs(focal_gradient_t({10, 0}, 10, 0, {-3, 0}) - 1) < 1e-4)
-	testing.expect(t, abs(focal_gradient_t({0, -10}, 10, 0, {-3, 0}) - 1) < 1e-4)
-	// Concentric with a focal radius: (|p| - fr) / (r - fr).
-	testing.expect(t, abs(focal_gradient_t({6, 0}, 10, 2, {1e-4, 0}) - 0.5) < 1e-3)
 }
 
 @(test)

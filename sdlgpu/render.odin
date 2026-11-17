@@ -663,9 +663,8 @@ plan_copy :: proc(p: ^Planner, src, dst: ^Image) {
 	append(&p.b.rows, Row{kind = .Copy, target = dst^, textures = {{texture = src.texture}, {}}})
 }
 
-// Image filters: full-target quads drawn with Copy blend. Blurs run two
-// passes through a temporary image; single-pass filters render into a
-// temporary first when the target is also an input, then copy.
+// Image filters: full-target quads drawn with Copy blend, as
+// `vg.filter_plan` lays out their passes and paints.
 @(private = "file")
 plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 	filter := p.frame.filters[c.filter]
@@ -674,152 +673,29 @@ plan_filter :: proc(p: ^Planner, cmd: vg.Command, c: vg.Cmd_Filter_Image) {
 	if !ok || !dst_ok {
 		return
 	}
-	extent := [2]f32{f32(src_info.width), f32(src_info.height)}
-	if t, is_turbulence := filter.(vg.Turbulence); is_turbulence {
-		// The source is the lattice image, not the target's size.
-		frag := turbulence_uniforms(t, dst_info.format == .RGBA16F)
-		frag[9] = {f32(dst_info.width), f32(dst_info.height), 0, 0}
-		frag[10] = {0, 0, 0, f32(vg.Shader_Type.Filter_Turbulence)}
-		plan_filter_pass(p, lookup(p, cmd.image), nil, lookup(p, c.target_image), frag)
-		return
-	}
-	_, is_bright := filter.(vg.Bloom_Bright)
-	if !is_bright && (src_info.width != dst_info.width || src_info.height != dst_info.height) {
-		return
-	}
-
-	if sx, sy, edge, is_blur := vg.blur_params(filter); is_blur {
-		mid := scratch_image(p.b, src_info)
-		if mid == nil {
-			return
-		}
-		Pass :: struct {
-			src, dst: ^Image,
-			dir:      [2]f32,
-			sigma:    f32,
-			tex_type: f32,
-		}
-		passes := [2]Pass {
-			{lookup(p, cmd.image), mid, {1, 0}, sx, vg.tex_type_for(src_info)},
-			// The intermediate already holds premultiplied color.
-			{mid, lookup(p, c.target_image), {0, 1}, sy, 2 if src_info.format == .Gray8 || src_info.format == .Gray16 else 0},
-		}
-		for pass in passes {
-			coeff, taps := vg.blur_pass_coefficients(pass.sigma)
-			params := vg.default_params()
-			params.shader_type = .Filter_Image
-			params.extent = extent
-			params.paint_mat = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0}
-			params.image_blur_filter_coeff = coeff
-			params.image_blur_filter_taps = f32(taps)
-			params.image_blur_filter_edge = f32(edge)
-			params.image_blur_filter_direction = pass.dir
-			params.tex_type = pass.tex_type
-			plan_filter_pass(p, pass.src, nil, pass.dst, vg.pack_frag_uniforms(params))
-		}
-		return
-	}
-
-	if m, is_morph := filter.(vg.Morphology); is_morph {
-		mid := scratch_image(p.b, src_info)
-		if mid == nil {
-			return
-		}
-		srcs := [2]^Image{lookup(p, cmd.image), mid}
-		dsts := [2]^Image{mid, lookup(p, c.target_image)}
-		tts := [2]f32{vg.tex_type_for(src_info), 2 if src_info.format == .Gray8 || src_info.format == .Gray16 else 0}
-		for axis in 0 ..< 2 {
-			frag: Paint
-			frag[0] = {m.radius[axis], 1 if m.dilate else 0, f32(axis), 0}
-			frag[9] = {extent.x, extent.y, m.valid[0], m.valid[1]}
-			frag[10] = {m.valid[2], m.valid[3], tts[axis], f32(vg.Shader_Type.Filter_Morphology)}
-			plan_filter_pass(p, srcs[axis], nil, dsts[axis], frag)
-		}
-		return
-	}
-
 	backdrop := vg.filter_backdrop(filter)
-	back_tt: f32
-	if vg.image_id_valid(backdrop) {
-		back_info, back_ok := vg.image_store_info(p.images, backdrop)
-		_, is_lut := filter.(vg.Component_Transfer)
-		_, is_glow := filter.(vg.Bloom_Add)
-		if !back_ok || (!is_lut && !is_glow && (back_info.width != src_info.width || back_info.height != src_info.height)) {
-			return
-		}
-		back_tt = vg.tex_type_for(back_info)
+	back: Maybe(vg.Image_Info)
+	if info, back_ok := vg.image_store_info(p.images, backdrop); vg.image_id_valid(backdrop) && back_ok {
+		back = info
 	}
-
-	// Paint rows: frag[0..3] matrix rows, frag[4] offsets or k1..k4,
-	// frag[9] = (extent, op), frag[10].zw = (tex type, shader type),
-	// frag[13].x = the backdrop's tex type.
-	frag: Paint
-	frag[9] = {extent.x, extent.y, 0, 0}
-	frag[10] = {0, 0, vg.tex_type_for(src_info), 0}
-	frag[13] = {back_tt, 0, 0, 0}
-	switch v in filter {
-	case vg.Color_Matrix:
-		frag[10].w = f32(vg.Shader_Type.Filter_Color_Matrix)
-		for row in 0 ..< 4 {
-			frag[row] = {v.m[row * 5], v.m[row * 5 + 1], v.m[row * 5 + 2], v.m[row * 5 + 3]}
-			frag[4][row] = v.m[row * 5 + 4]
-		}
-	case vg.Color_Space_Convert:
-		frag[10].w = f32(vg.Shader_Type.Filter_Color_Space)
-		frag[9].z = 1 if v.to_linear else 0
-	case vg.Blend:
-		frag[10].w = f32(vg.Shader_Type.Filter_Blend)
-		frag[9].z = f32(v.mode)
-	case vg.Composite:
-		frag[10].w = f32(vg.Shader_Type.Filter_Composite)
-		frag[9].z = f32(v.op)
-		frag[4] = v.k
-	case vg.Component_Transfer:
-		frag[10].w = f32(vg.Shader_Type.Filter_Component_Transfer)
-	case vg.Lighting:
-		frag[10].w = f32(vg.Shader_Type.Filter_Lighting)
-		frag[0] = {v.color.r, v.color.g, v.color.b, v.surface_scale}
-		frag[1] = {1 if v.specular else 0, f32(v.light), v.constant, v.specular_exponent}
-		frag[2] = {v.position.x, v.position.y, v.position.z, v.spot_exponent}
-		frag[3] = {v.points_at.x, v.points_at.y, v.points_at.z, v.cone_cos}
-		set_valid(&frag, v.valid)
-	case vg.Tile:
-		frag[10].w = f32(vg.Shader_Type.Filter_Tile)
-		frag[0] = v.rect
-	case vg.Displacement_Map:
-		frag[10].w = f32(vg.Shader_Type.Filter_Displacement)
-		frag[0] = {v.scale.x, v.scale.y, f32(v.channels.x), f32(v.channels.y)}
-		set_valid(&frag, v.valid)
-	case vg.Convolve_Matrix:
-		frag[10].w = f32(vg.Shader_Type.Filter_Convolve)
-		for k, i in v.kernel {
-			frag[i / 4][i % 4] = k
-		}
-		frag[11] = {f32(v.order.x), f32(v.order.y), f32(v.target.x), f32(v.target.y)}
-		frag[12] = {v.divisor, v.bias, f32(v.edge), 1 if v.preserve_alpha else 0}
-		set_valid(&frag, v.valid)
-	case vg.Bloom_Bright:
-		frag[10].w = f32(vg.Shader_Type.Filter_Bloom_Bright)
-		frag[0] = {v.threshold, 1 if v.encoded else 0, f32(src_info.width), f32(src_info.height)}
-	case vg.Bloom_Add:
-		frag[10].w = f32(vg.Shader_Type.Filter_Bloom_Add)
-		frag[0] = v.uv
-		frag[1] = {v.intensity, 1 if v.encoded else 0, 0, 0}
-	case vg.Gaussian_Blur, vg.Blur_XY, vg.Morphology, vg.Turbulence:
+	plan, plan_ok := vg.filter_plan(filter, src_info, dst_info, back, c.target_image == cmd.image || c.target_image == backdrop)
+	if !plan_ok {
 		return
 	}
-
-	src, back, target := lookup(p, cmd.image), lookup(p, backdrop), lookup(p, c.target_image)
-	if c.target_image == cmd.image || c.target_image == backdrop {
-		tmp := scratch_image(p.b, dst_info)
-		if tmp == nil {
+	src, target := lookup(p, cmd.image), lookup(p, c.target_image)
+	mid: ^Image
+	if plan.count == 2 || plan.copy {
+		mid = scratch_image(p.b, src_info if plan.count == 2 else dst_info)
+		if mid == nil {
 			return
 		}
-		plan_filter_pass(p, src, back, tmp, frag)
-		plan_copy(p, tmp, target)
-		return
 	}
-	plan_filter_pass(p, src, back, target, frag)
+	for pass in plan.passes[:plan.count] {
+		plan_filter_pass(p, mid if pass.from_mid else src, lookup(p, backdrop), mid if pass.to_mid else target, pass.paint)
+	}
+	if plan.copy {
+		plan_copy(p, mid, target)
+	}
 }
 
 // ---- recording ------------------------------------------------------------------------
@@ -1132,29 +1008,6 @@ scratch_image :: proc(b: ^SDL_Backend, info: vg.Image_Info) -> ^Image {
 	append(&b.scratch, Cached_Texture{img^, b.frame})
 	free(img, b.allocator)
 	return &b.scratch[len(b.scratch) - 1].image
-}
-
-// feTurbulence's uniforms (see `turbulence` in shaders/filter.frag): frag[0] the
-// lattice coordinate of target pixel x, y as (x + a) * b, frag[1] =
-// (octaves, fractal, stitch, 0); stitching: frag[2] the tile size in
-// cells and the region origin, frag[3].xy the frequencies; frag[3].z is 1
-// for an RGBA16F target, which takes the noise unrounded. Computed in
-// f64 here, so the shader's f32 starts from rounded exact values.
-@(private = "file")
-turbulence_uniforms :: proc "contextless" (t: vg.Turbulence, half: bool) -> (frag: [14][4]f32) {
-	freq, cells := vg.turbulence_frequency(t.params, {t.region[2], t.region[3]})
-	frag[0] = {f32(t.offset.x), f32(t.offset.y), f32(freq.x / t.scale.x), f32(freq.y / t.scale.y)}
-	frag[1] = {f32(t.params.octaves), 1 if t.params.fractal_noise else 0, 1 if t.params.stitch else 0, 0}
-	frag[2] = {f32(cells.x), f32(cells.y), f32(t.region[0]), f32(t.region[1])}
-	frag[3] = {f32(freq.x), f32(freq.y), 1 if half else 0, 0}
-	return
-}
-
-// The neighbourhood filters' valid rectangle: frag[9].zw, frag[10].xy.
-@(private = "file")
-set_valid :: proc "contextless" (frag: ^[14][4]f32, v: [4]f32) {
-	frag[9].zw = v.xy
-	frag[10].xy = v.zw
 }
 
 // ---- pipelines ------------------------------------------------------------------------

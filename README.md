@@ -286,8 +286,10 @@ vt, nt := vgsdl.velocity_textures(&gpu)          // R16G16_FLOAT, R16_FLOAT
 
 ## Filters and paint extras
 
-SVG filter primitives and paint options, implemented identically in the
-software and SDL_GPU backends (`filter_math.odin` and `shaders/filter.frag`).
+SVG filter primitives and paint options, implemented once in
+`shaders/filter.frag`, which both backends run: SDL_GPU on the GPU, the
+software backend on oksl's CPU program, each pass's paint from the same
+`filter_plan`.
 
 `filter_image(c, target, filter, source)` records a filter that runs at flush,
 in order with drawing. Inputs and target are images of one size; the target
@@ -740,15 +742,14 @@ vg.fill_path(&c, &p, vg.paint_image(target, x, y, w, h, 0))  // target flagged P
   per pixel), as of the last flush; `update_image` takes the same layout.
 - Software: calls `cpu(user, uniforms, w, h, out, stride, format, sampler)`
   (`out` holds `format` texels: RGBA8, or RGBA16F as `[4]f16`).
-  `sampler.sample(data, channel, uv, lod, layer)` gives GL `texture()`
-  semantics over the channel images: bilinear or nearest, clamp or repeat,
-  texels as stored (images have one level and one layer, so `lod` and
-  `layer` change nothing); `sampler.sizes` gives each channel's size in
-  texels and its layers (GLSL `textureSize`), 0 x 0 x 0 when unbound. They
-  are oksl's sampler and channel sizes, so an oksl CPU program runs as
-  `oksl.run(..., {sampler = sampler.sample, user = sampler.data,
-  channel_sizes = sampler.sizes[:]})`. The callback may split the image
-  across threads.
+  `sampler.images` holds the channel images as oksl's bound images
+  (`oksl.Channel_Image`): nearest or linear, clamp or repeat by each image's
+  flags as the GPU's samplers are, texels as stored, an unbound channel's
+  entry empty (oksl reads transparent black there); `sampler.sizes` gives
+  each channel's size in texels and its layers (GLSL `textureSize`), 0 x 0
+  x 0 when unbound. An oksl CPU program runs as `oksl.run(...,
+  {channel_images = sampler.images[:], channel_sizes = sampler.sizes[:]})`
+  and may split the image across threads.
 - Backends without programs leave `create_program` nil, and creating one
   then returns `.Unsupported_Operation`.
 - `run_external(c, fn, user)` runs host work at its place in the frame:
@@ -878,15 +879,19 @@ every part follows:
   (5.75 against 67.9 zoomed out to half, the markers piled up); on an
   RX 9070 XT 3.5 against 11.5 ms.
 - **The software backend is the pixel reference for the GPU backend.** It
-  runs the GPU's own shape shaders (`shape.frag`, `group.frag`,
-  `markers.frag`) on [oksl](https://github.com/defnotmid/oksl)'s CPU
-  program, over 2x2 quads of each instance's pixels as a GPU rasterizes
-  them, compiled from the same sources the first time a frame draws with
-  them, an instance's `uv` and `data` (the same at each of its pixels)
-  passed as uniforms where the GPU interpolates them flat, and `rc` and
-  `fpos` worked out from the pixel's position where the GPU interpolates
-  them across the quad (`SHADER_CPU_DEFINES`); the filters evaluate the same formulas in Odin. It samples
-  textures like the GPU and uses the top-left fill rule.
+  runs the GPU's own shaders (`shape.frag`, `group.frag`, `markers.frag`,
+  `filter.frag` and `velocity.frag`'s composite) on
+  [oksl](https://github.com/defnotmid/oksl)'s CPU program, over 2x2 quads
+  of each instance's or pass's pixels as a GPU rasterizes them, compiled
+  from the same sources the first time a frame draws with them, an
+  instance's `uv` and `data` (the same at each of its pixels) passed as
+  uniforms where the GPU interpolates them flat, and `rc`, `fpos` and a
+  quad's texture coordinates worked out from the pixel's position where the
+  GPU interpolates them across the quad, and a filter pass's paint as uniforms
+  where the GPU reads it from a buffer (`shader_cpu_defines`). Textures are
+  bound to oksl as images, which it filters by the GPU's rule (RADV's), and
+  it uses the top-left fill rule. Only clears, blending into the target and
+  the velocity resolve (a copy out of the screen's twin) are its own Odin.
   `tools/sdlgpu_parity` renders the scenes in `tools/scenes` on both backends
   and diffs them; on an RX 9070 XT (Vulkan, RADV) all 35 checks match, with
   a mean difference under 0.1 / 255 in each: most pixels within one or two

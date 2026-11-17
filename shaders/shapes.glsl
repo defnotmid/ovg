@@ -41,7 +41,7 @@ layout(std430) readonly buffer Motions { Shape_Motion rows[]; } motions;
 uint curves_word(uint i) { return shapes.words[i]; }
 
 // uv and data are the same at every pixel of an instance: the software
-// backend passes them as uniforms (SHADER_CPU_DEFINES), so oksl's CPU program
+// backend passes them as uniforms (shader_cpu_defines), so oksl's CPU program
 // works out what follows from them alone once a call instead of at every
 // pixel. There rc and fpos are no stage inputs either: shape_clip sets them
 // from gl_FragCoord, rc by the backend's map to shape units (rc_linear,

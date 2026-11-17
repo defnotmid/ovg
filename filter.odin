@@ -486,7 +486,6 @@ filter_turbulence :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Filter_Primitive, ou
 			fractal_noise = p.fractal_noise,
 			stitch = p.stitch,
 		},
-		seed = p.seed,
 		offset = {f64(win.x) - f64(xform[4]), f64(win.y) - f64(xform[5])},
 		scale = {f64(s.x), f64(s.y)},
 		region = {f64(region.minx) - f64(win.x), f64(region.miny) - f64(win.y), f64(region.maxx - region.minx), f64(region.maxy - region.miny)},

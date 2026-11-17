@@ -1,16 +1,34 @@
 // Image filters, after common.glsl: full-target quads reading the source
 // (`tex`) and, for two-input filters, the backdrop (`glyphtex`) at the same
-// pixel, in passes of their own so that the shader every draw uses doesn't
-// carry them. Mirrors filter_math.odin and the software backend.
+// pixel (texelFetch where a filter reads whole texels: a pixel centre's
+// lookup, without filtering), in passes of their own so that the shader every draw uses doesn't
+// carry them. Both backends run it; `filter_plan` (image.odin) packs each
+// pass's paint.
 
 const int TURBULENCE_MAX_OCTAVES = 24;
 const int MORPHOLOGY_MAX_RADIUS = 256;
 const int CONVOLVE_MAX_KERNEL = 36;
 const int BLUR_MAX_TAPS = 24;
 
+#ifdef QUAD_FLAT_UNIFORMS
+// The software backend's quads: the target's pixels are drawing
+// coordinates, ftcoord is gl_FragCoord.xy * quad_tc.xy + quad_tc.zw, and
+// the paint is the uniform quad_paint (quad_inputs sets them).
+uniform vec4 quad_tc;
+vec2 ftcoord;
+vec2 fpos;
+uint fpaint;
+void quad_inputs() {
+    fpos = gl_FragCoord.xy;
+    ftcoord = fpos * quad_tc.xy + quad_tc.zw;
+    fpaint = 0u;
+}
+#else
 layout(location = 0) in vec2 ftcoord;
 layout(location = 1) in vec2 fpos;
 layout(location = 2) flat in uint fpaint;
+void quad_inputs() {}
+#endif
 
 layout(location = 0) out vec4 color;
 
@@ -23,32 +41,33 @@ int blur_edge() { return int(P(12).w); }
 int filter_op() { return int(P(9).z); }
 int backdrop_tex_type() { return int(P(13).x); }
 
-// One blur tap at pixel position `p` of an `ext`-sized image: transparent
-// beyond it, or the nearest edge pixel (`clamp_edge`).
-vec4 blur_tap(vec2 p, vec2 ext, bool clamp_edge) {
+// One blur tap at pixel `p` of an `ext`-sized image: transparent beyond it,
+// or the nearest edge pixel (`clamp_edge`).
+vec4 blur_tap(ivec2 p, ivec2 ext, bool clamp_edge) {
     if (clamp_edge) {
-        p = clamp(p, vec2(0.5, 0.5), ext - 0.5);
-    } else if (p.x < 0.0 || p.y < 0.0 || p.x > ext.x || p.y > ext.y) {
+        p = clamp(p, ivec2(0), ext - 1);
+    } else if (p.x < 0 || p.y < 0 || p.x >= ext.x || p.y >= ext.y) {
         return vec4(0.0);
     }
-    return textureLod(tex, p / ext, 0.0);
+    return texelFetch(tex, p, 0);
 }
 
 // One direction of a separable gaussian with incremental coefficients.
-vec4 render_filtered_image(vec2 p) {
-    vec2 ext = extent();
+vec4 render_filtered_image(vec2 fp) {
+    ivec2 p = ivec2(floor(fp));
+    ivec2 ext = ivec2(extent());
     bool clamp_edge = blur_edge() == 1;
-    vec2 dir = blur_direction();
+    ivec2 dir = ivec2(blur_direction());
     int taps = blur_taps();
     vec3 coeff = blur_coeff();
-    vec4 color_sum = textureLod(tex, p / ext, 0.0) * coeff.x;
+    vec4 color_sum = texelFetch(tex, p, 0) * coeff.x;
     float coeff_sum = coeff.x;
     coeff.xy *= coeff.yz;
     for (int i = 1; i <= BLUR_MAX_TAPS; i++) {
         if (i > taps) {
             break;
         }
-        vec2 d = float(i) * dir;
+        ivec2 d = i * dir;
         color_sum += blur_tap(p - d, ext, clamp_edge) * coeff.x;
         color_sum += blur_tap(p + d, ext, clamp_edge) * coeff.x;
         coeff_sum += 2.0 * coeff.x;
@@ -165,7 +184,7 @@ vec4 composite_pixel(int op, vec4 k, vec4 i1, vec4 i2) {
     return vec4(clamp(o.xyz, 0.0, a), a);
 }
 
-// ---- neighbourhood filters (mirror backend_software.odin) -------------------
+// ---- neighbourhood filters --------------------------------------------------
 //
 // Uniforms: the valid rectangle (x0, y0, x1, y1) in P(9).zw, P(10).xy; per
 // filter parameters in P(0..8), P(11), P(12).
@@ -176,13 +195,13 @@ vec4 valid_rect() { return vec4(P(9).zw, P(10).xy); }
 vec4 texel(ivec2 p) {
     vec2 ext = extent();
     if (p.x < 0 || p.y < 0 || float(p.x) >= ext.x || float(p.y) >= ext.y) return vec4(0.0);
-    return apply_tex_type(textureLod(tex, (vec2(p) + 0.5) / ext, 0.0));
+    return apply_tex_type(texelFetch(tex, p, 0));
 }
 
 vec4 backdrop_texel(ivec2 p) {
     vec2 ext = extent();
     if (p.x < 0 || p.y < 0 || float(p.x) >= ext.x || float(p.y) >= ext.y) return vec4(0.0);
-    return apply_tt(textureLod(glyphtex, (vec2(p) + 0.5) / ext, 0.0), backdrop_tex_type());
+    return apply_tt(texelFetch(glyphtex, p, 0), backdrop_tex_type());
 }
 
 float floor_round(float v) {
@@ -222,8 +241,10 @@ vec4 morphology(ivec2 p) {
     return acc;
 }
 
-// Mirrors `lighting_gradient` / `lighting_pixel` in filter_math.odin; `a`
-// is the 3 x 3 alpha neighbourhood, row by row.
+// The Filter Effects spec's Sobel normal (its edge kernels where a neighbour
+// is outside the valid rectangle) and resvg's lighting.rs, colours rounded
+// to 8 bits where it rounds them; `a` is the 3 x 3 alpha neighbourhood, row
+// by row.
 vec4 lighting(ivec2 p) {
     vec4 vr = valid_rect();
     vec2 fp = vec2(p);
@@ -363,19 +384,19 @@ vec4 convolve(ivec2 p) {
     return vec4(rgb, ba);
 }
 
-// ---- feTurbulence (mirrors turbulence_fill in filter_cpu.odin) --------------
+// ---- feTurbulence (the spec's reference noise) -------------------------------
 //
 // `tex` is the lattice image (turbulence_lattice_pixels): row 0 the
 // permutation, row 1 + k channel k's gradients in 16-bit fixed point.
-// Uniforms: see turbulence_uniforms in sdlgpu/render.odin. In f32 rather
+// Uniforms: see turbulence_uniforms in image.odin. In f32 rather
 // than the spec's f64: lattice indices are kept PerlinN (4096, a multiple
 // of 256) lower than the spec's, so the cell fraction keeps f32 precision;
 // the error is far below one 8-bit step. Octaves past
 // TURBULENCE_MAX_OCTAVES (each adds under 2^-24) are skipped.
 
-// Texel (x, y) of the lattice, sampled at its centre.
+// Texel (x, y) of the lattice.
 vec4 lattice_texel(int x, int y) {
-    return textureLod(tex, vec2((float(x) + 0.5) / 256.0, (float(y) + 0.5) / 5.0), 0.0);
+    return texelFetch(tex, ivec2(x, y), 0);
 }
 
 int lattice_select(int i) {
@@ -470,9 +491,9 @@ vec4 space_converted(vec4 s, bool to_linear) {
 
 // Bloom (layer_bloom_into): one source pixel's light above the threshold,
 // at half the source's size four of them averaged; P(0): the threshold,
-// whether the source is encoded, its size.
+// whether the source is encoded, its size (`q` clamped to it).
 vec4 bloom_above(ivec2 q) {
-    vec4 c = apply_tex_type(textureLod(tex, (vec2(q) + 0.5) / P(0).zw, 0.0));
+    vec4 c = apply_tex_type(texelFetch(tex, min(q, ivec2(P(0).zw) - 1), 0));
     if (P(0).y != 0.0) {
         c = space_converted(c, true);
     }
@@ -494,8 +515,7 @@ vec4 render_filter(int type, vec2 p) {
     if (type == FILTER_CONVOLVE) return convolve(ip);
     if (type == FILTER_TURBULENCE) return turbulence(ip);
     if (type == FILTER_BLOOM_BRIGHT) return bloom_bright(ip);
-    vec2 uv = p / extent();
-    vec4 s = apply_tex_type(textureLod(tex, uv, 0.0));
+    vec4 s = apply_tex_type(texelFetch(tex, ip, 0));
     if (type == FILTER_BLOOM_ADD) {
         // P(0): where the glow is read; P(1): how much, whether encoded.
         vec4 glow = apply_tt(textureLod(glyphtex, p * P(0).xy + P(0).zw, 0.0), backdrop_tex_type());
@@ -510,7 +530,7 @@ vec4 render_filter(int type, vec2 p) {
         vec4 o;
         for (int k = 0; k < 4; k++) {
             float idx = floor(clamp(us[k], 0.0, 1.0) * 255.0 + 0.5);
-            o[k] = textureLod(glyphtex, vec2((idx + 0.5) / 256.0, 0.5), 0.0)[k];
+            o[k] = texelFetch(glyphtex, ivec2(int(idx), 0), 0)[k];
         }
         return premultiply(o);
     }
@@ -525,12 +545,13 @@ vec4 render_filter(int type, vec2 p) {
     if (type == FILTER_COLOR_SPACE) {
         return space_converted(s, filter_op() == 1);
     }
-    vec4 b = apply_tt(textureLod(glyphtex, uv, 0.0), backdrop_tex_type());
+    vec4 b = apply_tt(texelFetch(glyphtex, ip, 0), backdrop_tex_type());
     if (type == FILTER_BLEND) return blend_pixel(filter_op(), s, b);
     return composite_pixel(filter_op(), P(4), s, b);
 }
 
 void main() {
+    quad_inputs();
     paint_index = fpaint;
     int type = shader_type();
     color = type == FILTER_IMAGE ? render_filtered_image(fpos) : render_filter(type, fpos);

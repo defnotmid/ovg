@@ -330,3 +330,12 @@ css_named_color :: proc(name: string) -> (u32, bool) {
 	}
 	return 0, false
 }
+
+// The sRGB transfer function and its inverse, on one channel in [0, 1].
+srgb_to_linear :: #force_inline proc "contextless" (v: f32) -> f32 {
+	return v / 12.92 if v <= 0.04045 else math.pow((v + 0.055) / 1.055, 2.4)
+}
+
+linear_to_srgb :: #force_inline proc "contextless" (v: f32) -> f32 {
+	return v * 12.92 if v <= 0.0031308 else 1.055 * math.pow(v, 1 / 2.4) - 0.055
+}

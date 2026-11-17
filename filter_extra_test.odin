@@ -133,71 +133,52 @@ test_turbulence_reference :: proc(t: ^testing.T) {
 	for v in seen {
 		testing.expect(t, v)
 	}
-	tp := Turbulence_Params{base_frequency = {1, 1}, octaves = 1}
-	// Noise vanishes on lattice points.
-	testing.expect(t, abs(turbulence(l, tp, {3, 7}, {})[0]) < 1e-12)
-	// Halfway between lattice points the s-curve weights are 1/2: the
-	// mean of the four corner gradients dotted with (+-1/2, +-1/2).
-	p := [2]f64{0.5, 0.5}
-	bx := (0x1000) & 0xff
-	i, j := l.selector[bx], l.selector[bx + 1]
-	q := &l.gradient[2]
-	b00, b10, b01, b11 := l.selector[i + i32(bx)], l.selector[j + i32(bx)], l.selector[i + i32(bx) + 1], l.selector[j + i32(bx) + 1]
-	want := 0.25 * ((0.5 * q[b00][0] + 0.5 * q[b00][1]) + (-0.5 * q[b10][0] + 0.5 * q[b10][1]) + (0.5 * q[b01][0] - 0.5 * q[b01][1]) + (-0.5 * q[b11][0] - 0.5 * q[b11][1]))
-	tp.fractal_noise = true
-	testing.expect(t, abs(turbulence(l, tp, p, {})[2] - want) < 1e-12)
-	// Turbulence sums |noise|, halving per octave.
-	tp.fractal_noise = false
-	tp.octaves = 2
-	two := turbulence(l, tp, p, {})[2]
-	tp.octaves = 1
-	one := turbulence(l, tp, p, {})[2]
-	tp.octaves = 1
-	testing.expect(t, abs(one - abs(want)) < 1e-12 && two >= one)
 }
 
+// Lighting through the filter unit on the software backend: the normal is
+// the spec's Sobel kernels, its edge kernels where a neighbour is outside
+// the valid rectangle, and colours round to 8 bits as resvg rounds them.
 @(test)
 test_lighting_normals :: proc(t: ^testing.T) {
-	// A ramp of 0.1 per pixel: the spec's Sobel normal is twice the slope
-	// everywhere, edges included.
-	ramp := [3][3]f32{{0, 0.1, 0.2}, {0, 0.1, 0.2}, {0, 0.1, 0.2}}
-	g := lighting_gradient(ramp, true, true, true, true)
-	testing.expect(t, abs(g.x - 0.2) < 1e-6 && abs(g.y) < 1e-6)
-	g = lighting_gradient(ramp, false, true, false, true)
-	testing.expect(t, abs(g.x - 0.2) < 1e-6 && abs(g.y) < 1e-6)
-	// Top-left corner kernel on an uneven patch (resvg's top_left_normal:
-	// 2/3 (-2c + 2r - b + br), 2/3 (-2c - r + 2b + br)).
-	a := [3][3]f32{{0, 0, 0}, {0, 0.2, 0.5}, {0, 0.9, 0.4}}
-	g = lighting_gradient(a, false, true, false, true)
-	c, r, b, br := f32(0.2), f32(0.5), f32(0.9), f32(0.4)
-	testing.expect(t, abs(g.x - 2.0 / 3 * (-2 * c + 2 * r - b + br)) < 1e-6)
-	testing.expect(t, abs(g.y - 2.0 / 3 * (-2 * c - r + 2 * b + br)) < 1e-6)
-	// Interior Sobel.
-	a = {{0.1, 0.3, 0.2}, {0.4, 0.5, 0.9}, {0.0, 0.6, 0.8}}
-	g = lighting_gradient(a, true, true, true, true)
-	testing.expect(t, abs(g.x - 0.25 * (-0.1 + 0.2 - 2 * 0.4 + 2 * 0.9 - 0.0 + 0.8)) < 1e-6)
-	testing.expect(t, abs(g.y - 0.25 * (-0.1 - 2 * 0.3 - 0.2 + 0.0 + 2 * 0.6 + 0.8)) < 1e-6)
-
+	s: Fx2
+	fx2_open(&s)
+	defer fx2_close(&s)
+	lit :: proc(s: ^Fx2, l: Lighting, alphas: []u8) -> [][4]u8 {
+		px := make([][4]u8, len(alphas), context.temp_allocator)
+		for a, i in alphas {
+			px[i] = {0, 0, 0, a}
+		}
+		src := row_image(s, px)
+		dst := row_image(s, make([][4]u8, len(alphas), context.temp_allocator))
+		l := l
+		l.valid = {0, 0, f32(len(alphas)), 1}
+		filter_image(&s.canvas, dst, l, src)
+		flush(&s.canvas)
+		return row_pixels(s, dst, len(alphas))
+	}
 	// A flat surface lit from straight above: full diffuse and specular.
-	flat: [3][3]f32
 	l := Lighting{light = .Distant, color = {1, 0.5, 0}, surface_scale = 1, constant = 1, specular_exponent = 1, position = {0, 0, 1}, cone_cos = -2}
-	px := lighting_pixel(l, flat, true, true, true, true, 0, 0)
-	testing.expect(t, px == [4]f32{1, 128.0 / 255, 0, 1})
+	flat := []u8{0, 0, 0}
+	testing.expect_value(t, lit(&s, l, flat)[1], [4]u8{255, 128, 0, 255})
 	l.specular = true
-	px = lighting_pixel(l, flat, true, true, true, true, 0, 0)
-	testing.expect(t, px == [4]f32{1, 128.0 / 255, 0, 1})
-	// At 60 degrees elevation diffuse is sin(60).
+	testing.expect_value(t, lit(&s, l, flat)[1], [4]u8{255, 128, 0, 255})
+	// A ramp of 26/255 a pixel, lit from above: the interior kernel and
+	// both edge kernels give the slope twice over, so every pixel is
+	// 255 / sqrt(1 + (52/255)^2), 250.
 	l.specular = false
 	l.color = 1
+	ramp := lit(&s, l, {0, 26, 52})
+	for p, x in ramp {
+		testing.expectf(t, p == {250, 250, 250, 255}, "ramp x=%d: %v", x, p)
+	}
+	// At 60 degrees elevation diffuse is sin(60).
 	el := f32(math.PI / 3)
 	l.position = {math.cos(el), 0, math.sin(el)}
-	px = lighting_pixel(l, flat, true, true, true, true, 0, 0)
-	testing.expect_value(t, u8(px.r * 255 + 0.5), u8(math.floor(255 * math.sin(el) + 0.5)))
+	testing.expect_value(t, lit(&s, l, flat)[1].r, u8(math.floor(255 * math.sin(el) + 0.5)))
 	// A spot light pointing away leaves the surface black.
 	l.light = .Spot
 	l.position = {0, 0, 10}
 	l.points_at = {0, 0, 20}
 	l.spot_exponent = 1
-	px = lighting_pixel(l, flat, true, true, true, true, 0, 0)
-	testing.expect(t, px.rgb == 0)
+	testing.expect_value(t, lit(&s, l, flat)[1], [4]u8{0, 0, 0, 255})
 }
