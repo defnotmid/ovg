@@ -1,5 +1,6 @@
 package ovg
 
+import "core:slice"
 import "core:testing"
 
 // Expected pixels come from an independent transcription of the W3C
@@ -462,4 +463,63 @@ test_filter_bloom :: proc(t: ^testing.T) {
 	draw(dim[:], false, a[:])
 	testing.expect_value(t, a[(64 * SIZE + 88) * 4], 0)
 	testing.expect_value(t, a[(64 * SIZE + 64) * 4], 255)
+}
+
+// blend_pixel is filter.frag's blend on the CPU: for every mode, over
+// premultiplied pairs whose straight channels hit each formula's branch edges
+// (0, 0.25, 0.5, 1) and alphas 0, partial and 1, the Blend filter's RGBA16F
+// output equals blend_pixel of the same half inputs, rounded to half.
+@(test)
+test_blend_pixel_matches_filter :: proc(t: ^testing.T) {
+	V :: [?]f32{0, 0.125, 0.25, 0.5, 0.625, 1}
+	A :: [?]f32{0, 0.375, 1}
+	N :: len(V) * len(V) * len(V) * len(A)
+	colors := make([][4]f16, N)
+	defer delete(colors)
+	for &c, i in colors {
+		v, a := V, A
+		k := i / len(A)
+		al := a[i % len(A)]
+		c = {f16(v[k % len(V)] * al), f16(v[k / len(V) % len(V)] * al), f16(v[k / (len(V) * len(V))] * al), f16(al)}
+	}
+	// Pixel (x, y) blends source colors[x] onto backdrop colors[y].
+	src_px := make([][4]f16, N * N)
+	back_px := make([][4]f16, N * N)
+	defer delete(src_px)
+	defer delete(back_px)
+	for y in 0 ..< N {
+		for x in 0 ..< N {
+			src_px[y * N + x] = colors[x]
+			back_px[y * N + x] = colors[y]
+		}
+	}
+	s: Fx
+	fx_open(&s)
+	defer fx_close(&s)
+	c := &s.canvas
+	src, _ := create_image_empty(c, N, N, .RGBA16F)
+	update_image(c, src, {.RGBA16F, slice.to_bytes(src_px), N, N, 0}, 0, 0)
+	back, _ := create_image_empty(c, N, N, .RGBA16F)
+	update_image(c, back, {.RGBA16F, slice.to_bytes(back_px), N, N, 0}, 0, 0)
+	dst, _ := create_image_empty(c, N, N, .RGBA16F)
+	for mode in Blend_Mode {
+		filter_image(c, dst, Blend{mode, back}, src)
+		flush(c)
+		out := slice.reinterpret([][4]f16, image_store_get(&c.images, dst).image.pixels[:N * N * 8])
+		bad := 0
+		for y in 0 ..< N {
+			for x in 0 ..< N {
+				sx, bx := colors[x], colors[y]
+				w := blend_pixel(mode, {f32(sx.r), f32(sx.g), f32(sx.b), f32(sx.a)}, {f32(bx.r), f32(bx.g), f32(bx.b), f32(bx.a)})
+				want := [4]f16{f16(w.r), f16(w.g), f16(w.b), f16(w.a)}
+				if out[y * N + x] != want {
+					if bad < 4 {
+						testing.expectf(t, false, "%v: source %v backdrop %v: filter %v blend_pixel %v", mode, sx, bx, out[y * N + x], want)
+					}
+					bad += 1
+				}
+			}
+		}
+		testing.expectf(t, bad == 0, "%v: %d of %d pixels differ", mode, bad, N * N)
+	}
 }

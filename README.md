@@ -302,7 +302,7 @@ GPU sampler returns them) and write premultiplied color.
 | `Blur_XY{sigma_x, sigma_y, edge}` | stdDeviation="x y" | per-axis sigma (<= 0 leaves the axis), edge `.Transparent` or `.Clamp` |
 | `Color_Matrix{m}` | feColorMatrix | 4x5 rows on straight color, offsets in 0..1, clamped; helpers `color_matrix_saturate`, `color_matrix_hue_rotate`, `color_matrix_luminance_to_alpha`, `COLOR_MATRIX_IDENTITY` |
 | `Color_Space_Convert{to_linear}` | color-interpolation-filters | sRGB <-> linearRGB on straight color |
-| `Blend{mode, backdrop}` | feBlend, mix-blend-mode | the 16 W3C blend modes, source (in) onto backdrop (in2), composited source-over |
+| `Blend{mode, backdrop}` | feBlend, mix-blend-mode | the 16 W3C blend modes, source (in) onto backdrop (in2), composited source-over; `blend_pixel(mode, s, b)` is the same on one premultiplied pixel on the CPU (hit-testing through a blended layer), tested equal to the filter |
 | `Composite{op, k, backdrop}` | feComposite | over, in, out, atop, xor, lighter, arithmetic k1..k4 (clamped, color <= alpha) |
 | `Component_Transfer{lut}` | feComponentTransfer | straight channels through a 256 x 1 RGBA8 table (`component_transfer_lut` from `Transfer_Function`s: identity, table, discrete, linear, gamma, truncated to 8 bits as resvg) |
 | `Morphology{radius, dilate, valid}` | feMorphology | per-channel min / max over a box (at most `MORPHOLOGY_MAX_RADIUS`), two separable passes; a fractional radius blends in the next ring by its fraction, so animated radii move smoothly |
