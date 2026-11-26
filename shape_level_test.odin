@@ -247,11 +247,11 @@ test_shape_levels_frame :: proc(t: ^testing.T) {
 	// The same curves built alone: the frame holds just their words.
 	b: Shape_Builder
 	defer shape_builder_destroy(&b)
-	b.tol = 1.0 / 16
+	b.tol = 1.0 / 256
 	shape_add_path(&b, &p, state(&c).transform)
 	alone: [dynamic]u32
 	defer delete(alone)
-	_, _, built := cv.build_append(&b, &alone, search = false)
+	_, _, built := cv.pieces_append(&b, &alone)
 	testing.expect(t, built)
 	testing.expect_value(t, len(c.shape_words), len(alone))
 	if len(c.shapes) == 1 {

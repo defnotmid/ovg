@@ -395,7 +395,15 @@ frame_glyph :: proc(c: ^Canvas, f: ^Font, g: Glyph_Index, outline: bool) -> (Fra
 	sync.mutex_unlock(&fs.lock)
 	if added {
 		start := len(c.shape_words)
-		if origin, extent, ok := cv.build_append(b, &c.shape_words, search = false); ok {
+		origin: [2]f32
+		extent: f32
+		ok: bool
+		if c.backend.fills_as_pieces && !outline {
+			origin, extent, ok = cv.pieces_append(b, &c.shape_words)
+		} else {
+			origin, extent, ok = cv.build_append(b, &c.shape_words, search = false)
+		}
+		if ok {
 			words := c.shape_words[start:]
 			fg.words = {u32(start), u32(len(words))}
 			fg.local = {extent, 0, 0, extent, origin.x, origin.y}

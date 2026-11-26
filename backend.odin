@@ -412,6 +412,12 @@ Backend :: struct {
 	// Images are read from memory as stored (`Backend_Image.pixels`): a
 	// player borrows stable shared pixels instead of copying them.
 	memory_images: bool,
+	// The backend integrates a fill's pieces itself and builds a grid only
+	// where it needs one (cv.grid_append): its canvas records a path's fill
+	// as the pieces alone (cv.pieces_append), without the grid the shader
+	// reads per pixel. Otherwise (and when recording frames for players)
+	// fills carry their grid.
+	fills_as_pieces: bool,
 	// Custom programs (program.odin); nil when unsupported.
 	create_program: proc(data: rawptr, desc: Program_Desc) -> (Backend_Program, Error),
 	delete_program: proc(data: rawptr, program: Backend_Program),

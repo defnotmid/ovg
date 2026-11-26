@@ -8,6 +8,7 @@ import "core:simd"
 import "core:slice"
 import "core:strings"
 import "core:sync"
+import cv "deps:ocurves"
 import common "deps:oicut/common"
 import "deps:oksl"
 
@@ -75,6 +76,12 @@ Software_Backend :: struct {
 	pieces:        [dynamic]Sw_Piece,
 	piece_at:      [dynamic]u32,
 	piece_band0:   [dynamic]i32,
+	// The grids of fills recorded as pieces alone (cv.pieces_append) that the
+	// shader reads (sw_build_pieces): each instance's range of `grid_words`,
+	// empty for none, built with `grid_builder`.
+	grid_at:       [dynamic]Range,
+	grid_words:    [dynamic]u32,
+	grid_builder:  cv.Builder,
 	piece_rows:    [dynamic]u32,
 	piece_list:    [dynamic]u32,
 	// The bands' shading memory, kept warm across frames: a band takes a set
@@ -158,6 +165,9 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.pieces = make([dynamic]Sw_Piece, allocator)
 	b.piece_at = make([dynamic]u32, allocator)
 	b.piece_band0 = make([dynamic]i32, allocator)
+	b.grid_at = make([dynamic]Range, allocator)
+	b.grid_words = make([dynamic]u32, allocator)
+	b.grid_builder.curves = make([dynamic]cv.Curve, allocator)
 	b.piece_rows = make([dynamic]u32, allocator)
 	b.piece_list = make([dynamic]u32, allocator)
 	b.lanes_free = make([dynamic]^Sw_Lanes, runtime.heap_allocator())
@@ -211,6 +221,9 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.pieces)
 	delete(b.piece_at)
 	delete(b.piece_band0)
+	delete(b.grid_at)
+	delete(b.grid_words)
+	cv.builder_destroy(&b.grid_builder)
 	delete(b.piece_rows)
 	delete(b.piece_list)
 	for L in b.lanes_free {
@@ -240,6 +253,7 @@ software_backend :: proc(b: ^Software_Backend) -> Backend {
 		screenshot = sw_screenshot,
 		read_image = sw_read_image,
 		memory_images = true,
+		fills_as_pieces = true,
 		create_program = sw_create_program,
 		delete_program = sw_delete_program,
 	}
@@ -708,7 +722,12 @@ sw_build_groups :: proc(b: ^Software_Backend, frame: Frame, cmds: []Command) {
 		for inst, i in members {
 			at := u32(len(b.group_words))
 			if inst.marker == .None {
-				append(&b.group_words, ..instance_words(inst, frame.shape_words))
+				// The group shader reads each member's grid.
+				if words := instance_words(inst, frame.shape_words); cv.has_grid(words) {
+					append(&b.group_words, ..words)
+				} else {
+					cv.grid_append(&b.grid_builder, words, &b.group_words)
+				}
 			}
 			append(&b.group_rows, shader_instance(inst, frame.shape_words, at, {}))
 			m: Shader_Motion
@@ -849,6 +868,9 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 				continue
 			}
 			words := instance_words(inst, frame.shape_words)
+			if g := b.grid_at[it.inst]; g.count > 0 {
+				words = b.grid_words[g.start:][:g.count]
+			}
 			if sw_blit_image(b, run.images, cmd, &r, it.inst, inst, words, px) {
 				continue
 			}
@@ -1622,9 +1644,11 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 	clear(&b.pieces)
 	clear(&b.piece_rows)
 	clear(&b.piece_list)
+	clear(&b.grid_words)
 	if len(b.piece_at) < len(frame.shapes) {
 		resize(&b.piece_at, len(frame.shapes))
 		resize(&b.piece_band0, len(frame.shapes))
+		resize(&b.grid_at, len(frame.shapes))
 	}
 	for cmd in run.cmds {
 		c, is_draw := cmd.type.(Cmd_Draw_Shapes)
@@ -1634,7 +1658,18 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 		r := sw_raster(run, cmd)
 		for i in c.instances.start ..< c.instances.start + c.instances.count {
 			b.piece_at[i] = max(u32)
+			b.grid_at[i] = {}
 			inst := frame.shapes[i]
+			// The shader reads the grid of a feathered fill and of an aliased
+			// one's edges: built here for a fill recorded without one.
+			if inst.marker == .None && inst.hairline == 0 && (inst.widen != 0 || inst.edge == .Aliased) {
+				if words := instance_words(inst, frame.shape_words); !cv.has_grid(words) {
+					at := len(b.grid_words)
+					if cv.grid_append(&b.grid_builder, words, &b.grid_words) {
+						b.grid_at[i] = {u32(at), u32(len(b.grid_words) - at)}
+					}
+				}
+			}
 			ib := b.bounds[i]
 			y0, y1 := clamp_i32(math.floor(ib.miny), r.y0, r.y1), clamp_i32(math.ceil(ib.maxy), r.y0, r.y1)
 			// A hairline's or a marker's coverage isn't its pieces' area,
