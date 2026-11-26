@@ -496,14 +496,9 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 @(private)
 fill_built :: proc(c: ^Canvas, paint: Paint, t: Transform2D) {
 	start := len(c.shape_words)
-	origin: [2]f32
-	extent: f32
-	ok: bool
-	if c.backend.fills_as_pieces {
-		origin, extent, ok = cv.pieces_append(&c.scratch.builder, &c.shape_words)
-	} else {
-		origin, extent, ok = cv.build_append(&c.scratch.builder, &c.shape_words, search = false)
-	}
+	// The pieces alone, on every backend: each builds what it reads from
+	// them (the GPU's and the software shader's grids, cv.grid_append).
+	origin, extent, ok := cv.pieces_append(&c.scratch.builder, &c.shape_words)
 	if !ok {
 		return
 	}

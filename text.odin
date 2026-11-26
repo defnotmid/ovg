@@ -398,10 +398,12 @@ frame_glyph :: proc(c: ^Canvas, f: ^Font, g: Glyph_Index, outline: bool) -> (Fra
 		origin: [2]f32
 		extent: f32
 		ok: bool
-		if c.backend.fills_as_pieces && !outline {
-			origin, extent, ok = cv.pieces_append(b, &c.shape_words)
-		} else {
+		// A hairline reads the outline only a grid keeps; a fill, the
+		// pieces.
+		if outline {
 			origin, extent, ok = cv.build_append(b, &c.shape_words, search = false)
+		} else {
+			origin, extent, ok = cv.pieces_append(b, &c.shape_words)
 		}
 		if ok {
 			words := c.shape_words[start:]

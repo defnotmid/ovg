@@ -254,7 +254,9 @@ Cmd_Draw_Shapes :: struct {
 }
 // A shape drawn under `transform` (shape units to drawing coordinates):
 // `shape` (kept by its owner; GPU backends upload it once), or when nil
-// `Frame.shape_words[words]` (a path filled this frame). A pixel's
+// `Frame.shape_words[words]` (a path filled this frame: its pieces, which
+// each backend makes the grid it reads from with cv.grid_append; a
+// hairline glyph's whole shape, outline and all). A pixel's
 // coverage is its footprint's, `widen` pixels wider than the pixel (a
 // feathered edge), as `edge` takes it; with `hairline` its share within
 // hairline / 2 pixels of the shape's outline (`hairline_shape`) instead. A `marker` has no words: it is the unit
@@ -369,7 +371,9 @@ Frame :: struct {
 	filters:   []Image_Filter,
 	runs:      []Program_Run,
 	shapes:    []Shape_Instance,
-	// The words of the shapes built this frame (`Shape_Instance.words`).
+	// The words of the shapes built this frame (`Shape_Instance.words`):
+	// fills' pieces (cv.pieces_append), the same whichever backend draws
+	// them, and hairline glyphs' whole shapes (cv.has_grid tells them apart).
 	shape_words: []u32,
 	// Motion blur (canvas_motion_blur): the frame target and the targets set
 	// with `velocity` keep velocity twins, and `motions` holds each shape
@@ -412,12 +416,6 @@ Backend :: struct {
 	// Images are read from memory as stored (`Backend_Image.pixels`): a
 	// player borrows stable shared pixels instead of copying them.
 	memory_images: bool,
-	// The backend integrates a fill's pieces itself and builds a grid only
-	// where it needs one (cv.grid_append): its canvas records a path's fill
-	// as the pieces alone (cv.pieces_append), without the grid the shader
-	// reads per pixel. Otherwise (and when recording frames for players)
-	// fills carry their grid.
-	fills_as_pieces: bool,
 	// Custom programs (program.odin); nil when unsupported.
 	create_program: proc(data: rawptr, desc: Program_Desc) -> (Backend_Program, Error),
 	delete_program: proc(data: rawptr, program: Backend_Program),

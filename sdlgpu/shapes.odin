@@ -1,6 +1,8 @@
 package ovg_sdlgpu
 
 import "core:math"
+import "core:slice"
+import cv "deps:ocurves"
 import sdl "vendor:sdl3"
 
 import vg ".."
@@ -92,6 +94,7 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 		b.stats.shape_restarts = 1
 	}
 	held := st.kept
+	frame_words_build(b, frame)
 	place :: proc(st: ^Shape_Store, data: []u32) -> u32 {
 		offset := st.top
 		if len(data) > 0 {
@@ -126,11 +129,11 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 			b.shape_offsets[i] = p.offsets[level]
 		}
 		st.kept = st.top
-		own := place(st, frame.shape_words)
+		own := place(st, b.frame_words[:])
 		grids = place(st, b.group_words[:])
 		for inst, i in frame.shapes {
 			if inst.shape == nil {
-				b.shape_offsets[i] = own + inst.words.start
+				b.shape_offsets[i] = own + b.frame_at[i]
 			}
 		}
 		if st.top <= STORE_MAX_CAPACITY / 2 || again {
@@ -146,6 +149,43 @@ store_place :: proc(b: ^SDL_Backend, frame: vg.Frame) -> (grids: u32, ok: bool) 
 	st.held = held
 	// Sizes in bytes are 32-bit (store_capacity).
 	return grids, st.top <= STORE_MAX_CAPACITY / 2
+}
+
+// The frame's own words as the shader reads them, into `b.frame_words`:
+// each fill recorded as pieces (cv.pieces_append) gets its grid
+// (cv.grid_append), and a whole shape (a hairline glyph's) is copied. A
+// record many instances draw (a glyph's) is built once: the instances,
+// sorted by where their words start, meet it in a row. `b.frame_at` holds
+// each instance's offset.
+@(private = "file")
+frame_words_build :: proc(b: ^SDL_Backend, frame: vg.Frame) {
+	clear(&b.frame_words)
+	clear(&b.frame_order)
+	resize(&b.frame_at, len(frame.shapes))
+	for inst, i in frame.shapes {
+		b.frame_at[i] = 0
+		if inst.shape == nil && inst.words.count > 0 {
+			append(&b.frame_order, [2]u32{inst.words.start, u32(i)})
+		}
+	}
+	slice.sort_by(b.frame_order[:], proc(x, y: [2]u32) -> bool {return x[0] < y[0]})
+	last, at := max(u32), u32(0)
+	for o in b.frame_order {
+		if o[0] != last {
+			last = o[0]
+			at = u32(len(b.frame_words))
+			r := frame.shapes[o[1]].words
+			words := frame.shape_words[r.start:][:r.count]
+			if cv.has_grid(words) {
+				append(&b.frame_words, ..words)
+			} else {
+				// The canvas built the pieces, so they always make a grid.
+				ok := cv.grid_append(&b.grid_builder, words, &b.frame_words)
+				assert(ok, "a frame's pieces make a grid")
+			}
+		}
+		b.frame_at[o[1]] = at
+	}
 }
 
 // The words a fresh store holds for `top` placed: four times as many, a

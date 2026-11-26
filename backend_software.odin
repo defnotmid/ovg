@@ -253,7 +253,6 @@ software_backend :: proc(b: ^Software_Backend) -> Backend {
 		screenshot = sw_screenshot,
 		read_image = sw_read_image,
 		memory_images = true,
-		fills_as_pieces = true,
 		create_program = sw_create_program,
 		delete_program = sw_delete_program,
 	}

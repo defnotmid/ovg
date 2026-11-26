@@ -11,6 +11,7 @@ import "base:runtime"
 import "core:mem"
 import sdl "vendor:sdl3"
 
+import cv "deps:ocurves"
 import vg ".."
 import "deps:oksl"
 
@@ -131,6 +132,14 @@ SDL_Backend :: struct {
 	// its scissor's pixels (target pixels x0, y0, x1, y1).
 	shape_offsets:    [dynamic]u32,
 	shape_clips:      [dynamic][4]f32,
+	// The frame's own words as the shader reads them (store_place): each
+	// fill's grid built from its pieces once, however many instances draw
+	// it, and whole shapes as they are; each instance's offset in them, and
+	// the instances by their words (start, instance) to find shared ones.
+	frame_words:      [dynamic]u32,
+	frame_at:         [dynamic]u32,
+	frame_order:      [dynamic][2]u32,
+	grid_builder:     cv.Builder,
 	// The frame's group records, after its instances, and their grids
 	// (render.odin, plan_group).
 	groups:           [dynamic]vg.Shader_Instance,
@@ -178,6 +187,10 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 		rows      = make([dynamic]Row, allocator),
 		shape_offsets = make([dynamic]u32, allocator),
 		shape_clips = make([dynamic][4]f32, allocator),
+		frame_words = make([dynamic]u32, allocator),
+		frame_at = make([dynamic]u32, allocator),
+		frame_order = make([dynamic][2]u32, allocator),
+		grid_builder = {curves = make([dynamic]cv.Curve, allocator)},
 		groups = make([dynamic]vg.Shader_Instance, allocator),
 		group_words = make([dynamic]u32, allocator),
 		twins = make([dynamic]Cached_Texture, allocator),
@@ -251,6 +264,10 @@ destroy :: proc(b: ^SDL_Backend) {
 		delete(b.rows)
 		delete(b.shape_offsets)
 		delete(b.shape_clips)
+		delete(b.frame_words)
+		delete(b.frame_at)
+		delete(b.frame_order)
+		cv.builder_destroy(&b.grid_builder)
 		delete(b.groups)
 		delete(b.group_words)
 		vg.group_grid_scratch_destroy(&b.group_grid)
@@ -310,6 +327,10 @@ destroy :: proc(b: ^SDL_Backend) {
 	delete(b.rows)
 	delete(b.shape_offsets)
 	delete(b.shape_clips)
+	delete(b.frame_words)
+	delete(b.frame_at)
+	delete(b.frame_order)
+	cv.builder_destroy(&b.grid_builder)
 	delete(b.groups)
 	delete(b.group_words)
 	vg.group_grid_scratch_destroy(&b.group_grid)
