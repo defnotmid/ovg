@@ -1949,3 +1949,150 @@ test_sw_coverage_edge_cases :: proc(t: ^testing.T) {
 	testing.expect_value(t, px(&s, 15, 16), [4]u8{255, 255, 255, 255})
 	testing.expect_value(t, px(&s, 15, 17), [4]u8{0, 0, 0, 255})
 }
+
+// Direct software fill and 1:1 image-blit fast paths match oksl shader output
+// across blends, fill rules, axis-aligned scissors, layer compositing and motion.
+@(test)
+test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
+	W, H :: 64, 64
+	render_scene :: proc(no_fast_paths: bool) -> (pixels: [W * H * 4]u8, vel: [W * H][2]f32, compiled_inside: bool) {
+		s: Sw
+		sw_open(&s, W, H)
+		defer sw_close(&s)
+		s.backend.no_fast_paths = no_fast_paths
+		c := &s.canvas
+
+		p: Path
+		path_init(&p)
+		defer path_destroy(&p)
+
+		// Background + opaque & translucent Source_Over fills (curves, even-odd & non-zero).
+		clear_rect(c, 0, 0, W, H, rgb(24, 48, 72))
+		path_move_to(&p, 6, 30)
+		path_quad_to(&p, 26, 2, 46, 30)
+		path_quad_to(&p, 26, 58, 6, 30)
+		path_close(&p)
+		path_move_to(&p, 16, 30)
+		path_quad_to(&p, 26, 14, 36, 30)
+		path_quad_to(&p, 26, 46, 16, 30)
+		path_close(&p)
+		eo := paint_color(rgba(230, 90, 40, 255))
+		eo.fill_rule = .Even_Odd
+		fill_path(c, &p, eo)
+
+		save(c)
+		scissor(c, 12.25, 10.5, 36.5, 32.25)
+		path_reset(&p)
+		path_circle(&p, 32, 32, 22)
+		fill_path(c, &p, paint_color(rgba(40, 190, 140, 160)))
+		// Completely outside scissor must leave pixels unchanged.
+		intersect_scissor(c, 0, 0, 4, 4)
+		path_reset(&p)
+		path_rect(&p, 20, 20, 20, 20)
+		fill_path(c, &p, paint_color(WHITE))
+		restore(c)
+
+		// Opaque and translucent Copy blend under axis-aligned scissor.
+		save(c)
+		set_composite_operation(c, .Copy)
+		scissor(c, 4, 40, 28, 20)
+		path_reset(&p)
+		path_rect(&p, 2, 38, 14, 16)
+		fill_path(c, &p, paint_color(rgba(200, 120, 60, 140)))
+		path_reset(&p)
+		path_rect(&p, 14, 44, 14, 14)
+		fill_path(c, &p, paint_color(rgb(10, 200, 220)))
+		restore(c)
+
+		// 1:1 RGBA8 image blits (premultiplied & unpremultiplied, with & without tint).
+		src_pre: [16 * 16 * 4]u8
+		src_raw: [16 * 16 * 4]u8
+		for y in 0 ..< 16 {
+			for x in 0 ..< 16 {
+				i := (y * 16 + x) * 4
+				a := u8(64 + x * 12)
+				src_raw[i + 0] = u8(20 + x * 14)
+				src_raw[i + 1] = u8(220 - y * 10)
+				src_raw[i + 2] = u8(40 + ((x + y) & 7) * 24)
+				src_raw[i + 3] = a
+				src_pre[i + 0] = u8((u16(src_raw[i + 0]) * u16(a) + 127) / 255)
+				src_pre[i + 1] = u8((u16(src_raw[i + 1]) * u16(a) + 127) / 255)
+				src_pre[i + 2] = u8((u16(src_raw[i + 2]) * u16(a) + 127) / 255)
+				src_pre[i + 3] = a
+			}
+		}
+		img_pre, _ := create_image(c, image_source_rgba(src_pre[:], 16, 16), {.Premultiplied})
+		img_raw, _ := create_image(c, image_source_rgba(src_raw[:], 16, 16), {})
+
+		for op, k in ([4]Composite_Operation{.Source_Over, .Copy, .Source_In, .Destination_Out}) {
+			save(c)
+			set_composite_operation(c, op)
+			ox := f32((k % 2) * 18 + 26)
+			oy := f32((k / 2) * 18 + 6)
+			scissor(c, ox + 1.25, oy + 1.25, 13.5, 13.5)
+			ip := paint_image_tint(img_pre, ox, oy, 16, 16, 0, rgba(220, 180, 240, 190))
+			ip.anti_alias = false
+			path_reset(&p)
+			path_rect(&p, ox, oy, 16, 16)
+			fill_path(c, &p, ip)
+			restore(c)
+		}
+
+		flush(c)
+		compiled_inside = s.backend.programs[.Shape_Inside][0].module != nil
+
+		// Unpremultiplied 1:1 image + clipped opacity layer exercises fallback & layer_blit.
+		ir := paint_image(img_raw, 4, 4, 16, 16, 0, 0.75)
+		ir.anti_alias = false
+		path_reset(&p)
+		path_rect(&p, 4, 4, 16, 16)
+		fill_path(c, &p, ir)
+
+		ls: Layer_Stack
+		defer layer_stack_destroy(&ls, c)
+		layer_stack_begin(&ls, c, W, H)
+		clip: Path
+		path_init(&clip)
+		defer path_destroy(&clip)
+		path_circle(&clip, 48, 48, 12)
+		layer_push(&ls, c, {opacity = 0.65, clip_path = &clip})
+		path_reset(&p)
+		path_rect(&p, 38, 38, 20, 20)
+		fill_path(c, &p, paint_color(rgb(255, 220, 40)))
+		layer_pop(&ls, c)
+		layer_stack_end(&ls, c)
+
+		flush(c)
+		copy(pixels[:], s.backend.pixels)
+
+		// Motion blur solid-fill parity (RGBA8 + velocity buffer).
+		canvas_motion_blur(c, true)
+		clear_rect(c, 0, 0, W, H, BLACK)
+		save(c)
+		set_motion(c, transform_translation(3.5, -2.0))
+		path_reset(&p)
+		path_circle(&p, 32, 32, 16)
+		fill_path(c, &p, paint_color(rgba(180, 90, 210, 200)))
+		restore(c)
+		flush(c)
+		sv, _ := software_backend_velocity(&s.backend)
+		copy(vel[:], sv)
+		return
+	}
+
+	fast_px, fast_vel, compiled_inside := render_scene(false)
+	slow_px, slow_vel, _ := render_scene(true)
+	testing.expect(t, !compiled_inside)
+
+	max_px_diff := 0
+	for i in 0 ..< len(fast_px) {
+		max_px_diff = max(max_px_diff, abs(int(fast_px[i]) - int(slow_px[i])))
+	}
+	testing.expectf(t, max_px_diff <= 1, "fast path pixel diff %d > 1", max_px_diff)
+
+	max_vel_diff: f32 = 0
+	for i in 0 ..< len(fast_vel) {
+		max_vel_diff = max(max_vel_diff, abs(fast_vel[i].x - slow_vel[i].x), abs(fast_vel[i].y - slow_vel[i].y))
+	}
+	testing.expectf(t, max_vel_diff <= 1e-3, "fast path velocity diff %v > 1e-3", max_vel_diff)
+}

@@ -1,5 +1,6 @@
 package ovg
 
+import "base:intrinsics"
 import "base:runtime"
 import "core:math"
 import "core:mem"
@@ -83,6 +84,10 @@ Software_Backend :: struct {
 	// band's 150 KB or so would open a first block of 4 MiB, zeroed.
 	lanes_free:    [dynamic]^Sw_Lanes,
 	lanes_lock:    sync.Mutex,
+	// Every draw through the shader, none through the direct solid fill
+	// (sw_fill_solid) or image blit (sw_blit_image): what
+	// test_sw_fast_paths_match_shader holds them to.
+	no_fast_paths: bool,
 }
 
 // The units the software backend runs on oksl's CPU program: every one but
@@ -646,7 +651,16 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
 						t := frame.shapes[i].transform
 						if c.group == 0 {
-							needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape, .Shape_Inside}
+							s := frame.shapes[i]
+							if !sw_can_blit_image(b, images, cmd, target, run.twin, i, s, frame.shape_words) {
+								fill_solid := s.hairline == 0 && s.marker == .None && s.widen == 0 && s.edge != .Aliased && sw_can_fill_solid(b, cmd, target, s)
+								if !fill_solid {
+									needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape}
+									if s.hairline == 0 && s.marker == .None && s.widen == 0 {
+										needs += {.Shape_Inside}
+									}
+								}
+							}
 						}
 					}
 					ib := b.bounds[i]
@@ -822,21 +836,28 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 		}
 		for it in items {
 			inst := frame.shapes[it.inst]
+			px := sw_pixels(&r, b.bounds[it.inst])
+			if px[0] >= px[2] || px[1] >= px[3] {
+				continue
+			}
+			if sw_fill_solid(lanes, &r, b, it.inst, inst, px, band) {
+				continue
+			}
+			words := instance_words(inst, frame.shape_words)
+			if sw_blit_image(b, run.images, cmd, &r, it.inst, inst, words, px) {
+				continue
+			}
 			unit := Sw_Unit.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape
 			uv, data := shader_instance_inputs(inst, 0)
 			data.w = it.inst
-			words := instance_words(inst, frame.shape_words)
 			buffers := [4][]u32{paints, words, nil, slice.reinterpret([]u32, b.motion_rows[:])}
 			prog := b.programs[unit][motion]
 			to_rc := transform_inverse(inst.transform)
 			uniforms := sw_shape_uniforms(prog, to_rc, uv, data)
-			px := sw_pixels(&r, b.bounds[it.inst])
-			// A fill: its coverage accumulated from its pieces, when that
-			// costs less than the shader's at every pixel (about as much a
-			// piece as a quad), and its paint shaded where it covers: at
-			// coverage 1, scaled by the pixel's (the paint's colour and motion
-			// are linear in it). An aliased fill's partly covered quads take
-			// the shader's winding test.
+			// A fill: its coverage accumulated from its pieces, and its paint
+			// shaded where it covers: at coverage 1, scaled by the pixel's (the
+			// paint's colour and motion are linear in it). An aliased fill's
+			// partly covered quads take the shader's winding test.
 			if !sw_coverage(lanes, b, it.inst, inst, px, band) {
 				sw_shade_rect(lanes, &r, prog, px, uniforms[:], buffers[:], textures[:])
 				continue
@@ -1480,10 +1501,21 @@ sw_shade_batch :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i
 	shaded := L.shaded[:count]
 	in_ := oksl.Fragment_Quads{count = count, origin = origins, helpers = L.helpers[:count]}
 	oksl.run_fragment(&m.program, uniforms, in_, outputs, shaded, &L.scratch, {buffers = buffers, channel_images = textures})
+	fast_rgba8 := colour && r.target.format == .RGBA8
+	blend_ok, is_copy := sw_solid_blend(r.blend)
+	fast_over := fast_rgba8 && blend_ok && !is_copy
+	fast_copy := fast_rgba8 && blend_ok && is_copy
+	dst_px: []u32
+	dst_stride: int
+	if fast_over || fast_copy {
+		dst_px = slice.reinterpret([]u32, r.target.pixels)
+		dst_stride = int(r.target.width)
+	}
+	has_cov := cov.pixels != nil
 	for lanes, q in shaded {
 		o := origins[q]
 		for l in lanes {
-			if cov.pixels != nil {
+			if has_cov {
 				// The shader's discard below half an 8-bit step, and its
 				// scale.
 				v := cov.pixels[int(o.y + i32(l >> 1) - cov.origin.y) * cov.stride + int(o.x + i32(l & 1) - cov.origin.x)]
@@ -1498,13 +1530,26 @@ sw_shade_batch :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i
 					L.motion[q * 4 + l] *= v
 				}
 			}
-			tx, ty := u32(o.x + i32(l & 1) - r.ox), u32(o.y + i32(l >> 1) - r.oy)
-			if colour {
-				blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+			tx, ty := int(o.x + i32(l & 1) - r.ox), int(o.y + i32(l >> 1) - r.oy)
+			if fast_over {
+				c := saturate4(L.color[q * 4 + l])
+				if c[3] >= 1 {
+					dst_px[ty * dst_stride + tx] = transmute(u32)to_unorm8x4(c)
+				} else if c != {} {
+					d := transmute([4]u8)dst_px[ty * dst_stride + tx]
+					df := #simd[4]f32{f32(d[0]), f32(d[1]), f32(d[2]), f32(d[3])}
+					ia := 1 - c[3]
+					out := simd.fma(df, #simd[4]f32{ia, ia, ia, ia}, simd.from_array(c * 255 + 0.5))
+					dst_px[ty * dst_stride + tx] = transmute(u32)cast(#simd[4]u8)simd.clamp(out, 0, 255)
+				}
+			} else if fast_copy {
+				dst_px[ty * dst_stride + tx] = transmute(u32)to_unorm8x4(saturate4(L.color[q * 4 + l]))
+			} else if colour {
+				blend_texel(r.target, u32(tx), u32(ty), r.blend, L.color[q * 4 + l])
 			}
 			if moves {
 				mo := L.motion[q * 4 + l]
-				d := &r.twin.pixels[ty * r.twin.width + tx]
+				d := &r.twin.pixels[ty * int(r.twin.width) + tx]
 				d^ = mo + d^ * (1 - mo[3])
 			}
 		}
@@ -1513,6 +1558,7 @@ sw_shade_batch :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i
 
 // A piece of a fill in drawing coordinates, monotone in y over [0, 1]:
 // P(s) = a s^2 + b s + c, from y = c.y to y = a.y + b.y + c.y.
+// Straight segments have a == {0, 0}.
 @(private = "file")
 Sw_Piece :: struct {
 	a, b, c: [2]f32,
@@ -1572,11 +1618,9 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 			if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || y0 >= y1 {
 				continue
 			}
-			// As sw_coverage's band, the whole instance: no pieces when they
-			// outnumber its quads.
 			words := instance_words(inst, frame.shape_words)
 			x0, x1 := clamp_i32(math.floor(ib.minx), r.x0, r.x1), clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
-			if x0 >= x1 || sw_piece_count(words) > int(x1 - x0 + 2) / 2 * (int(y1 - y0 + 2) / 2) {
+			if x0 >= x1 || sw_can_blit_image(b, run.images, cmd, run.target, run.twin, i, inst, frame.shape_words) {
 				continue
 			}
 			first := len(b.pieces)
@@ -1638,7 +1682,8 @@ sw_piece_count :: proc "contextless" (words: []u32) -> int {
 }
 
 // An instance's pieces (its words' curves.FORMAT pieces) mapped to drawing
-// coordinates, split where y turns into pieces on [0, 1].
+// coordinates, split where y turns into pieces on [0, 1]. Nearly-flat curves
+// collapse to straight segments (a == 0) so accumulation skips solving roots.
 @(private = "file")
 sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words: []u32) {
 	t := inst.transform
@@ -1649,6 +1694,13 @@ sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words
 		p2 := transform_point(t, f[2], f[3])
 		p3 := transform_point(t, f[4], f[5])
 		a := p1 - 2 * p2 + p3
+		// Max chord deviation of P(t) = a t^2 + b t + c on [0, 1] is |a|/4.
+		if max(abs(a.x), abs(a.y)) <= 1.0 / 256 {
+			if p1.y != p3.y {
+				append(pieces, Sw_Piece{{}, p3 - p1, p1})
+			}
+			continue
+		}
 		b := 2 * (p2 - p1)
 		if a.y != 0 {
 			if s := -b.y / (2 * a.y); s > 0 && s < 1 {
@@ -1671,6 +1723,829 @@ sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words
 			append(pieces, Sw_Piece{a, b, p1})
 		}
 	}
+}
+
+// Accumulates a straight segment from (xa, sy0) to (xb, sy1) within one pixel row.
+@(private = "file")
+sw_accumulate_row_line :: #force_inline proc "contextless" (acc: []f32, xa, sy0, xb, sy1: f32, w: int) {
+	fw := f32(w)
+	dy_row := sy1 - sy0
+	if max(xa, xb) <= 0 {
+		acc[0] += dy_row
+		return
+	}
+	if min(xa, xb) >= fw {
+		return
+	}
+	if xa == xb {
+		col := sw_floor(xa)
+		if col >= 0 && col < i32(w) {
+			area := dy_row * (f32(col + 1) - xa)
+			acc[col] += area
+			acc[col + 1] += dy_row - area
+		}
+		return
+	}
+	step: i32 = 1 if xb > xa else -1
+	col := sw_floor(xa) if step > 0 else sw_ceil(xa) - 1
+	side := f32(col + 1) if step > 0 else f32(col)
+	if col >= 0 && col < i32(w) && ((step > 0 && xb <= side) || (step < 0 && xb >= side)) {
+		area := dy_row * (f32(col + 1) - 0.5 * (xa + xb))
+		acc[col] += area
+		acc[col + 1] += dy_row - area
+		return
+	}
+	inv_dx := 1 / (xb - xa)
+	x, y := xa, sy0
+	if step > 0 && x < 0 {
+		yc := sy0 + clamp(-xa * inv_dx, 0, 1) * dy_row
+		acc[0] += yc - y
+		x, y = 0, yc
+		col = 0
+	} else if step < 0 && x > fw {
+		y = sy0 + clamp((fw - xa) * inv_dx, 0, 1) * dy_row
+		x = fw
+		col = i32(w) - 1
+	}
+	for {
+		if col >= i32(w) {
+			break
+		}
+		if col < 0 {
+			acc[0] += sy1 - y
+			break
+		}
+		c_side := f32(col + 1) if step > 0 else f32(col)
+		xu, yu := xb, sy1
+		if (step > 0 && xb > c_side) || (step < 0 && xb < c_side) {
+			xu = c_side
+			yu = sy0 + clamp((c_side - xa) * inv_dx, 0, 1) * dy_row
+		}
+		d_y := yu - y
+		area := d_y * (f32(col + 1) - 0.5 * (x + xu))
+		acc[col] += area
+		acc[col + 1] += d_y - area
+		if xu == xb {
+			break
+		}
+		x, y = xu, yu
+		col += step
+	}
+}
+
+// Accumulates a straight monotone segment (x0, y0) -> (x0 + dx, y0 + dy) on a
+// `w x h` pixel grid into `L.cov`.
+@(private = "file")
+sw_accumulate_line :: #force_inline proc "contextless" (cov: []f32, x0, y0, dx, dy: f32, w, h, stride: int) {
+	if dy == 0 {
+		return
+	}
+	down := dy > 0
+	ylo := y0 if down else y0 + dy
+	yhi := y0 + dy if down else y0
+	cy0, cy1 := max(ylo, 0), min(yhi, f32(h))
+	if cy0 >= cy1 {
+		return
+	}
+	dx_dy := dx / dy
+	for row in sw_floor(cy0) ..< sw_ceil(cy1) {
+		ra, rb := max(f32(row), cy0), min(f32(row + 1), cy1)
+		if ra >= rb {
+			continue
+		}
+		sy0 := ra if down else rb
+		sy1 := rb if down else ra
+		xa := x0 + (sy0 - y0) * dx_dy
+		xb := x0 + (sy1 - y0) * dx_dy
+		sw_accumulate_row_line(cov[int(row) * stride:][:stride], xa, sy0, xb, sy1, w)
+	}
+}
+
+// Accumulates `list`'s pieces into `L.cov` on an integer pixel grid of size
+// `w x h` starting at drawing coordinates `(gx, gy)`, with `stride` floats per
+// row (`stride >= w + 1`).
+@(private = "file")
+sw_accumulate_pieces :: proc(L: ^Sw_Lanes, b: ^Software_Backend, list: []u32, gx, gy: i32, w, h, stride: int) {
+	resize(&L.cov, stride * h)
+	slice.zero(L.cov[:])
+	fgx, fgy := f32(gx), f32(gy)
+	for k in list {
+		p := b.pieces[k]
+		a := p.a
+		bb := p.b
+		c := p.c - {fgx, fgy}
+		if a.x == 0 && a.y == 0 {
+			sw_accumulate_line(L.cov[:], c.x, c.y, bb.x, bb.y, w, h, stride)
+			continue
+		}
+		ya, yb := c.y, a.y + bb.y + c.y
+		ylo, yhi := max(min(ya, yb), 0), min(max(ya, yb), f32(h))
+		if ylo >= yhi {
+			continue
+		}
+		r0, r1 := sw_floor(ylo), sw_ceil(yhi)
+		inc := yb > ya
+		y_edge := ylo
+		t_edge := (f32(0) if ylo == ya else sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, ylo)) if inc else (f32(1) if ylo == yb else sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, ylo))
+		x_edge := sw_quad_at(a.x, bb.x, c.x, t_edge)
+		sx_turn: f32
+		has_x_turn := a.x != 0
+		if has_x_turn {
+			sx_turn = -bb.x / (2 * a.x)
+		}
+		for row in r0 ..< r1 {
+			y_next := min(f32(row + 1), yhi)
+			t_next := (f32(1) if y_next == yb else sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, y_next)) if inc else (f32(0) if y_next == ya else sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, y_next))
+			x_next := sw_quad_at(a.x, bb.x, c.x, t_next)
+			ta, xa, y_a, tb, xb, y_b := t_edge, x_edge, y_edge, t_next, x_next, y_next
+			if !inc {
+				ta, xa, y_a, tb, xb, y_b = t_next, x_next, y_next, t_edge, x_edge, y_edge
+			}
+			t_edge, x_edge, y_edge = t_next, x_next, y_next
+			if ta >= tb {
+				continue
+			}
+			acc := L.cov[int(row) * stride:][:stride]
+			if has_x_turn && sx_turn > ta && sx_turn < tb {
+				xm := sw_quad_at(a.x, bb.x, c.x, sx_turn)
+				ym := sw_quad_at(a.y, bb.y, c.y, sx_turn)
+				sw_accumulate_cells(acc, a, bb, c, ta, sx_turn, xa, y_a, xm, ym, w)
+				sw_accumulate_cells(acc, a, bb, c, sx_turn, tb, xm, ym, xb, y_b, w)
+			} else {
+				sw_accumulate_cells(acc, a, bb, c, ta, tb, xa, y_a, xb, y_b, w)
+			}
+		}
+	}
+}
+
+@(private = "file")
+Sw_Blit_Op :: enum u8 {
+	Source_Over,
+	Copy,
+	Source_In,
+	Destination_Out,
+}
+
+@(private = "file")
+sw_blit_op :: proc "contextless" (blend: Composite_Operation_State) -> (op: Sw_Blit_Op, ok: bool) {
+	switch blend {
+	case composite_state_from_op(.Source_Over):
+		return .Source_Over, true
+	case composite_state_from_op(.Copy):
+		return .Copy, true
+	case composite_state_from_op(.Source_In):
+		return .Source_In, true
+	case composite_state_from_op(.Destination_Out):
+		return .Destination_Out, true
+	}
+	return {}, false
+}
+
+// Axis-aligned scissor bounds where the horizontal mask is 1 across `[x0, x0 + w)`.
+@(private = "file")
+sw_scissor_x :: proc "contextless" (pr: ^[14][4]f32, x0, w: int, is_copy: bool) -> (has_scissor: bool, in_x0, in_x1: int, alive: bool) {
+	ax, bx, ex, sx := pr[0][0], pr[2][0], pr[8][0], pr[8][2]
+	ay, by := pr[1][1], pr[2][1]
+	has_scissor = ax != 0 || ay != 0 || bx != 0 || by != 0 || pr[8] != {1, 1, 1, 1}
+	in_x0, in_x1 = 0, w
+	if !has_scissor {
+		return false, 0, w, true
+	}
+	if ax == 0 {
+		mx := clamp(0.5 - (abs(bx) - ex) * sx, 0, 1)
+		if mx <= 0 {
+			if !is_copy {
+				return true, 0, 0, false
+			}
+			return true, 0, 0, true
+		}
+		if mx < 1 {
+			in_x0, in_x1 = 0, 0
+		}
+		return true, in_x0, in_x1, true
+	}
+	if sx <= 0 {
+		return true, 0, 0, true
+	}
+	lim := ex - 0.5 / sx
+	if lim < 0 {
+		return true, 0, 0, true
+	}
+	c0 := (-lim - bx) / ax
+	c1 := (lim - bx) / ax
+	if c0 > c1 {
+		c0, c1 = c1, c0
+	}
+	in_x0 = clamp(int(math.ceil(c0 - 0.5 + 1e-5)) - x0, 0, w)
+	in_x1 = clamp(int(math.floor(c1 - 0.5 - 1e-5)) - x0 + 1, in_x0, w)
+	return true, in_x0, in_x1, true
+}
+
+// Checks whether an instance is a 1:1 axis-aligned premultiplied RGBA8 image
+// rectangle eligible for direct blitting (`sw_blit_image`).
+@(private = "file")
+sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, twin: Sw_Twin, idx: u32, inst: Shape_Instance, words: []u32) -> (src: Sw_Texture, op: Sw_Blit_Op, rx0, ry0, rx1, ry1, ox, oy: i32, ok: bool) {
+	if b.no_fast_paths || target.format != .RGBA8 || target.pixels == nil {
+		return
+	}
+	if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || inst.edge != .Aliased {
+		return
+	}
+	if twin.pixels != nil && int(idx) < len(b.motion_rows) && b.motion_rows[idx][1][2] != 0 {
+		return
+	}
+	bop, op_ok := sw_blit_op(cmd.composite_operation)
+	if !op_ok {
+		return
+	}
+	pr := &b.paint_rows[inst.paint]
+	if pr[10][3] != f32(Shader_Type.Fill_Image) || pr[10][2] != 0 || pr[10][0] < 1 {
+		return
+	}
+	if pr[0][1] != 0 || pr[1][0] != 0 {
+		return
+	}
+	if pr[3][0] != 1 || pr[3][1] != 0 || pr[4][0] != 0 || pr[4][1] != 1 {
+		return
+	}
+	tex, tex_ok := lookup_texture(images, cmd.image)
+	if !tex_ok || tex.format != .RGBA8 || .Repeat_X in tex.flags || .Repeat_Y in tex.flags {
+		return
+	}
+	if pr[9][0] != f32(tex.width) || pr[9][1] != f32(tex.height) {
+		return
+	}
+	ox_f, oy_f := -pr[5][0], -pr[5][1]
+	ox_i, oy_i := i32(math.round(ox_f)), i32(math.round(oy_f))
+	if abs(f32(ox_i) - ox_f) > 1e-4 || abs(f32(oy_i) - oy_f) > 1e-4 {
+		return
+	}
+	if sw_piece_count(words) != 4 {
+		return
+	}
+	first := int(words[6])
+	t := inst.transform
+	pts: [4][4]f32 // {p1.x, p1.y, p3.x, p3.y}
+	minx, miny := f32(1e30), f32(1e30)
+	maxx, maxy := f32(-1e30), f32(-1e30)
+	for k in 0 ..< 4 {
+		f := slice.reinterpret([]f32, words[first + k * 6:][:6])
+		p1 := transform_point(t, f[0], f[1])
+		p2 := transform_point(t, f[2], f[3])
+		p3 := transform_point(t, f[4], f[5])
+		a := p1 - 2 * p2 + p3
+		if max(abs(a.x), abs(a.y)) > 1e-4 {
+			return
+		}
+		pts[k] = {p1.x, p1.y, p3.x, p3.y}
+		minx = min(minx, min(p1.x, p3.x))
+		miny = min(miny, min(p1.y, p3.y))
+		maxx = max(maxx, max(p1.x, p3.x))
+		maxy = max(maxy, max(p1.y, p3.y))
+	}
+	left_dy: f32 = 0
+	for k in 0 ..< 4 {
+		p := pts[k]
+		horiz := abs(p[1] - p[3]) <= 1e-4
+		vert := abs(p[0] - p[2]) <= 1e-4
+		if !horiz && !vert {
+			return
+		}
+		if (abs(p[0] - minx) > 1e-4 && abs(p[0] - maxx) > 1e-4) ||
+		   (abs(p[2] - minx) > 1e-4 && abs(p[2] - maxx) > 1e-4) ||
+		   (abs(p[1] - miny) > 1e-4 && abs(p[1] - maxy) > 1e-4) ||
+		   (abs(p[3] - miny) > 1e-4 && abs(p[3] - maxy) > 1e-4) {
+			return
+		}
+		if vert && abs(p[0] - minx) <= 1e-4 {
+			left_dy += p[3] - p[1]
+		}
+	}
+	if abs(abs(left_dy) - (maxy - miny)) > 1e-3 {
+		return
+	}
+	ix0, iy0 := i32(math.round(minx)), i32(math.round(miny))
+	ix1, iy1 := i32(math.round(maxx)), i32(math.round(maxy))
+	if abs(f32(ix0) - minx) > 1e-4 || abs(f32(iy0) - miny) > 1e-4 || abs(f32(ix1) - maxx) > 1e-4 || abs(f32(iy1) - maxy) > 1e-4 {
+		return
+	}
+	if ix0 >= ix1 || iy0 >= iy1 || ix0 < ox_i || iy0 < oy_i || ix1 > ox_i + i32(tex.width) || iy1 > oy_i + i32(tex.height) {
+		return
+	}
+	return tex, bop, ix0, iy0, ix1, iy1, ox_i, oy_i, true
+}
+
+@(private = "file")
+sw_can_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, twin: Sw_Twin, idx: u32, inst: Shape_Instance, frame_words: []u32) -> bool {
+	words := instance_words(inst, frame_words)
+	_, _, _, _, _, _, _, _, ok := sw_match_blit_image(b, images, cmd, target, twin, idx, inst, words)
+	return ok
+}
+
+// Fast 1:1 RGBA8 blit for axis-aligned layer/image rectangles, matching
+// shape.frag (`textureLod * inner_col * scissor_mask`) without JIT shading.
+@(private = "file")
+sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, r: ^Raster, idx: u32, inst: Shape_Instance, words: []u32, px: [4]i32) -> bool {
+	src_tex, op, rx0, ry0, rx1, ry1, ox, oy, ok := sw_match_blit_image(b, images, cmd, r.target, r.twin, idx, inst, words)
+	if !ok {
+		return false
+	}
+	x0 := max(px[0], rx0)
+	y0 := max(px[1], ry0)
+	x1 := min(px[2], rx1)
+	y1 := min(px[3], ry1)
+	if x0 >= x1 || y0 >= y1 {
+		return true
+	}
+	w := int(x1 - x0)
+	pr := &b.paint_rows[inst.paint]
+	tint := pr[6]
+	has_scissor, in_x0, in_x1, alive := sw_scissor_x(pr, int(x0), w, op == .Copy)
+	if !alive {
+		return true
+	}
+	unit_tint := tint == {1, 1, 1, 1}
+	tint4 := simd.from_array(tint)
+	src_px := slice.reinterpret([]u32, src_tex.pixels)
+	dst_px := slice.reinterpret([]u32, r.target.pixels)
+	src_stride := int(src_tex.width)
+	dst_stride := int(r.target.width)
+	sx0 := int(x0 - ox)
+	dx0 := int(x0 - r.ox)
+	ax, bx, ex, sx := pr[0][0], pr[2][0], pr[8][0], pr[8][2]
+	ay, by, ey, sy := pr[1][1], pr[2][1], pr[8][1], pr[8][3]
+	inv255 := #simd[4]f32{1.0 / 255, 1.0 / 255, 1.0 / 255, 1.0 / 255}
+	half := #simd[4]f32{0.5, 0.5, 0.5, 0.5}
+	c255 := #simd[4]f32{255, 255, 255, 255}
+
+	blend_px :: #force_inline proc "contextless" (dst: ^u32, su: u32, op: Sw_Blit_Op, scale: #simd[4]f32, inv255, half, c255: #simd[4]f32) {
+		sb := transmute([4]u8)su
+		sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])} * inv255 * scale
+		sf = simd.clamp(sf, 0, 1)
+		switch op {
+		case .Copy:
+			dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(sf * 255 + half, 0, 255)
+		case .Source_Over:
+			sa := simd.extract(sf, 3)
+			if sa >= 1 {
+				dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(sf * 255 + half, 0, 255)
+			} else if sf != {} {
+				db := transmute([4]u8)dst^
+				df := #simd[4]f32{f32(db[0]), f32(db[1]), f32(db[2]), f32(db[3])}
+				ia := 1 - sa
+				out := simd.fma(df, #simd[4]f32{ia, ia, ia, ia}, simd.fma(sf, c255, half))
+				dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(out, 0, 255)
+			}
+		case .Source_In:
+			da := f32(u8(dst^ >> 24)) * (1.0 / 255)
+			dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(sf * (da * 255) + half, 0, 255)
+		case .Destination_Out:
+			sa := simd.extract(sf, 3)
+			if sa >= 1 {
+				dst^ = 0
+			} else if sa > 0 {
+				db := transmute([4]u8)dst^
+				df := #simd[4]f32{f32(db[0]), f32(db[1]), f32(db[2]), f32(db[3])}
+				ia := 1 - sa
+				dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(df * #simd[4]f32{ia, ia, ia, ia} + half, 0, 255)
+			}
+		}
+	}
+
+	for y in y0 ..< y1 {
+		my: f32 = 1
+		if has_scissor {
+			my = clamp(0.5 - (abs(ay * (f32(y) + 0.5) + by) - ey) * sy, 0, 1)
+			if my <= 0 && op != .Copy && op != .Source_In {
+				continue
+			}
+		}
+		srow := src_px[int(y - oy) * src_stride + sx0 :][:w]
+		drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
+		row_full := my >= 1
+		i0 := in_x0 if row_full else 0
+		i1 := in_x1 if row_full else 0
+
+		for cx in 0 ..< i0 {
+			mx := my * clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+		}
+
+		if i1 > i0 {
+			sr := srow[i0:i1]
+			dr := drow[i0:i1]
+			if unit_tint {
+				switch op {
+				case .Copy:
+					copy(dr, sr)
+				case .Source_Over:
+					for su, cx in sr {
+						if su == 0 {
+							continue
+						}
+						if (su >> 24) == 255 {
+							dr[cx] = su
+							continue
+						}
+						sb := transmute([4]u8)su
+						db := transmute([4]u8)dr[cx]
+						sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])}
+						df := #simd[4]f32{f32(db[0]), f32(db[1]), f32(db[2]), f32(db[3])}
+						ia := 1 - f32(sb[3]) * (1.0 / 255)
+						out := simd.fma(df, #simd[4]f32{ia, ia, ia, ia}, sf + half)
+						dr[cx] = transmute(u32)cast(#simd[4]u8)simd.clamp(out, 0, 255)
+					}
+				case .Source_In:
+					for su, cx in sr {
+						du := dr[cx]
+						if du == 0 {
+							continue
+						}
+						da8 := du >> 24
+						if da8 == 0 {
+							dr[cx] = 0
+							continue
+						}
+						if da8 == 255 {
+							dr[cx] = su
+							continue
+						}
+						if su == 0 {
+							dr[cx] = 0
+							continue
+						}
+						sb := transmute([4]u8)su
+						sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])}
+						da := f32(da8) * (1.0 / 255)
+						dr[cx] = transmute(u32)cast(#simd[4]u8)simd.clamp(sf * #simd[4]f32{da, da, da, da} + half, 0, 255)
+					}
+				case .Destination_Out:
+					for su, cx in sr {
+						if su == 0 {
+							continue
+						}
+						sa8 := su >> 24
+						if sa8 == 255 {
+							dr[cx] = 0
+							continue
+						}
+						if sa8 == 0 {
+							continue
+						}
+						db := transmute([4]u8)dr[cx]
+						df := #simd[4]f32{f32(db[0]), f32(db[1]), f32(db[2]), f32(db[3])}
+						ia := 1 - f32(sa8) * (1.0 / 255)
+						dr[cx] = transmute(u32)cast(#simd[4]u8)simd.clamp(df * #simd[4]f32{ia, ia, ia, ia} + half, 0, 255)
+					}
+				}
+			} else {
+				for su, cx in sr {
+					if su == 0 && op != .Copy && op != .Source_In {
+						continue
+					}
+					blend_px(&dr[cx], su, op, tint4, inv255, half, c255)
+				}
+			}
+		}
+
+		for cx in i1 ..< w {
+			mx := my
+			if has_scissor && (cx < in_x0 || cx >= in_x1) {
+				mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+			}
+			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+		}
+	}
+	return true
+}
+
+@(private = "file")
+sw_solid_blend :: proc "contextless" (blend: Composite_Operation_State) -> (ok: bool, is_copy: bool) {
+	if blend == composite_state_from_op(.Source_Over) {
+		return true, false
+	}
+	if blend == composite_state_from_op(.Copy) {
+		return true, true
+	}
+	return false, false
+}
+
+@(private = "file")
+sw_can_fill_solid :: proc "contextless" (b: ^Software_Backend, cmd: Command, target: Sw_Target, inst: Shape_Instance) -> bool {
+	if b.no_fast_paths || target.format != .RGBA8 || target.pixels == nil {
+		return false
+	}
+	if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || inst.edge == .Aliased {
+		return false
+	}
+	blend_ok, _ := sw_solid_blend(cmd.composite_operation)
+	if !blend_ok {
+		return false
+	}
+	pr := &b.paint_rows[inst.paint]
+	return pr[10][3] == f32(Shader_Type.Fill_Color) && pr[0][1] == 0 && pr[1][0] == 0
+}
+
+// Fast path for solid-colour, axis-aligned-scissored fills on RGBA8 targets
+// under Source_Over or Copy: accumulates coverage directly over `px`, skips empty
+// spans and fills interior full-coverage spans without running the shader or
+// building 2x2 quad lists. False when the instance must fall back.
+@(private = "file")
+sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, i: u32, inst: Shape_Instance, px: [4]i32, band: int) -> bool {
+	if b.no_fast_paths || r.target.format != .RGBA8 || r.target.pixels == nil {
+		return false
+	}
+	if inst.edge == .Aliased || b.piece_at[i] == max(u32) {
+		return false
+	}
+	blend_ok, is_copy := sw_solid_blend(r.blend)
+	if !blend_ok {
+		return false
+	}
+	pr := &b.paint_rows[inst.paint]
+	if pr[10][3] != f32(Shader_Type.Fill_Color) || pr[0][1] != 0 || pr[1][0] != 0 {
+		return false
+	}
+	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
+	if x0 >= x1 || y0 >= y1 {
+		return true
+	}
+	w, h := int(x1 - x0), int(y1 - y0)
+	// Axis-aligned scissor bounds where x mask == 1 across all rows.
+	ax, bx, ex, sx := pr[0][0], pr[2][0], pr[8][0], pr[8][2]
+	ay, by, ey, sy := pr[1][1], pr[2][1], pr[8][1], pr[8][3]
+	has_scissor, in_x0, in_x1, alive := sw_scissor_x(pr, int(x0), w, is_copy)
+	if !alive {
+		return true
+	}
+	at := int(b.piece_at[i]) + band - int(b.piece_band0[i])
+	list := b.piece_list[b.piece_rows[at]:b.piece_rows[at + 1]]
+	stride := w + 1
+	sw_accumulate_pieces(L, b, list, x0, y0, w, h, stride)
+
+	// Base premultiplied color scaled by stroke_mask(0.5, 1).
+	base := saturate4(pr[6] * min(f32(1), pr[10][0]))
+	packed_src := transmute(u32)to_unorm8x4(base)
+	opaque_src := is_copy || base[3] >= 1
+	base255_s := simd.from_array(base * 255)
+	base255 := simd.from_array(base * 255 + 0.5)
+	base_a := base[3]
+	inv_a := #simd[4]f32{1 - base[3], 1 - base[3], 1 - base[3], 1 - base[3]}
+
+	moves := r.twin.pixels != nil && int(i) < len(b.motion_rows) && b.motion_rows[i][1][2] != 0
+	m: Shader_Motion
+	if moves {
+		m = b.motion_rows[i]
+	}
+
+	FULL :: 1 - 1.0 / 4096
+	EMPTY :: 1.0 / 510
+	even_odd := inst.rule == .Even_Odd
+	smooth := inst.edge == .Smooth
+	dst_stride := int(r.target.width)
+	dst_px := slice.reinterpret([]u32, r.target.pixels)
+	dst_x0 := int(x0 - r.ox)
+
+	blend_partial :: #force_inline proc "contextless" (dst: ^u32, base255_s: #simd[4]f32, base_a, k: f32, is_copy: bool) -> f32 {
+		ca := base_a * k
+		src := simd.fma(base255_s, #simd[4]f32{k, k, k, k}, #simd[4]f32{0.5, 0.5, 0.5, 0.5})
+		if is_copy {
+			dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(src, 0, 255)
+			return ca
+		}
+		d := transmute([4]u8)dst^
+		df := #simd[4]f32{f32(d[0]), f32(d[1]), f32(d[2]), f32(d[3])}
+		ia := 1 - ca
+		out := simd.fma(df, #simd[4]f32{ia, ia, ia, ia}, src)
+		dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(out, 0, 255)
+		return ca
+	}
+
+	write_motion :: #force_inline proc "contextless" (twin: Sw_Twin, tx, ty: int, m: Shader_Motion, px_x, px_y, ca: f32) {
+		vx := m[0][0] * px_x + m[0][2] * px_y + m[1][0]
+		vy := m[0][1] * px_x + m[0][3] * px_y + m[1][1]
+		mo := [4]f32{vx, vy, m[1][2], 1} * ca
+		d := &twin.pixels[ty * int(twin.width) + tx]
+		d^ = mo + d^ * (1 - mo[3])
+	}
+
+	for row in 0 ..< h {
+		py_c := f32(y0 + i32(row)) + 0.5
+		my: f32 = 1
+		if has_scissor {
+			my = clamp(0.5 - (abs(ay * py_c + by) - ey) * sy, 0, 1)
+			if my <= 0 && !is_copy {
+				continue
+			}
+		}
+		acc := L.cov[row * stride:][:stride]
+		ty := int(y0 + i32(row) - r.oy)
+		drow := dst_px[ty * dst_stride + dst_x0 :][:w]
+		full_scissor := my >= 1
+		sum: f32 = 0
+		x := 0
+		for x < w {
+			sum += acc[x]
+			raw := abs(sum)
+			cov := 1 - abs(1 - (raw * 0.5 - math.floor(raw * 0.5)) * 2) if even_odd else min(raw, 1)
+			if cov < EMPTY {
+				x = sw_skip_zeros(acc, x + 1, w)
+				continue
+			}
+			if cov >= FULL && full_scissor && x >= in_x0 && x < in_x1 {
+				start := x
+				x = sw_skip_zeros(acc, x + 1, in_x1)
+				if opaque_src {
+					for &px_out in drow[start:x] {
+						px_out = packed_src
+					}
+				} else {
+					for &px_out in drow[start:x] {
+						d := transmute([4]u8)px_out
+						df := #simd[4]f32{f32(d[0]), f32(d[1]), f32(d[2]), f32(d[3])}
+						px_out = transmute(u32)cast(#simd[4]u8)simd.clamp(simd.fma(df, inv_a, base255), 0, 255)
+					}
+				}
+				if moves {
+					for cx in start ..< x {
+						write_motion(r.twin, dst_x0 + cx, ty, m, f32(x0 + i32(cx)) + 0.5, py_c, base[3])
+					}
+				}
+				continue
+			}
+			v := cov * cov * (3 - 2 * cov) if smooth else cov
+			mx := my
+			px_c := f32(x0 + i32(x)) + 0.5
+			if has_scissor && (x < in_x0 || x >= in_x1) {
+				mx *= clamp(0.5 - (abs(ax * px_c + bx) - ex) * sx, 0, 1)
+			}
+			if mx > 0 || is_copy {
+				ca := blend_partial(&drow[x], base255_s, base_a, v * mx, is_copy)
+				if moves {
+					write_motion(r.twin, dst_x0 + x, ty, m, px_c, py_c, ca)
+				}
+			}
+			x += 1
+		}
+	}
+	return true
+}
+
+// Returns the smallest index in `start ..< limit` where `acc[i] != 0`, or `limit`.
+@(private = "file")
+sw_skip_zeros :: #force_inline proc "contextless" (acc: []f32, start, limit: int) -> int {
+	x := start
+	lim := min(limit, len(acc))
+	ptr := raw_data(acc)
+	zero := #simd[4]f32{}
+	for x + 8 <= lim {
+		v0 := intrinsics.unaligned_load((^#simd[4]f32)(&ptr[x]))
+		v1 := intrinsics.unaligned_load((^#simd[4]f32)(&ptr[x + 4]))
+		m := simd.bit_or(simd.lanes_ne(v0, zero), simd.lanes_ne(v1, zero))
+		if simd.reduce_or(m) != 0 {
+			break
+		}
+		x += 8
+	}
+	if x + 4 <= lim {
+		v := intrinsics.unaligned_load((^#simd[4]f32)(&ptr[x]))
+		if simd.reduce_or(simd.lanes_ne(v, zero)) == 0 {
+			x += 4
+		}
+	}
+	for x < lim && ptr[x] == 0 {
+		x += 1
+	}
+	return x
+}
+
+// Adds a stretch [ta, tb] of P(t) = a t^2 + b t + c (grid units, monotone in
+// x and y, within one row) to that row's cells: per column it crosses, the
+// signed area between it and the column's right side (to that pixel), and
+// the rest of its rise (to the next).
+@(private = "file")
+sw_accumulate_cells :: proc "contextless" (acc: []f32, a, b, c: [2]f32, ta, tb, xa, ya, xb, yb: f32, w: int) {
+	if max(xa, xb) <= 0 {
+		acc[0] += yb - ya
+		return
+	}
+	if min(xa, xb) >= f32(w) {
+		return
+	}
+	d := tb - ta
+	if max(abs(a.x), abs(a.y)) * (d * d) <= 1.0 / 256 {
+		sw_accumulate_row_line(acc, xa, ya, xb, yb, w)
+		return
+	}
+	if xb >= xa {
+		if xa >= 0 {
+			col := sw_floor(xa)
+			if xb <= f32(col + 1) {
+				dy := yb - ya
+				area := sw_cell_area(a, b, f32(col + 1) - xa, ta, d)
+				acc[col] += area
+				acc[col + 1] += dy - area
+				return
+			}
+		}
+	} else {
+		if xb >= 0 && xa <= f32(w) {
+			col := sw_ceil(xa) - 1
+			if xb >= f32(col) {
+				dy := yb - ya
+				area := sw_cell_area(a, b, f32(col + 1) - xa, ta, d)
+				acc[col] += area
+				acc[col + 1] += dy - area
+				return
+			}
+		}
+	}
+	t, x, y := ta, xa, ya
+	step: i32 = 1 if xb > xa else -1
+	if step > 0 && x < 0 {
+		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, 0)
+		y0 := sw_quad_at(a.y, b.y, c.y, u0)
+		acc[0] += y0 - y
+		t, x, y = u0, 0, y0
+	} else if step < 0 && x > f32(w) {
+		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, f32(w))
+		y0 := sw_quad_at(a.y, b.y, c.y, u0)
+		t, x, y = u0, f32(w), y0
+	}
+	col := sw_floor(x) if xb >= xa else sw_ceil(x) - 1
+	for {
+		if col >= i32(w) {
+			break
+		}
+		if col < 0 {
+			acc[0] += yb - y
+			break
+		}
+		// Where it leaves this column, or its end.
+		side := f32(col + 1) if step > 0 else f32(col)
+		u, xu := tb, xb
+		if (step > 0 && xb > side) || (step < 0 && xb < side) {
+			u = sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, side)
+			xu = side
+		}
+		yu := yb if u >= tb else sw_quad_at(a.y, b.y, c.y, u)
+		dy := yu - y
+		// The area between the piece and the column's right side, by
+		// the integral of (right - x(t)) y'(t) over [t, u], about t.
+		area := sw_cell_area(a, b, f32(col + 1) - x, t, u - t)
+		acc[col] += area
+		acc[col + 1] += dy - area
+		if u >= tb {
+			break
+		}
+		t, x, y = u, xu, yu
+		col += step
+	}
+}
+
+// The integral over s in [0, d] of (g0 - (x(t + s) - x(t))) y'(t + s), where
+// x and y are a t^2 + b t + c: g0 is the column's right side less x(t).
+@(private = "file")
+sw_cell_area :: #force_inline proc "contextless" (a, b: [2]f32, g0, t, d: f32) -> f32 {
+	// x(t + s) - x(t) = dx s + a.x s^2, y'(t + s) = dy + 2 a.y s.
+	dx := 2 * a.x * t + b.x
+	dy := 2 * a.y * t + b.y
+	// (g0 - dx s - a.x s^2)(dy + 2 a.y s)
+	c0 := g0 * dy
+	c1 := 2 * a.y * g0 - dx * dy
+	c2 := -2 * a.y * dx - a.x * dy
+	c3 := -2 * a.y * a.x
+	return d * (c0 + d * (c1 * 0.5 + d * (c2 * (1.0 / 3.0) + d * c3 * 0.25)))
+}
+
+@(private = "file")
+sw_quad_at :: #force_inline proc "contextless" (a, b, c, s: f32) -> f32 {
+	return (a * s + b) * s + c
+}
+
+// The s in [sa, sb] where a s^2 + b s + c = v, the quadratic monotone there
+// from ya to yb (v between them): the root within the range, by the stable
+// form of the quadratic formula.
+@(private = "file")
+sw_solve_monotone :: proc "contextless" (a, b, c, sa, sb, ya, yb, v: f32) -> f32 {
+	if v == ya {
+		return sa
+	}
+	if v == yb {
+		return sb
+	}
+	s: f32
+	cv := c - v
+	if abs(a) <= 1e-7 * abs(b) {
+		s = -cv / b
+	} else {
+		sq := math.sqrt(max(b * b - 4 * a * cv, 0))
+		q := -0.5 * (b + (sq if b >= 0 else -sq))
+		r1 := q / a
+		r2 := cv / q if q != 0 else r1
+		s = r1 if abs(r1 - (sa + sb) * 0.5) <= abs(r2 - (sa + sb) * 0.5) else r2
+	}
+	return clamp(s, sa, sb)
 }
 
 // A fill instance's coverage over the quads of `px` in band `band` (on
@@ -1700,52 +2575,10 @@ sw_coverage :: proc(L: ^Sw_Lanes, b: ^Software_Backend, i: u32, inst: Shape_Inst
 	nqy := int(y1 - qy0 + 1) / 2
 	at := int(b.piece_at[i]) + band - int(b.piece_band0[i])
 	list := b.piece_list[b.piece_rows[at]:b.piece_rows[at + 1]]
-	if len(list) > nqx * nqy {
-		return false
-	}
 	w, h := 2 * nqx, 2 * nqy
 	// One more column: a piece's rise past the last cell.
 	stride := w + 1
-	resize(&L.cov, stride * h)
-	slice.zero(L.cov[:])
-	gx, gy := f32(qx0), f32(qy0)
-	for k in list {
-		p := b.pieces[k]
-		// In grid units; y over [0, 1] from ya to yb.
-		a := p.a
-		bb := p.b
-		c := p.c - {gx, gy}
-		ya, yb := c.y, a.y + bb.y + c.y
-		ylo, yhi := max(min(ya, yb), 0), min(max(ya, yb), f32(h))
-		if ylo >= yhi {
-			continue
-		}
-		// Each row it crosses, from its entry to its exit, split where x
-		// turns and at each column's side.
-		for row in sw_floor(ylo) ..< sw_ceil(yhi) {
-			ra, rb := max(f32(row), ylo), min(f32(row + 1), yhi)
-			if ra >= rb {
-				continue
-			}
-			ta := sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, ra if yb > ya else rb)
-			tb := sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, rb if yb > ya else ra)
-			if ta >= tb {
-				continue
-			}
-			acc := L.cov[int(row) * stride:][:stride]
-			ends := [3]f32{ta, tb, tb}
-			n := 1
-			if a.x != 0 {
-				if s := -bb.x / (2 * a.x); s > ta && s < tb {
-					ends = {ta, s, tb}
-					n = 2
-				}
-			}
-			for e in 0 ..< n {
-				sw_accumulate_cells(acc, a, bb, c, ends[e], ends[e + 1], w)
-			}
-		}
-	}
+	sw_accumulate_pieces(L, b, list, qx0, qy0, w, h, stride)
 	even_odd := inst.rule == .Even_Odd
 	for row in 0 ..< h {
 		acc := L.cov[row * stride:][:stride]
@@ -1779,107 +2612,4 @@ sw_coverage :: proc(L: ^Sw_Lanes, b: ^Software_Backend, i: u32, inst: Shape_Inst
 		}
 	}
 	return true
-}
-
-// Adds a stretch [ta, tb] of P(t) = a t^2 + b t + c (grid units, monotone in
-// x and y, within one row) to that row's cells: per column it crosses, the
-// signed area between it and the column's right side (to that pixel), and
-// the rest of its rise (to the next).
-@(private = "file")
-sw_accumulate_cells :: proc "contextless" (acc: []f32, a, b, c: [2]f32, ta, tb: f32, w: int) {
-	xa, xb := sw_quad_at(a.x, b.x, c.x, ta), sw_quad_at(a.x, b.x, c.x, tb)
-	ya := sw_quad_at(a.y, b.y, c.y, ta)
-	if max(xa, xb) <= 0 {
-		acc[0] += sw_quad_at(a.y, b.y, c.y, tb) - ya
-		return
-	}
-	if min(xa, xb) >= f32(w) {
-		return
-	}
-	t, x, y := ta, xa, ya
-	step: i32 = 1 if xb > xa else -1
-	if step > 0 && x < 0 {
-		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, 0)
-		y0 := sw_quad_at(a.y, b.y, c.y, u0)
-		acc[0] += y0 - y
-		t, x, y = u0, 0, y0
-	} else if step < 0 && x > f32(w) {
-		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, f32(w))
-		y0 := sw_quad_at(a.y, b.y, c.y, u0)
-		t, x, y = u0, f32(w), y0
-	}
-	col := sw_floor(x) if xb >= xa else sw_ceil(x) - 1
-	for {
-		if col >= i32(w) {
-			break
-		}
-		if col < 0 {
-			acc[0] += sw_quad_at(a.y, b.y, c.y, tb) - y
-			break
-		}
-		// Where it leaves this column, or its end.
-		side := f32(col + 1) if step > 0 else f32(col)
-		u, xu := tb, xb
-		if (step > 0 && xb > side) || (step < 0 && xb < side) {
-			u = sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, side)
-			xu = side
-		}
-		yu := sw_quad_at(a.y, b.y, c.y, u)
-		dy := yu - y
-		// The area between the piece and the column's right side, by
-		// the integral of (right - x(t)) y'(t) over [t, u], about t.
-		area := sw_cell_area(a, b, f32(col + 1) - x, t, u - t)
-		acc[col] += area
-		acc[col + 1] += dy - area
-		if u >= tb {
-			break
-		}
-		t, x, y = u, xu, yu
-		col += step
-	}
-}
-
-// The integral over s in [0, d] of (g0 - (x(t + s) - x(t))) y'(t + s), where
-// x and y are a t^2 + b t + c: g0 is the column's right side less x(t).
-@(private = "file")
-sw_cell_area :: #force_inline proc "contextless" (a, b: [2]f32, g0, t, d: f32) -> f32 {
-	// x(t + s) - x(t) = dx s + a.x s^2, y'(t + s) = dy + 2 a.y s.
-	dx := 2 * a.x * t + b.x
-	dy := 2 * a.y * t + b.y
-	// (g0 - dx s - a.x s^2)(dy + 2 a.y s)
-	c0 := g0 * dy
-	c1 := 2 * a.y * g0 - dx * dy
-	c2 := -2 * a.y * dx - a.x * dy
-	c3 := -2 * a.y * a.x
-	return d * (c0 + d * (c1 / 2 + d * (c2 / 3 + d * c3 / 4)))
-}
-
-@(private = "file")
-sw_quad_at :: #force_inline proc "contextless" (a, b, c, s: f32) -> f32 {
-	return (a * s + b) * s + c
-}
-
-// The s in [sa, sb] where a s^2 + b s + c = v, the quadratic monotone there
-// from ya to yb (v between them): the root within the range, by the stable
-// form of the quadratic formula.
-@(private = "file")
-sw_solve_monotone :: proc "contextless" (a, b, c, sa, sb, ya, yb, v: f32) -> f32 {
-	if v == ya {
-		return sa
-	}
-	if v == yb {
-		return sb
-	}
-	s: f32
-	cv := c - v
-	if abs(a) <= 1e-7 * abs(b) {
-		s = -cv / b
-	} else {
-		sq := math.sqrt(max(b * b - 4 * a * cv, 0))
-		q := -0.5 * (b + (sq if b >= 0 else -sq))
-		r1 := q / a
-		r2 := cv / q if q != 0 else r1
-		s = r1 if abs(r1 - (sa + sb) * 0.5) <= abs(r2 - (sa + sb) * 0.5) else r2
-	}
-	return clamp(s, sa, sb)
 }
