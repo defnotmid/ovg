@@ -30,6 +30,12 @@ bytes_per_pixel :: proc "contextless" (f: Pixel_Format) -> u32 {
 }
 
 Image_Flag :: enum u32 {
+	// Minified, sample a chain of smaller levels (image_levels_build) built
+	// from each upload, blended between the two the minification picks, so
+	// each pixel averages the texels it covers instead of aliasing. Every
+	// backend builds the levels alike on the CPU, so such an image takes
+	// whole updates only (.Unsupported_Operation otherwise) and is never a
+	// render target.
 	Generate_Mipmaps,
 	Repeat_X,
 	Repeat_Y,
@@ -697,7 +703,9 @@ image_store_alloc_shared :: proc(s: ^Image_Store, info: Image_Info, src: Image_S
 	}
 	id = Image_Id{slot_map_insert(&s.entries, Image_Entry{info = info, borrowed = true})}
 	op := Image_Op{kind = .Share, id = id, info = info, width = src.width, height = src.height, key = key}
-	if stable && image_source_stride(src) == src.width * bytes_per_pixel(src.format) {
+	// Borrowed pixels are level 0 alone: an image with levels copies, and the
+	// player's upload builds them.
+	if stable && .Generate_Mipmaps not_in info.flags && image_source_stride(src) == src.width * bytes_per_pixel(src.format) {
 		op.borrowed = src.data[:src.width * src.height * bytes_per_pixel(src.format)]
 	} else {
 		op.copied = image_store_copy_pixels(s, src)
@@ -751,6 +759,10 @@ image_store_update :: proc(s: ^Image_Store, id: Image_Id, src: Image_Source, x, 
 	if src.format != entry.info.format {
 		return .Image_Update_With_Different_Format
 	}
+	// Levels come from the whole of level 0.
+	if .Generate_Mipmaps in entry.info.flags && (x != 0 || y != 0 || src.width != entry.info.width || src.height != entry.info.height) {
+		return .Unsupported_Operation
+	}
 	if s.recording {
 		append(&s.ops, Image_Op{kind = .Update, id = id, info = entry.info, x = x, y = y, width = src.width, height = src.height, copied = image_store_copy_pixels(s, src)})
 		return nil
@@ -797,4 +809,118 @@ image_store_copy_pixels :: proc(s: ^Image_Store, src: Image_Source) -> Range {
 		copy(s.pixels[start + y * row:][:row], src.data[y * stride:][:row])
 	}
 	return {u32(start), u32(row * int(src.height))}
+}
+
+// ---- mip levels -------------------------------------------------------------------
+
+// The levels an image keeps, level 0 included: with .Generate_Mipmaps its
+// chain down to 1 x 1 (level l `max(width >> l, 1) x max(height >> l, 1)`,
+// at most IMAGE_MAX_LEVELS), else 1.
+IMAGE_MAX_LEVELS :: 16
+
+image_level_count :: proc "contextless" (info: Image_Info) -> int {
+	if .Generate_Mipmaps not_in info.flags {
+		return 1
+	}
+	n := 1
+	for w, h := info.width, info.height; (w > 1 || h > 1) && n < IMAGE_MAX_LEVELS; n += 1 {
+		w, h = max(w >> 1, 1), max(h >> 1, 1)
+	}
+	return n
+}
+
+// Level `l`'s size and where it starts in the image's chain: level 0, then
+// each level after the one before, tightly packed.
+image_level :: proc "contextless" (info: Image_Info, l: int) -> (width, height: u32, offset: int) {
+	width, height = info.width, info.height
+	bpp := int(bytes_per_pixel(info.format))
+	for _ in 0 ..< l {
+		offset += int(width) * int(height) * bpp
+		width, height = max(width >> 1, 1), max(height >> 1, 1)
+	}
+	return
+}
+
+// The bytes an image's chain takes: all its levels.
+image_chain_bytes :: proc "contextless" (info: Image_Info) -> int {
+	_, _, n := image_level(info, image_level_count(info))
+	return n
+}
+
+// Builds levels 1 and on of `chain` (image_chain_bytes, level 0 written)
+// from level 0, each level from the one before: a texel is the average of
+// the area of the level below that it covers (2 x 2 texels, or a fractional
+// 2-3 a side where that level is odd), so a minified image averages what
+// each pixel covers. Straight-alpha RGBA8 averages colour weighted by
+// alpha, so the colour of transparent texels does not bleed in.
+image_levels_build :: proc(info: Image_Info, chain: []u8) {
+	straight := info.format == .RGBA8 && .Premultiplied not_in info.flags
+	for l in 1 ..< image_level_count(info) {
+		sw, sh, src_at := image_level(info, l - 1)
+		dw, dh, dst_at := image_level(info, l)
+		sx, sy := f32(sw) / f32(dw), f32(sh) / f32(dh)
+		for y in 0 ..< int(dh) {
+			y0, y1 := f32(y) * sy, f32(y + 1) * sy
+			for x in 0 ..< int(dw) {
+				x0, x1 := f32(x) * sx, f32(x + 1) * sx
+				sum: [4]f32
+				for j in int(y0) ..< min(int(math.ceil(y1)), int(sh)) {
+					wy := min(y1, f32(j + 1)) - max(y0, f32(j))
+					for i in int(x0) ..< min(int(math.ceil(x1)), int(sw)) {
+						t := image_texel(info.format, chain[src_at:], int(sw), i, j)
+						if straight {
+							t.rgb *= t.a
+						}
+						sum += t * (wy * (min(x1, f32(i + 1)) - max(x0, f32(i))))
+					}
+				}
+				sum /= sx * sy
+				if straight && sum.a > 0 {
+					sum.rgb /= sum.a
+				}
+				image_texel_set(info.format, chain[dst_at:], int(dw), x, y, sum)
+			}
+		}
+	}
+}
+
+// Texel (x, y) of a level `w` texels wide, as [0, 1] floats (RGBA16F as
+// stored); a gray format's in .r.
+@(private = "file")
+image_texel :: #force_inline proc "contextless" (f: Pixel_Format, level: []u8, w, x, y: int) -> [4]f32 {
+	at := y * w + x
+	switch f {
+	case .RGBA8:
+		p := level[at * 4:][:4]
+		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])} / 255
+	case .Gray8:
+		return {f32(level[at]) / 255, 0, 0, 0}
+	case .Gray16:
+		return {f32(u16(level[at * 2]) | u16(level[at * 2 + 1]) << 8) / 65535, 0, 0, 0}
+	case .RGBA16F:
+		p := ([^]f16)(raw_data(level[at * 8:]))
+		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])}
+	}
+	return {}
+}
+
+@(private = "file")
+image_texel_set :: #force_inline proc "contextless" (f: Pixel_Format, level: []u8, w, x, y: int, t: [4]f32) {
+	at := y * w + x
+	switch f {
+	case .RGBA8:
+		for k in 0 ..< 4 {
+			level[at * 4 + k] = u8(clamp(t[k], 0, 1) * 255 + 0.5)
+		}
+	case .Gray8:
+		level[at] = u8(clamp(t.r, 0, 1) * 255 + 0.5)
+	case .Gray16:
+		v := u16(clamp(t.r, 0, 1) * 65535 + 0.5)
+		level[at * 2], level[at * 2 + 1] = u8(v), u8(v >> 8)
+	case .RGBA16F:
+		p := ([^]f16)(raw_data(level[at * 8:]))
+		for k in 0 ..< 4 {
+			p[k] = f16(t[k])
+		}
+	}
 }

@@ -22,6 +22,8 @@ Scene :: struct {
 
 Resources :: struct {
 	checker:  vg.Image_Id,
+	// Odd-sized, straight-alpha images with mip levels (scene_mipmaps).
+	mipped:   [2]vg.Image_Id,
 	// Written again each time their scene is drawn.
 	updated:  [2]vg.Image_Id,
 	// Vera, and a layout of text in it (`lay`).
@@ -111,6 +113,7 @@ ALL := [?]Scene {
 	{"markers", scene_markers},
 	{"motion", scene_motion},
 	{"image_updates", scene_image_updates},
+	{"mipmaps", scene_mipmaps},
 }
 
 // Starts a frame at the scene size, cleared to transparent, and draws the
@@ -166,6 +169,24 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 		}
 	}
 	r.checker, _ = vg.create_image(c, vg.image_source_rgba(pix[:], 8, 8))
+	// A one-texel checker of opaque blue and transparent red, 77 x 99, and a
+	// Gray8 one of stripes: odd at every level, and straight alpha, whose
+	// levels must not take the red in.
+	{
+		MW, MH :: 77, 99
+		rgba := make([]u8, MW * MH * 4, context.temp_allocator)
+		gray := make([]u8, MW * MH, context.temp_allocator)
+		for y in 0 ..< MH {
+			for x in 0 ..< MW {
+				on := (x + y) % 2 == 0
+				t := [4]u8{20, 40, 220, 255} if on else {255, 0, 0, 0}
+				copy(rgba[(y * MW + x) * 4:][:4], t[:])
+				gray[y * MW + x] = 250 if x % 3 == 0 else 10
+			}
+		}
+		r.mipped[0], _ = vg.create_image(c, vg.image_source_rgba(rgba, MW, MH), {.Generate_Mipmaps})
+		r.mipped[1], _ = vg.create_image(c, {format = .Gray8, data = gray, width = MW, height = MH}, {.Generate_Mipmaps})
+	}
 	r.updated[0], _ = vg.create_image_empty(c, 64, 64, .RGBA8, {.Nearest})
 	r.updated[1], _ = vg.create_image_empty(c, 32, 32, .Gray8, {.Nearest})
 	vg.font_collection_init(&r.fonts, FONT_DATA)
@@ -417,6 +438,26 @@ scene_images :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.path_reset(p)
 	vg.path_circle(p, 70, 150, 36)
 	vg.fill_path(c, p, vg.paint_image_tint(r.checker, 30, 110, 24, 24, 0.2, vg.rgba(255, 200, 200, 220)))
+}
+
+// Images with mip levels drawn minified: about 6 times, rotated and
+// anisotropic (3 by 8), mildly (1.5), and magnified (level 0), straight
+// alpha in RGBA8 and a Gray8 one.
+scene_mipmaps :: proc(c: ^vg.Canvas, r: ^Resources) {
+	p := &r.path
+	draws := [?]struct {
+		img:              int,
+		x, y, w, h, turn: f32,
+	}{{0, 8, 8, 13, 16, 0}, {0, 40, 8, 26, 12, 0.4}, {0, 90, 8, 51, 66, 0}, {1, 150, 8, 13, 16, 0}, {1, 180, 8, 51, 33, 0.25}, {0, 8, 90, 154, 99, 0}}
+	for d in draws {
+		vg.save(c)
+		vg.translate(c, d.x + d.w / 2, d.y + d.h / 2)
+		vg.rotate(c, d.turn)
+		vg.path_reset(p)
+		vg.path_rect(p, -d.w / 2, -d.h / 2, d.w, d.h)
+		vg.fill_path(c, p, vg.paint_image(r.mipped[d.img], -d.w / 2, -d.h / 2, d.w, d.h, 0))
+		vg.restore(c)
+	}
 }
 
 // Images written many times before their frame draws them, so the copies find

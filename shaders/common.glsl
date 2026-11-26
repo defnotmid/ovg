@@ -157,8 +157,20 @@ float conic_fraction(vec2 fpos) {
     return (-atan(pt.x, pt.y) / TAU) + 0.5;
 }
 
+// The level an image paint samples: what a GPU's derivatives pick, log2 of
+// the longer step in level 0's texels from one pixel to the next. The paint
+// is affine, so the step is the same at every pixel. A texture without
+// levels reads level 0 at any lod. Magnified (a step under one texel) or
+// degenerate, it is 0, so log2 never sees 0.
+float image_lod() {
+    vec2 size = vec2(textureSize(tex, 0)) / extent();
+    vec2 dx = P(3).xy * size;
+    vec2 dy = P(4).xy * size;
+    return 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0));
+}
+
 // The paint's colour at `fpos` for the fill types (gradients, images, solid
-// colours). Textures are sampled at level 0: there are no mipmaps.
+// colours). Gradient ramps are sampled at level 0.
 vec4 fill_color(int type, vec2 fpos) {
     if (type == FILL_GRADIENT) {
         vec2 g = gradient_t(fpos);
@@ -169,7 +181,7 @@ vec4 fill_color(int type, vec2 fpos) {
         return textureLod(tex, vec2(g.x, 0.0), 0.0) * (inner_col() * g.y);
     } else if (type == FILL_IMAGE) {
         vec2 pt = transform_point(3, fpos) / extent();
-        return apply_tex_type(textureLod(tex, pt, 0.0)) * inner_col();
+        return apply_tex_type(textureLod(tex, pt, image_lod())) * inner_col();
     } else if (type == FILL_GRADIENT_CONIC) {
         return mix(inner_col(), outer_col(), conic_fraction(fpos));
     } else if (type == FILL_IMAGE_GRADIENT_CONIC) {

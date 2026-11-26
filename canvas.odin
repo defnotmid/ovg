@@ -211,6 +211,10 @@ set_render_target :: proc(c: ^Canvas, target: Render_Target, origin := [2]i32{})
 // layer's content, whose motion the layer stack composites).
 @(private)
 render_target_set :: proc(c: ^Canvas, target: Render_Target, origin: [2]i32, velocity: bool) {
+	if id, is_image := target.(Image_Id); is_image {
+		info, _ := image_store_info(&c.images, id)
+		assert(.Generate_Mipmaps not_in info.flags, "an image with mip levels is never a render target")
+	}
 	twin := velocity && c.motion_blur
 	if c.current_render_target != target || c.current_render_origin != origin || c.current_render_velocity != twin {
 		append(&c.commands, Command{type = Cmd_Set_Render_Target{target, origin, twin}})

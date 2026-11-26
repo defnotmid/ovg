@@ -2096,3 +2096,75 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, max_vel_diff <= 1e-3, "fast path velocity diff %v > 1e-3", max_vel_diff)
 }
+
+// Image_Flag.Generate_Mipmaps: an image drawn seven times smaller averages what
+// each pixel covers instead of aliasing, and its levels average area, with
+// straight alpha weighting colour by alpha and odd sizes weighting fractions.
+@(test)
+test_sw_image_mipmaps :: proc(t: ^testing.T) {
+	// A one-texel checkerboard 112 x 112 drawn at 16 x 16: each pixel
+	// covers 7 x 7 texels, about half black, half white, and its centre
+	// lands on one texel, which level 0 alone returns.
+	N :: 112
+	pix := make([]u8, N * N * 4)
+	defer delete(pix)
+	for y in 0 ..< N {
+		for x in 0 ..< N {
+			v: u8 = 255 if (x + y) % 2 == 0 else 0
+			pix[(y * N + x) * 4 + 0], pix[(y * N + x) * 4 + 1], pix[(y * N + x) * 4 + 2], pix[(y * N + x) * 4 + 3] = v, v, v, 255
+		}
+	}
+	worst :: proc(t: ^testing.T, pix: []u8, flags: Image_Flags) -> int {
+		s: Sw
+		sw_open(&s, 16, 16)
+		defer sw_close(&s)
+		c := &s.canvas
+		id, err := create_image(c, image_source_rgba(pix, N, N), flags)
+		testing.expect_value(t, err, nil)
+		p: Path
+		defer path_destroy(&p)
+		path_rect(&p, 0, 0, 16, 16)
+		clear_rect(c, 0, 0, 16, 16, BLACK)
+		fill_path(c, &p, paint_image(id, 0, 0, 16, 16, 0))
+		flush(c)
+		w := 0
+		for y in u32(0) ..< 16 {
+			for x in u32(0) ..< 16 {
+				w = max(w, abs(int(px(&s, x, y)[0]) - 128))
+			}
+		}
+		return w
+	}
+	mipped := worst(t, pix, {.Generate_Mipmaps})
+	testing.expectf(t, mipped <= 4, "mipmapped checkerboard: worst %d from mid gray", mipped)
+	aliased := worst(t, pix, {})
+	testing.expectf(t, aliased > 32, "level 0 alone should alias: worst %d", aliased)
+
+	// Straight alpha: transparent red beside opaque white averages to white
+	// at half alpha, not pink.
+	chain := make([]u8, image_chain_bytes({{.Generate_Mipmaps}, 2, 2, .RGBA8}))
+	defer delete(chain)
+	copy(chain, []u8{255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255})
+	image_levels_build({{.Generate_Mipmaps}, 2, 2, .RGBA8}, chain)
+	testing.expect_value(t, [4]u8{chain[16], chain[17], chain[18], chain[19]}, [4]u8{255, 255, 255, 128})
+
+	// Odd: 5 x 1 Gray8 becomes 2 x 1, each texel 2.5 of the level below.
+	odd := Image_Info{{.Generate_Mipmaps}, 5, 1, .Gray8}
+	g := make([]u8, image_chain_bytes(odd))
+	defer delete(g)
+	copy(g, []u8{0, 100, 200, 50, 250})
+	image_levels_build(odd, g)
+	// (0 + 100 + 0.5 * 200) / 2.5 = 80; (0.5 * 200 + 50 + 250) / 2.5 = 160.
+	testing.expect_value(t, [2]u8{g[5], g[6]}, [2]u8{80, 160})
+	testing.expect_value(t, image_level_count(odd), 3)
+
+	// Levels come from the whole image: a partial update is refused, a
+	// whole one taken.
+	s: Sw
+	sw_open(&s, 4, 4)
+	defer sw_close(&s)
+	id, err := create_image(&s.canvas, image_source_rgba(pix[:4 * 4 * 4], 4, 4), {.Generate_Mipmaps})
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, update_image(&s.canvas, id, image_source_rgba(pix[:2 * 2 * 4], 2, 2), 1, 1), Error.Unsupported_Operation)
+	testing.expect_value(t, update_image(&s.canvas, id, image_source_rgba(pix[:4 * 4 * 4], 4, 4), 0, 0), nil)
+}

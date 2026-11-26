@@ -289,7 +289,8 @@ sw_alloc_image :: proc(data: rawptr, info: Image_Info) -> (Backend_Image, Error)
 		// Pixels are lent for each render (sw_lend).
 		return {}, nil
 	}
-	pixels, err := sw_make_pixels(int(info.width * info.height * bytes_per_pixel(info.format)), b.allocator)
+	// Level 0, then with .Generate_Mipmaps the levels above it.
+	pixels, err := sw_make_pixels(image_chain_bytes(info), b.allocator)
 	if err != nil {
 		return {}, .Out_Of_Memory
 	}
@@ -309,6 +310,9 @@ sw_update_image :: proc(data: rawptr, img: ^Backend_Image, info: Image_Info, src
 		s := src.data[row * src_stride:][:row_bytes]
 		d := img.pixels[(y + row) * dst_stride + x * bpp:][:row_bytes]
 		copy(d, s)
+	}
+	if image_level_count(info) > 1 {
+		image_levels_build(info, img.pixels)
 	}
 	return nil
 }
@@ -817,6 +821,7 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 		textures := [2]oksl.Channel_Image{sw_white(), sw_white()}
 		if tex, ok := lookup_texture(run.images, cmd.image); ok {
 			textures[0] = sw_channel(tex)
+			textures[0].levels = sw_levels(tex, &lanes.levels)
 		}
 		// With a twin, the units' motion variants, whose motion goes over it.
 		motion := int(r.twin.pixels != nil)
@@ -962,6 +967,23 @@ sw_channel :: proc "contextless" (t: Sw_Texture) -> oksl.Channel_Image {
 		filter = .Nearest if .Nearest in t.flags else .Linear,
 		wrap   = {.Repeat if .Repeat_X in t.flags else .Clamp, .Repeat if .Repeat_Y in t.flags else .Clamp},
 	}
+}
+
+// A texture's levels above level 0 (Image_Flag.Generate_Mipmaps), in
+// `levels`; none when it keeps only level 0, or its pixels (lent ones) hold
+// no more.
+@(private = "file")
+sw_levels :: proc "contextless" (t: Sw_Texture, levels: ^[IMAGE_MAX_LEVELS - 1]oksl.Channel_Level) -> []oksl.Channel_Level {
+	info := Image_Info{t.flags, t.width, t.height, t.format}
+	n := image_level_count(info)
+	if n == 1 || len(t.pixels) < image_chain_bytes(info) {
+		return nil
+	}
+	for l in 1 ..< n {
+		w, h, at := image_level(info, l)
+		levels[l - 1] = {texels = t.pixels[at:][:int(w * h * bytes_per_pixel(t.format))], width = int(w), height = int(h)}
+	}
+	return levels[:n - 1]
 }
 
 @(private = "file", rodata)
@@ -1327,6 +1349,8 @@ sw_run_program :: proc(images: ^Image_Store, frame: Frame, cmd: Program_Run) {
 // frame to frame (Software_Backend.lanes_free).
 @(private = "file")
 Sw_Lanes :: struct {
+	// The draw's image's levels above level 0 (sw_levels), bound with it.
+	levels:   [IMAGE_MAX_LEVELS - 1]oksl.Channel_Level,
 	scratch:  oksl.Scratch,
 	origins:  [dynamic][2]i32,
 	helpers:  [dynamic]oksl.Quad_Lanes,

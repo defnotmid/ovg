@@ -35,6 +35,8 @@ Image :: struct {
 	width:    u32,
 	height:   u32,
 	flags:    vg.Image_Flags,
+	// Its mip levels, level 0 included (vg.image_level_count).
+	levels:   u32,
 	// The caller's texture (image_borrow_texture), never released here.
 	borrowed: bool,
 	// The bytes of its last update, and the transfer buffer of updates that
@@ -215,7 +217,11 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 			{
 				min_filter = filter,
 				mag_filter = filter,
-				mipmap_mode = .NEAREST,
+				// Between the two levels a minified image's lod picks
+				// (Image_Flag.Generate_Mipmaps); textures of one level
+				// read it at any lod.
+				mipmap_mode = .LINEAR,
+				max_lod = f32(vg.IMAGE_MAX_LEVELS),
 				address_mode_u = .REPEAT if i & 1 != 0 else .CLAMP_TO_EDGE,
 				address_mode_v = .REPEAT if i & 2 != 0 else .CLAMP_TO_EDGE,
 				address_mode_w = .CLAMP_TO_EDGE,
@@ -489,7 +495,7 @@ sdl_set_size :: proc(data: rawptr, width, height: u32, dpi: f32) {
 // ---- images ---------------------------------------------------------------------
 
 @(private)
-create_texture :: proc(b: ^SDL_Backend, w, h: u32, format: sdl.GPUTextureFormat, usage: sdl.GPUTextureUsageFlags) -> (^Image, vg.Error) {
+create_texture :: proc(b: ^SDL_Backend, w, h: u32, format: sdl.GPUTextureFormat, usage: sdl.GPUTextureUsageFlags, levels: u32 = 1) -> (^Image, vg.Error) {
 	tex := sdl.CreateGPUTexture(
 		b.device,
 		{
@@ -499,7 +505,7 @@ create_texture :: proc(b: ^SDL_Backend, w, h: u32, format: sdl.GPUTextureFormat,
 			width = max(w, 1),
 			height = max(h, 1),
 			layer_count_or_depth = 1,
-			num_levels = 1,
+			num_levels = levels,
 			sample_count = ._1,
 		},
 	)
@@ -507,7 +513,7 @@ create_texture :: proc(b: ^SDL_Backend, w, h: u32, format: sdl.GPUTextureFormat,
 		return nil, .General
 	}
 	img := new(Image, b.allocator)
-	img^ = {texture = tex, format = format, width = w, height = h}
+	img^ = {texture = tex, format = format, width = w, height = h, levels = levels}
 	return img, nil
 }
 
@@ -524,6 +530,20 @@ release_image :: proc(b: ^SDL_Backend, img: ^Image) {
 		sdl.ReleaseGPUTransferBuffer(b.device, img.transfer)
 	}
 	free(img, b.allocator)
+}
+
+// The bytes of a texel of the formats images upload to (texture_format).
+@(private)
+texel_bytes :: proc "contextless" (f: sdl.GPUTextureFormat) -> u32 {
+	#partial switch f {
+	case .R8_UNORM:
+		return 1
+	case .R16_FLOAT, .R16_UNORM:
+		return 2
+	case .R16G16B16A16_FLOAT:
+		return 8
+	}
+	return 4
 }
 
 // The texture format storing `f`.
@@ -550,34 +570,36 @@ sdl_alloc_image :: proc(data: rawptr, info: vg.Image_Info) -> (vg.Backend_Image,
 	if sdl.GPUTextureSupportsFormat(b.device, format, .D2, {.SAMPLER, .COLOR_TARGET}) {
 		usage += {.COLOR_TARGET}
 	}
-	img, err := create_texture(b, info.width, info.height, format, usage)
+	img, err := create_texture(b, info.width, info.height, format, usage, u32(vg.image_level_count(info)))
 	if err != nil {
 		return {}, err
 	}
 	img.flags = info.flags
 	// New textures are undefined (garbage on Metal), and partly updated
-	// images sample their untouched texels.
+	// images sample their untouched texels: every level cleared.
 	if .COLOR_TARGET in usage {
 		cmd := sdl.AcquireGPUCommandBuffer(b.device)
 		if cmd == nil {
 			release_image(b, img)
 			return {}, .General
 		}
-		target := sdl.GPUColorTargetInfo{texture = img.texture, load_op = .CLEAR, store_op = .STORE}
-		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
-		if pass == nil {
-			_ = sdl.CancelGPUCommandBuffer(cmd)
-			release_image(b, img)
-			return {}, .General
+		for l in 0 ..< img.levels {
+			target := sdl.GPUColorTargetInfo{texture = img.texture, mip_level = l, load_op = .CLEAR, store_op = .STORE}
+			pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+			if pass == nil {
+				_ = sdl.CancelGPUCommandBuffer(cmd)
+				release_image(b, img)
+				return {}, .General
+			}
+			sdl.EndGPURenderPass(pass)
 		}
-		sdl.EndGPURenderPass(pass)
 		if !sdl.SubmitGPUCommandBuffer(cmd) {
 			release_image(b, img)
 			return {}, .General
 		}
 	} else {
 		w, h := max(info.width, 1), max(info.height, 1)
-		zero := make([]u8, int(w * h * vg.bytes_per_pixel(info.format)), context.temp_allocator)
+		zero := make([]u8, vg.image_chain_bytes({info.flags, w, h, info.format}), context.temp_allocator)
 		if uerr := upload(b, img, zero, 0, 0, w, h); uerr != nil {
 			release_image(b, img)
 			return {}, uerr
@@ -594,6 +616,16 @@ sdl_update_image :: proc(data: rawptr, image: ^vg.Backend_Image, info: vg.Image_
 	img := (^Image)(image.user)
 	bpp := vg.bytes_per_pixel(info.format)
 	stride := vg.image_source_stride(src)
+	if img.levels > 1 {
+		// The whole image (image_store_update allows no less): its levels
+		// built as the software backend builds them, all uploaded.
+		chain := make([]u8, vg.image_chain_bytes(info), context.temp_allocator)
+		for row in 0 ..< src.height {
+			copy(chain[row * src.width * bpp:][:src.width * bpp], src.data[row * stride:][:src.width * bpp])
+		}
+		vg.image_levels_build(info, chain)
+		return update(b, img, chain, 0, 0, src.width, src.height)
+	}
 	if stride == src.width * bpp {
 		return update(b, img, src.data[:src.width * src.height * bpp], x, y, src.width, src.height)
 	}
@@ -664,12 +696,20 @@ upload_through :: proc(b: ^SDL_Backend, img: ^Image, transfer: ^sdl.GPUTransferB
 		_ = sdl.CancelGPUCommandBuffer(cmd)
 		return .General
 	}
-	sdl.UploadToGPUTexture(
-		pass,
-		{transfer_buffer = transfer, pixels_per_row = w, rows_per_layer = h},
-		{texture = img.texture, x = x, y = y, w = w, h = h, d = 1},
-		false,
-	)
+	// A texture with levels takes its whole chain (vg.image_level), each
+	// level after the one before.
+	offset: u32
+	lw, lh := w, h
+	for l in 0 ..< img.levels {
+		sdl.UploadToGPUTexture(
+			pass,
+			{transfer_buffer = transfer, offset = offset, pixels_per_row = lw, rows_per_layer = lh},
+			{texture = img.texture, mip_level = l, x = x, y = y, w = lw, h = lh, d = 1},
+			false,
+		)
+		offset += lw * lh * texel_bytes(img.format)
+		lw, lh = max(lw >> 1, 1), max(lh >> 1, 1)
+	}
 	sdl.EndGPUCopyPass(pass)
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
 		return .General
