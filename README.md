@@ -184,7 +184,9 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   intermediates are kept per image shape and released after 30 frames
   unused.
 - Gray8 images are stored as R8, Gray16 as R16, RGBA16F as
-  `R16G16B16A16_FLOAT`. `Generate_Mipmaps` is ignored.
+  `R16G16B16A16_FLOAT`. An image with `Generate_Mipmaps` gets a texture of
+  that many levels, uploaded from the same CPU builder as the software
+  backend's (`image_levels_build`), and samplers blend between levels.
 - Tested on Linux (Vulkan, RADV) and macOS (Metal, Apple M4: tests and
   `tools/sdlgpu_parity` pass) and on Windows 11 (Direct3D 12 under WARP:
   `tools/sdlgpu_parity` passes headless; Vulkan and a window on Windows are
