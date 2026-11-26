@@ -87,6 +87,10 @@ Params :: struct {
 	// Two-point conical radial gradient: 1 and the focal point (gradient
 	// space, outer center at the origin); extent = (outer r, focal r).
 	focal:                       [3]f32,
+	// An image paint's mip level (Image_Flag.Generate_Mipmaps): log2 of the
+	// longer step in level 0's texels from one pixel to the next, at least
+	// 0. The paint is affine, so it holds at every pixel.
+	image_lod:                   f32,
 }
 
 default_params :: proc "contextless" () -> Params {
@@ -107,7 +111,7 @@ pack_frag_uniforms :: proc "contextless" (p: Params) -> (out: [14][4]f32) {
 	out[9] = {p.extent[0], p.extent[1], p.radius, p.feather}
 	out[10] = {p.stroke_mult, p.stroke_thr, p.tex_type, f32(p.shader_type)}
 	out[11] = {
-		0,
+		p.image_lod,
 		p.image_blur_filter_direction[0],
 		p.image_blur_filter_direction[1],
 		p.image_blur_filter_taps,

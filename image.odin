@@ -1,6 +1,9 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
+import "core:simd"
+import "core:slice"
 
 Pixel_Format :: enum u8 {
 	// From 1: zero is no format, so a source left unset matches no image.
@@ -852,72 +855,199 @@ image_chain_bytes :: proc "contextless" (info: Image_Info) -> int {
 // the area of the level below that it covers (2 x 2 texels, or a fractional
 // 2-3 a side where that level is odd), so a minified image averages what
 // each pixel covers. Straight-alpha RGBA8 averages colour weighted by
-// alpha, so the colour of transparent texels does not bleed in.
+// alpha, so the colour of transparent texels does not bleed in. A level
+// halving an 8-bit one exactly averages each 2 x 2; any other takes each
+// axis's weights from a table made once for the level. The format and the
+// alpha are fixed per level, outside the loops.
 image_levels_build :: proc(info: Image_Info, chain: []u8) {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	straight := info.format == .RGBA8 && .Premultiplied not_in info.flags
 	for l in 1 ..< image_level_count(info) {
 		sw, sh, src_at := image_level(info, l - 1)
 		dw, dh, dst_at := image_level(info, l)
-		sx, sy := f32(sw) / f32(dw), f32(sh) / f32(dh)
-		for y in 0 ..< int(dh) {
-			y0, y1 := f32(y) * sy, f32(y + 1) * sy
-			for x in 0 ..< int(dw) {
-				x0, x1 := f32(x) * sx, f32(x + 1) * sx
-				sum: [4]f32
-				for j in int(y0) ..< min(int(math.ceil(y1)), int(sh)) {
-					wy := min(y1, f32(j + 1)) - max(y0, f32(j))
-					for i in int(x0) ..< min(int(math.ceil(x1)), int(sw)) {
-						t := image_texel(info.format, chain[src_at:], int(sw), i, j)
-						if straight {
-							t.rgb *= t.a
+		src, dst := chain[src_at:], chain[dst_at:]
+		if sw == 2 * dw && sh == 2 * dh && (info.format == .RGBA8 || info.format == .Gray8) {
+			switch {
+			case info.format == .Gray8:
+				level_halve_u8(src, dst, int(dw), int(dh), 1, false)
+			case straight:
+				level_halve_u8(src, dst, int(dw), int(dh), 4, true)
+			case:
+				level_halve_u8(src, dst, int(dw), int(dh), 4, false)
+			}
+			continue
+		}
+		xs := level_taps(int(sw), int(dw))
+		ys := level_taps(int(sh), int(dh))
+		switch info.format {
+		case .RGBA8:
+			if straight {
+				level_area_u8(src, dst, int(sw), int(dw), xs, ys, 4, true)
+			} else {
+				level_area_u8(src, dst, int(sw), int(dw), xs, ys, 4, false)
+			}
+		case .Gray8:
+			level_area_u8(src, dst, int(sw), int(dw), xs, ys, 1, false)
+		case .Gray16:
+			level_area_16(.Gray16, src, dst, int(sw), int(dw), xs, ys)
+		case .RGBA16F:
+			level_area_16(.RGBA16F, src, dst, int(sw), int(dw), xs, ys)
+		}
+	}
+}
+
+// The texels of a level `n` wide that texel i of the next (`m` wide)
+// covers, [i, i + 1) * n / m, and the share of it each covers.
+@(private = "file")
+Level_Taps :: struct {
+	first, n: int,
+	w:        [4]f32,
+}
+
+@(private = "file")
+level_taps :: proc(n, m: int) -> []Level_Taps {
+	taps := make([]Level_Taps, m, context.temp_allocator)
+	s := f32(n) / f32(m)
+	for &t, i in taps {
+		x0, x1 := f32(i) * s, f32(i + 1) * s
+		t.first = int(x0)
+		// s is under 3 (an odd level halves to floor), so at most 4.
+		t.n = min(int(math.ceil(x1)), n) - t.first
+		for k in 0 ..< t.n {
+			j := f32(t.first + k)
+			t.w[k] = (min(x1, j + 1) - max(x0, j)) / s
+		}
+	}
+	return taps
+}
+
+// An 8-bit level of any size: across each source row by `xs`, each
+// row's sums kept for the next texel row that reads it, then down by `ys`
+// (`ch` channels; straight-alpha colour times alpha, divided back once a
+// texel).
+@(private = "file")
+level_area_u8 :: proc(src, dst: []u8, sw, dw: int, xs, ys: []Level_Taps, $ch: int, $straight: bool) {
+	across := make([]#simd[4]f32, 4 * dw, context.temp_allocator)
+	// The source row each of `across`'s four rows holds (row r in slot r % 4).
+	held := [4]int{-1, -1, -1, -1}
+	for ty, y in ys {
+		for j in 0 ..< ty.n {
+			r := ty.first + j
+			slot := r & 3
+			if held[slot] == r {
+				continue
+			}
+			held[slot] = r
+			row := src[r * sw * ch:][:sw * ch]
+			out := across[slot * dw:][:dw]
+			#no_bounds_check for tx, x in xs {
+				sum: #simd[4]f32
+				for i in 0 ..< tx.n {
+					when ch == 4 {
+						t := cast(#simd[4]f32)simd.from_array(slice.reinterpret([][4]u8, row)[tx.first + i])
+						when straight {
+							t *= simd.replace(simd.swizzle(t, 3, 3, 3, 3), 3, 1)
 						}
-						sum += t * (wy * (min(x1, f32(i + 1)) - max(x0, f32(i))))
+					} else {
+						t := #simd[4]f32{f32(row[tx.first + i]), 0, 0, 0}
 					}
+					sum += t * tx.w[i]
 				}
-				sum /= sx * sy
-				if straight && sum.a > 0 {
-					sum.rgb /= sum.a
-				}
-				image_texel_set(info.format, chain[dst_at:], int(dw), x, y, sum)
+				out[x] = sum
+			}
+		}
+		#no_bounds_check for x in 0 ..< dw {
+			sum: #simd[4]f32
+			for j in 0 ..< ty.n {
+				sum += across[((ty.first + j) & 3) * dw + x] * ty.w[j]
+			}
+			when straight {
+				// Colour times alpha over alpha.
+				a := simd.extract(sum, 3)
+				inv := 1 / a if a > 0 else 0
+				sum *= #simd[4]f32{inv, inv, inv, 1}
+			}
+			c := simd.to_array(cast(#simd[4]u8)simd.min(sum + 0.5, 255))
+			when ch == 4 {
+				slice.reinterpret([][4]u8, dst[y * dw * 4:][:dw * 4])[x] = c
+			} else {
+				dst[y * dw + x] = c[0]
 			}
 		}
 	}
 }
 
-// Texel (x, y) of a level `w` texels wide, as [0, 1] floats (RGBA16F as
-// stored); a gray format's in .r.
+// An 8-bit level halved exactly: each texel the rounded mean of its 2 x 2,
+// straight-alpha colour weighted by alpha (none where all four are clear).
 @(private = "file")
-image_texel :: #force_inline proc "contextless" (f: Pixel_Format, level: []u8, w, x, y: int) -> [4]f32 {
-	at := y * w + x
-	switch f {
-	case .RGBA8:
-		p := level[at * 4:][:4]
-		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])} / 255
-	case .Gray8:
-		return {f32(level[at]) / 255, 0, 0, 0}
-	case .Gray16:
+level_halve_u8 :: proc(src, dst: []u8, dw, dh: int, $ch: int, $straight: bool) {
+	sw := 2 * dw
+	for y in 0 ..< dh {
+		r0 := src[2 * y * sw * ch:][:sw * ch]
+		r1 := src[(2 * y + 1) * sw * ch:][:sw * ch]
+		out := dst[y * dw * ch:][:dw * ch]
+		when !straight {
+			for x in 0 ..< dw {
+				for k in 0 ..< ch {
+					i := 2 * x * ch + k
+					out[x * ch + k] = u8((u32(r0[i]) + u32(r0[i + ch]) + u32(r1[i]) + u32(r1[i + ch]) + 2) >> 2)
+				}
+			}
+			continue
+		}
+		q0, q1 := slice.reinterpret([][4]u8, r0), slice.reinterpret([][4]u8, r1)
+		o := slice.reinterpret([][4]u8, out)
+		// Colour times alpha (alpha as is), summed: whole numbers, exact in f32.
+		premul :: #force_inline proc "contextless" (p: [4]u8) -> #simd[4]f32 {
+			t := cast(#simd[4]f32)simd.from_array(p)
+			return t * simd.replace(simd.swizzle(t, 3, 3, 3, 3), 3, 1)
+		}
+		#no_bounds_check for x in 0 ..< dw {
+			sum := premul(q0[2 * x]) + premul(q0[2 * x + 1]) + premul(q1[2 * x]) + premul(q1[2 * x + 1])
+			a := simd.extract(sum, 3)
+			// Colour over alpha, alpha a quarter of its sum; rounded.
+			inv := 1 / a if a > 0 else 0
+			o[x] = simd.to_array(cast(#simd[4]u8)(sum * #simd[4]f32{inv, inv, inv, 0.25} + 0.5))
+		}
+	}
+}
+
+// A 16-bit level (Gray16, RGBA16F), of any size: each texel the
+// area-weighted sum of up to 4 x 4 texels below, by `xs` and `ys`.
+@(private = "file")
+level_area_16 :: proc($F: Pixel_Format, src, dst: []u8, sw, dw: int, xs, ys: []Level_Taps) where F == .Gray16 || F == .RGBA16F {
+	for ty, y in ys {
+		for tx, x in xs {
+			sum: [4]f32
+			for j in 0 ..< ty.n {
+				row := (ty.first + j) * sw + tx.first
+				for i in 0 ..< tx.n {
+					sum += level_load(F, src, row + i) * (ty.w[j] * tx.w[i])
+				}
+			}
+			level_store(F, dst, y * dw + x, sum)
+		}
+	}
+}
+
+// Texel `at` of a level as [0, 1] floats (RGBA16F as stored); Gray16's in
+// .r.
+@(private = "file")
+level_load :: #force_inline proc "contextless" ($F: Pixel_Format, level: []u8, at: int) -> [4]f32 {
+	when F == .Gray16 {
 		return {f32(u16(level[at * 2]) | u16(level[at * 2 + 1]) << 8) / 65535, 0, 0, 0}
-	case .RGBA16F:
+	} else {
 		p := ([^]f16)(raw_data(level[at * 8:]))
 		return {f32(p[0]), f32(p[1]), f32(p[2]), f32(p[3])}
 	}
-	return {}
 }
 
 @(private = "file")
-image_texel_set :: #force_inline proc "contextless" (f: Pixel_Format, level: []u8, w, x, y: int, t: [4]f32) {
-	at := y * w + x
-	switch f {
-	case .RGBA8:
-		for k in 0 ..< 4 {
-			level[at * 4 + k] = u8(clamp(t[k], 0, 1) * 255 + 0.5)
-		}
-	case .Gray8:
-		level[at] = u8(clamp(t.r, 0, 1) * 255 + 0.5)
-	case .Gray16:
+level_store :: #force_inline proc "contextless" ($F: Pixel_Format, level: []u8, at: int, t: [4]f32) {
+	when F == .Gray16 {
 		v := u16(clamp(t.r, 0, 1) * 65535 + 0.5)
 		level[at * 2], level[at * 2 + 1] = u8(v), u8(v >> 8)
-	case .RGBA16F:
+	} else {
 		p := ([^]f16)(raw_data(level[at * 8:]))
 		for k in 0 ..< 4 {
 			p[k] = f16(t[k])

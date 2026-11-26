@@ -157,17 +157,10 @@ float conic_fraction(vec2 fpos) {
     return (-atan(pt.x, pt.y) / TAU) + 0.5;
 }
 
-// The level an image paint samples: what a GPU's derivatives pick, log2 of
-// the longer step in level 0's texels from one pixel to the next. The paint
-// is affine, so the step is the same at every pixel. A texture without
-// levels reads level 0 at any lod. Magnified (a step under one texel) or
-// degenerate, it is 0, so log2 never sees 0.
-float image_lod() {
-    vec2 size = vec2(textureSize(tex, 0)) / extent();
-    vec2 dx = P(3).xy * size;
-    vec2 dy = P(4).xy * size;
-    return 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0));
-}
+// The level an image paint samples (Params.image_lod, made on the CPU once
+// a paint): what a GPU's derivatives pick. A texture without levels reads
+// level 0 at any lod.
+float image_lod() { return P(11).x; }
 
 // The paint's colour at `fpos` for the fill types (gradients, images, solid
 // colours). Gradient ramps are sampled at level 0.

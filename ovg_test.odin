@@ -2148,6 +2148,15 @@ test_sw_image_mipmaps :: proc(t: ^testing.T) {
 	image_levels_build({{.Generate_Mipmaps}, 2, 2, .RGBA8}, chain)
 	testing.expect_value(t, [4]u8{chain[16], chain[17], chain[18], chain[19]}, [4]u8{255, 255, 255, 128})
 
+	// Odd and straight: 3 x 1 RGBA8 becomes 1 x 1, a third of each; the
+	// transparent red adds no colour.
+	odd_rgba := Image_Info{{.Generate_Mipmaps}, 3, 1, .RGBA8}
+	c3 := make([]u8, image_chain_bytes(odd_rgba))
+	defer delete(c3)
+	copy(c3, []u8{255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 255, 255})
+	image_levels_build(odd_rgba, c3)
+	testing.expect_value(t, [4]u8{c3[12], c3[13], c3[14], c3[15]}, [4]u8{128, 128, 255, 170})
+
 	// Odd: 5 x 1 Gray8 becomes 2 x 1, each texel 2.5 of the level below.
 	odd := Image_Info{{.Generate_Mipmaps}, 5, 1, .Gray8}
 	g := make([]u8, image_chain_bytes(odd))

@@ -1136,6 +1136,10 @@ params_from_paint :: proc(
 		}
 		p.shader_type = .Fill_Image
 		p.tex_type = tex_type_for(info)
+		// Level 0's texels a pixel's step moves by, along x and along y.
+		sx, sy := f32(info.width) / f.width, f32(info.height) / f.height
+		step := max(inv[0] * inv[0] * sx * sx + inv[1] * inv[1] * sy * sy, inv[2] * inv[2] * sx * sx + inv[3] * inv[3] * sy * sy)
+		p.image_lod = 0.5 * math.log2(step) if step > 1 else 0
 	case Paint_Linear_Gradient:
 		LARGE :: 1e5
 		dx := f.end.x - f.start.x
