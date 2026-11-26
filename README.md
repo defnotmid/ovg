@@ -71,6 +71,7 @@ packages:
 | `ovg` (core + software backend) | `deps:oglyph/font`, `deps:oglyph/shape`, `deps:oglyph/collection` ([oglyph](https://github.com/defnotmid/oglyph) v0.1.0), `deps:ocurves` ([ocurves](https://github.com/defnotmid/ocurves) v0.1.1), `deps:oicut/image`, `deps:oicut/common` ([oicut](https://github.com/defnotmid/oicut) v0.1.0), `deps:oksl` ([oksl](https://github.com/defnotmid/oksl) v0.1.2) |
 | `ovg/svg` (SVG import), `ovg/lottie` (Lottie import) | `ovg`; packages on top of core, so a program that reads neither imports only `ovg` |
 | `ovg/sdlgpu` (GPU backend) | `ovg`, `vendor:sdl3`; SDL 3 at runtime (the system library on Linux/macOS, the bundled DLL on Windows) |
+| `ovg/sdlsoft` (the software backend in a window) | `ovg`, `vendor:sdl3`; SDL 3 at runtime, and no GPU device |
 
 ## Use
 
@@ -199,6 +200,46 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   draw's `SV_VertexID` from 0, so `shape.vert` reads the draw's first
   instance row from a uniform (`first`), pushed when a draw's start
   changes, on every driver.
+
+### A window without a GPU
+
+`ovg/sdlsoft` shows the software backend's screen in an SDL window through
+SDL's window surface, the window's framebuffer in main memory, so a window
+needs no GPU device. The frames are the same as the GPU backend's (one
+frame format), so an app can draw on SDL_GPU where there is a real GPU and
+fall back to this, from the same drawing code.
+
+```odin
+import "ovg/sdlsoft"
+
+sw: vg.Software_Backend
+vg.software_backend_init(&sw)
+sw.pool = &pool.work_pool       // oicut's Work_Pool: row bands on every core
+c: vg.Canvas
+vg.canvas_init(&c, vg.software_backend(&sw))
+pr: sdlsoft.Presenter
+sdlsoft.presenter_init(&pr, window)
+// each frame
+w, h := sdlsoft.window_pixels(window)
+vg.set_size(&c, w, h)
+// ... draw ...
+vg.flush(&c)
+sdlsoft.present(&pr, &sw)       // false when SDL gives no surface (sdl.GetError)
+```
+
+- A window shown this way is not claimed for an SDL_GPU device: SDL lets a
+  window have a surface or a GPU swapchain, not both.
+- The screen is premultiplied; where it isn't opaque the window shows it
+  over black.
+- On a machine whose only SDL_GPU device is WARP (Direct3D 12 on the CPU),
+  this is the faster way by far. On a 4-core Windows 11 VM,
+  `tools/sdlsoft_demo` (a 1280x800 frame of 300 panels, 100 outlines and 40
+  lines of text, redrawn every frame) runs at 135-250 fps (render 2.8-4.9
+  ms, present 0.5-1.0 ms), where an app's comparable frame through SDL_GPU on
+  WARP took about 830 ms. On Linux with 24 threads it runs at about 188 fps.
+- `odin test sdlsoft` checks a frame reaches the window pixel for pixel on
+  SDL's `offscreen` video driver; it skips where that driver makes no window
+  (macOS, without an EGL library).
 
 ### Shaders
 

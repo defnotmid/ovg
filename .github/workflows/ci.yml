@@ -115,3 +115,12 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             odin check sdlgpu -collection:deps=.. -no-entry-point -target:darwin_arm64
           fi
+
+      - name: Check the software window
+        # Its test needs SDL 3's library, which the runners don't have.
+        run: |
+          odin check sdlsoft -collection:deps=.. -no-entry-point -vet -strict-style
+          odin check tools/sdlsoft_demo -collection:deps=.. -vet -strict-style
+          if [ "$RUNNER_OS" = Linux ]; then
+            odin check sdlsoft -collection:deps=.. -no-entry-point -target:darwin_arm64
+          fi
