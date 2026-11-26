@@ -528,3 +528,23 @@ scene_layer_image :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.fill_path(c, p, vg.paint_image(img, 128, 48, 128, 96, 0, 0.5))
 	vg.layer_stack_end(ls, c)
 }
+
+// The luminance mask with each Mask_Luminance: pure red, green and blue
+// mask strips, where the weights differ most.
+scene_mask_luminance :: proc(c: ^vg.Canvas, r: ^Resources) {
+	ls := &r.layers
+	vg.layer_stack_begin(ls, c, W, H)
+	background(c, r)
+	for weights, i in vg.Mask_Luminance {
+		x := f32(i) * 128
+		vg.layer_push(ls, c, {mask_luminance = weights})
+		vg.layer_mask_begin(ls, c)
+		for col, k in ([3]vg.Color{vg.rgb(255, 0, 0), vg.rgb(0, 255, 0), vg.rgb(0, 0, 255)}) {
+			rect(c, r, x + 8, 8 + f32(k) * 60, 112, 52, col)
+		}
+		vg.layer_mask_end(ls, c)
+		rect(c, r, x, 0, 128, H, vg.rgb(255, 255, 255))
+		vg.layer_pop(ls, c)
+	}
+	vg.layer_stack_end(ls, c)
+}

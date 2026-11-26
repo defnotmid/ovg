@@ -63,6 +63,8 @@ Layer_Params :: struct {
 	// The layer shows where the mask is transparent instead (inverted
 	// track mattes).
 	mask_invert: bool,
+	// The weights a luminance mask takes its luminance with.
+	mask_luminance: Mask_Luminance,
 	// How the layer combines with what is under it (CSS mix-blend-mode).
 	// Anything but Normal needs the backdrop as an image: begin the stack
 	// with `root_layer` when the target is the screen.
@@ -128,6 +130,7 @@ Layer_Frame :: struct {
 	blend:      Blend_Mode,
 	mask_alpha: bool,
 	mask_invert: bool,
+	mask_luminance: Mask_Luminance,
 	// The content keeps a velocity twin, as the target under it does.
 	velocity:   bool,
 	// The whole pixels of the scissor at the push (drawing coordinates),
@@ -389,6 +392,7 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	f.blend = params.blend
 	f.mask_alpha = params.mask_alpha
 	f.mask_invert = params.mask_invert
+	f.mask_luminance = params.mask_luminance
 	f.velocity = ls.targets[len(ls.targets) - 1].velocity
 	f.scissor = scissor_pixels(state(c).scissor)
 	if params.blend != .Normal {
@@ -501,7 +505,11 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	if f.masked && !f.mask_alpha {
 		// Luminance mask: luminance of the (straight) color times alpha.
 		lum := layer_acquire(ls, c, w, h)
-		filter_image(c, lum, color_matrix_luminance_to_alpha(), mask)
+		lm := color_matrix_luminance_to_alpha()
+		if f.mask_luminance == .Pdf {
+			lm.m[15], lm.m[16], lm.m[17] = 0.3, 0.59, 0.11
+		}
+		filter_image(c, lum, lm, mask)
 		filter_image(c, mask, Composite{.In, {}, mask}, lum)
 		layer_release(ls, lum)
 	}

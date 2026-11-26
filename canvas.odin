@@ -753,7 +753,7 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	}
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
-	params.spread = f32(paint.spread)
+	params.spread = f32(u8(paint.spread) | transmute(u8)paint.gradient_clip << 2)
 	return cmd, add_paint(c, params)
 }
 
@@ -1154,7 +1154,7 @@ params_from_paint :: proc(
 	case Paint_Radial_Gradient:
 		t := transform_translation(f.center.x, f.center.y)
 		inv = transform_inverse(transform_multiply(t, global_transform))
-		if f.focal != {} {
+		if f.focal != {} || f.in_radius > f.out_radius {
 			p.extent = {f.out_radius, f.in_radius}
 			p.focal = {1, f.focal.x, f.focal.y}
 		} else {

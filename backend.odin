@@ -82,7 +82,7 @@ Params :: struct {
 	image_blur_filter_coeff:     [3]f32,
 	// 0 = transparent beyond the image, 1 = clamp to the edge.
 	image_blur_filter_edge:      f32,
-	// `Gradient_Spread` as a number.
+	// `Gradient_Spread` plus the `Gradient_Clip` bits times 4.
 	spread:                      f32,
 	// Two-point conical radial gradient: 1 and the focal point (gradient
 	// space, outer center at the origin); extent = (outer r, focal r).

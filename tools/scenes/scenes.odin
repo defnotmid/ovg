@@ -85,11 +85,13 @@ ALL := [?]Scene {
 	{"blend", scene_blend},
 	{"composite_filter", scene_composite_filter},
 	{"spread", scene_spread},
+	{"gradient_clip", scene_gradient_clip},
 	{"paint_transform", scene_paint_transform},
 	{"program", scene_program},
 	{"layers", scene_layers},
 	{"hairline_group", scene_hairline_group},
 	{"layer_masks", scene_layer_masks},
+	{"mask_luminance", scene_mask_luminance},
 	{"layer_filters", scene_layer_filters},
 	{"bloom", scene_bloom},
 	{"filters_more", scene_filters_more},
@@ -698,6 +700,56 @@ scene_spread :: proc(c: ^vg.Canvas, r: ^Resources) {
 		vg.path_rect(p, 132, y, 124, 58)
 		vg.fill_path(c, p, radial)
 	}
+}
+
+// Gradient_Clip (PDF shadings' /Extend and two-point radial cones) and
+// radial gradients set directly: the inner circle larger than the outer,
+// the focal circle outside it.
+scene_gradient_clip :: proc(c: ^vg.Canvas, r: ^Resources) {
+	p := &r.path
+	stops := [?]vg.Gradient_Stop{{0, vg.rgb(250, 60, 30)}, {0.4, vg.rgb(250, 220, 40)}, {1, vg.rgba(30, 90, 230, 160)}}
+	fill :: proc(c: ^vg.Canvas, p: ^vg.Path, x, y, w, h: f32, paint: vg.Paint) {
+		vg.path_reset(p)
+		vg.path_rect(p, x, y, w, h)
+		vg.fill_path(c, p, paint)
+	}
+	// Linear: no paint before the start, after the end, then both.
+	for clip, i in ([3]bit_set[vg.Gradient_Clip; u8]{{.Before_Start}, {.After_End}, {.Before_Start, .After_End}}) {
+		y := f32(i) * 20
+		two := vg.paint_linear_gradient(40, 0, 90, 0, vg.rgb(20, 20, 40), vg.rgb(90, 220, 250))
+		two.gradient_clip = clip
+		fill(c, p, 0, y, 128, 18, two)
+	}
+	// Multi-stop and reflected, no paint after the end.
+	multi := vg.paint_linear_gradient_stops(20, 0, 60, 0, stops[:])
+	multi.spread = .Reflect
+	multi.gradient_clip = {.After_End}
+	fill(c, p, 0, 60, 128, 18, multi)
+	// Concentric radial without either end.
+	radial := vg.paint_radial_gradient(192, 40, 10, 30, vg.rgb(250, 250, 250), vg.rgb(120, 40, 200))
+	radial.gradient_clip = {.Before_Start, .After_End}
+	fill(c, p, 132, 0, 124, 80, radial)
+	// Two-point radials with the focal circle outside the outer one: SVG's
+	// clamping, then the cone alone (both ends extended), then the cone
+	// without the ends, multi-stop.
+	cone := vg.Paint_Radial_Gradient{center = {0, 0}, in_radius = 6, out_radius = 22, colors = vg.Two_Stop_Gradient{vg.rgb(255, 255, 255), vg.rgb(0, 120, 60)}, focal = {-34, 6}}
+	for clip, i in ([3]bit_set[vg.Gradient_Clip; u8]{{}, {.Outside_Cone}, {.Outside_Cone, .Before_Start, .After_End}}) {
+		x := f32(i) * 86
+		g := cone
+		g.center = {x + 56, 112}
+		if i == 2 {
+			g.colors = vg.gradient_colors_from_stops(stops[:])
+		}
+		paint := vg.paint_from_flavor(g)
+		paint.gradient_clip = clip
+		fill(c, p, x, 84, 84, 56, paint)
+	}
+	// The inner circle larger than the outer, and two circles crossing.
+	inner := vg.paint_from_flavor(vg.Paint_Radial_Gradient{center = {40, 168}, in_radius = 22, out_radius = 4, colors = vg.gradient_colors_from_stops(stops[:])})
+	fill(c, p, 0, 144, 84, 48, inner)
+	crossed := vg.paint_from_flavor(vg.Paint_Radial_Gradient{center = {150, 168}, in_radius = 18, out_radius = 10, colors = vg.Two_Stop_Gradient{vg.rgb(250, 200, 30), vg.rgb(40, 40, 200)}, focal = {-16, 0}})
+	crossed.gradient_clip = {.Outside_Cone}
+	fill(c, p, 88, 144, 168, 48, crossed)
 }
 
 scene_paint_transform :: proc(c: ^vg.Canvas, r: ^Resources) {

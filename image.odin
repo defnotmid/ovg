@@ -205,6 +205,14 @@ color_matrix_hue_rotate :: proc "contextless" (degrees: f32) -> Color_Matrix {
 	}
 }
 
+// The luminance a luminance mask counts by: SVG's and CSS's Rec. 709
+// weights (0.2125, 0.7154, 0.0721, as feColorMatrix luminanceToAlpha) or
+// PDF's soft masks' (0.30, 0.59, 0.11, its non-separable blend modes').
+Mask_Luminance :: enum u8 {
+	Rec709,
+	Pdf,
+}
+
 // feColorMatrix type="luminanceToAlpha": black with the luminance as alpha.
 color_matrix_luminance_to_alpha :: proc "contextless" () -> Color_Matrix {
 	return {{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.2125, 0.7154, 0.0721, 0, 0}}

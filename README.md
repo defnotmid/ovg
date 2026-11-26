@@ -778,7 +778,15 @@ Paints:
 - `paint_radial_gradient_focal_stops(cx, cy, r, fx, fy, fr, stops)`: SVG's
   two-point conical radial gradient (`Paint_Radial_Gradient.focal`), in the
   shader and the software backend; a focal point outside the circle moves
-  onto it.
+  onto it. Set directly, `Paint_Radial_Gradient` takes any radii and any
+  focal offset (PDF type 3 shadings), `in_radius` larger than `out_radius`
+  included.
+- `Paint.gradient_clip` (empty paints everywhere, as SVG): `.Before_Start`
+  and `.After_End` paint nothing where t < 0 or t > 1 (PDF /Extend false),
+  and `.Outside_Cone` nothing where no circle of a two-point radial passes
+  with a radius >= 0 (PDF's rule for every /Extend), on top of the spread.
+- `Layer_Params.mask_luminance`: `.Rec709` (SVG's and CSS's luminance mask
+  weights) or `.Pdf` (0.30, 0.59, 0.11, PDF soft masks).
 - Round and square caps draw a dot on zero-length subpaths and zero dashes
   (SVG); fills of contours without area draw nothing.
 - `Paint.transform`: maps paint space to the current space before the canvas

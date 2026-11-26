@@ -457,6 +457,106 @@ test_sw_radial_gradient :: proc(t: ^testing.T) {
 	testing.expectf(t, mid > 110 && mid < 145, "mid %d", mid)
 }
 
+// Gradient_Clip: nothing before the start, after the end, or outside a
+// two-point radial's cone; the zero value pads, as before.
+@(test)
+test_sw_gradient_clip :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 64, 64)
+	draw :: proc(s: ^Sw, p: ^Path, paint: Paint) {
+		clear_rect(&s.canvas, 0, 0, 64, 64, TRANSPARENT)
+		fill_path(&s.canvas, p, paint)
+		flush(&s.canvas)
+	}
+	lin := paint_linear_gradient(16, 0, 48, 0, rgb(255, 0, 0), rgb(0, 0, 255))
+	draw(&s, &p, lin)
+	testing.expect_value(t, px(&s, 4, 8), [4]u8{255, 0, 0, 255})
+	testing.expect_value(t, px(&s, 60, 8), [4]u8{0, 0, 255, 255})
+	lin.gradient_clip = {.Before_Start}
+	draw(&s, &p, lin)
+	testing.expect_value(t, px(&s, 4, 8), [4]u8{})
+	testing.expect_value(t, px(&s, 60, 8), [4]u8{0, 0, 255, 255})
+	m := px(&s, 32, 8)
+	testing.expectf(t, m.a == 255 && m.r > 100 && m.b > 100, "middle %v", m)
+	lin.gradient_clip = {.After_End}
+	draw(&s, &p, lin)
+	testing.expect_value(t, px(&s, 4, 8), [4]u8{255, 0, 0, 255})
+	testing.expect_value(t, px(&s, 60, 8), [4]u8{})
+	// A concentric radial without its ends paints only the ring.
+	ring := paint_radial_gradient(32, 32, 8, 24, WHITE, BLACK)
+	ring.gradient_clip = {.Before_Start, .After_End}
+	draw(&s, &p, ring)
+	testing.expect_value(t, px(&s, 32, 32), [4]u8{})
+	testing.expect_value(t, px(&s, 2, 2), [4]u8{})
+	testing.expect_value(t, px(&s, 32 + 16, 32).a, 255)
+	// The focal circle (8, 32) r 2 outside the outer circle (32, 32) r 12:
+	// the circles between them sweep a cone whose apex is near x = 3.2.
+	cone := paint_from_flavor(Paint_Radial_Gradient{center = {32, 32}, in_radius = 2, out_radius = 12, colors = Two_Stop_Gradient{WHITE, BLACK}, focal = {-24, 0}})
+	draw(&s, &p, cone)
+	testing.expect_value(t, px(&s, 1, 32).a, 255)
+	testing.expect_value(t, px(&s, 8, 4).a, 255)
+	cone.gradient_clip = {.Outside_Cone}
+	draw(&s, &p, cone)
+	testing.expect_value(t, px(&s, 1, 32), [4]u8{})
+	testing.expect_value(t, px(&s, 8, 4), [4]u8{})
+	testing.expect_value(t, px(&s, 32, 32).a, 255)
+	testing.expect_value(t, px(&s, 60, 32), [4]u8{0, 0, 0, 255})
+}
+
+// A radial gradient may run inward: from in_radius 24 out to radius 8,
+// t = (24 - d) / 16 at distance d, padded inside radius 8.
+@(test)
+test_sw_radial_inward :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 64, 64)
+	defer sw_close(&s)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 64, 64)
+	fill_path(&s.canvas, &p, paint_radial_gradient(32, 32, 24, 8, WHITE, BLACK))
+	flush(&s.canvas)
+	testing.expect_value(t, px(&s, 32, 32), [4]u8{0, 0, 0, 255})
+	testing.expect_value(t, px(&s, 2, 2), [4]u8{255, 255, 255, 255})
+	// t = 0.47 at the pixel center 16.5 out (135), 0.84 at 10.5 (41).
+	mid := px(&s, 32 + 16, 32).r
+	testing.expectf(t, mid > 120 && mid < 150, "mid %d", mid)
+	near := px(&s, 32 + 10, 32).r
+	testing.expectf(t, near > 34 && near < 48, "near %d", near)
+}
+
+// Mask_Luminance: a pure green luminance mask lets through 0.7154 of the
+// layer with Rec. 709's weights and 0.59 with PDF's.
+@(test)
+test_sw_mask_luminance :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 16, 16)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 16, 16)
+	for want, weights in ([Mask_Luminance]u8{.Rec709 = 182, .Pdf = 150}) {
+		clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
+		layer_stack_begin(&ls, c, 16, 16)
+		layer_push(&ls, c, {mask_luminance = weights})
+		layer_mask_begin(&ls, c)
+		fill_path(c, &p, paint_color(rgb(0, 255, 0)))
+		layer_mask_end(&ls, c)
+		fill_path(c, &p, paint_color(WHITE))
+		layer_pop(&ls, c)
+		layer_stack_end(&ls, c)
+		flush(c)
+		a := px(&s, 8, 8).a
+		testing.expectf(t, abs(int(a) - int(want)) <= 1, "%v: alpha %d want %d", weights, a, want)
+	}
+}
+
 @(test)
 test_sw_destination_over :: proc(t: ^testing.T) {
 	s: Sw

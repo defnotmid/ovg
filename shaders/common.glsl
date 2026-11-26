@@ -94,9 +94,9 @@ vec4 apply_tex_type(vec4 color) {
     return apply_tt(color, tex_type());
 }
 
-// SVG spreadMethod: 0 pad, 1 reflect, 2 repeat.
+// SVG spreadMethod in P(13).x's low two bits: 0 pad, 1 reflect, 2 repeat.
 float spread_t(float t) {
-    int s = int(P(13).x);
+    int s = int(P(13).x) & 3;
     if (s == 1) {
         float m = t - 2.0 * floor(t * 0.5);
         return m > 1.0 ? 2.0 - m : m;
@@ -107,8 +107,9 @@ float spread_t(float t) {
 
 // Two-point conical (focal) radial gradient: the largest t whose circle,
 // from the focal circle (focal, fr) to the outer one (origin, r), passes
-// through pt.
-float focal_t(vec2 pt) {
+// through pt with a radius >= 0, and 1 where one does (else 0, with SVG's
+// nearest t).
+vec2 focal_t(vec2 pt) {
     float r = extent().x;
     float fr = extent().y;
     vec2 f = P(13).zw;
@@ -119,18 +120,36 @@ float focal_t(vec2 pt) {
     float b = dot(pd, cd) + fr * dr;
     float c = dot(pd, pd) - fr * fr;
     if (abs(a) < 1e-6) {
-        return abs(b) > 1e-12 ? c / (2.0 * b) : 0.0;
+        if (abs(b) <= 1e-12) return vec2(0.0, 0.0);
+        float t = c / (2.0 * b);
+        return vec2(t, fr + t * dr >= 0.0 ? 1.0 : 0.0);
     }
-    float sq = sqrt(max(b * b - a * c, 0.0));
+    float d = b * b - a * c;
+    float sq = sqrt(max(d, 0.0));
     float hi = a > 0.0 ? (b + sq) / a : (b - sq) / a;
-    if (fr + hi * dr >= 0.0) return hi;
-    return a > 0.0 ? (b - sq) / a : (b + sq) / a;
+    if (fr + hi * dr >= 0.0) return vec2(hi, d >= 0.0 ? 1.0 : 0.0);
+    float lo = a > 0.0 ? (b - sq) / a : (b + sq) / a;
+    return vec2(lo, d >= 0.0 && fr + lo * dr >= 0.0 ? 1.0 : 0.0);
 }
 
-float gradient_t(vec2 fpos) {
+// The gradient's t at fpos after the spread, and 0 where the paint's
+// Gradient_Clip (P(13).x's bits 2 to 4: before the start, after the end,
+// outside the cone) leaves it unpainted, else 1.
+vec2 gradient_t(vec2 fpos) {
     vec2 pt = transform_point(3, fpos);
-    if (P(13).y != 0.0) return spread_t(focal_t(pt));
-    return spread_t((sd_round_rect(pt, extent(), radius()) + feather() * 0.5) / feather());
+    int clip = int(P(13).x) >> 2;
+    float t;
+    bool hit = true;
+    if (P(13).y != 0.0) {
+        vec2 ft = focal_t(pt);
+        t = ft.x;
+        hit = (clip & 4) == 0 || ft.y != 0.0;
+    } else {
+        t = (sd_round_rect(pt, extent(), radius()) + feather() * 0.5) / feather();
+    }
+    if ((clip & 1) != 0 && t < 0.0) hit = false;
+    if ((clip & 2) != 0 && t > 1.0) hit = false;
+    return vec2(spread_t(t), hit ? 1.0 : 0.0);
 }
 
 float conic_fraction(vec2 fpos) {
@@ -142,10 +161,12 @@ float conic_fraction(vec2 fpos) {
 // colours). Textures are sampled at level 0: there are no mipmaps.
 vec4 fill_color(int type, vec2 fpos) {
     if (type == FILL_GRADIENT) {
-        return mix(inner_col(), outer_col(), gradient_t(fpos));
+        vec2 g = gradient_t(fpos);
+        return mix(inner_col(), outer_col(), g.x) * g.y;
     } else if (type == FILL_IMAGE_GRADIENT) {
         // The ramp is the stops; inner_col carries the paint's alpha.
-        return textureLod(tex, vec2(gradient_t(fpos), 0.0), 0.0) * inner_col();
+        vec2 g = gradient_t(fpos);
+        return textureLod(tex, vec2(g.x, 0.0), 0.0) * (inner_col() * g.y);
     } else if (type == FILL_IMAGE) {
         vec2 pt = transform_point(3, fpos) / extent();
         return apply_tex_type(textureLod(tex, pt, 0.0)) * inner_col();

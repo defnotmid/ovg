@@ -79,7 +79,9 @@ Paint_Box_Gradient :: struct {
 // The gradient runs from `in_radius` to `out_radius` around `center`. With
 // a `focal` offset (SVG fx / fy relative to cx / cy) it is a two-point
 // conical gradient from the focal circle (`center + focal`, `in_radius`)
-// to the outer circle (SVG fr / r).
+// to the outer circle (SVG fr / r). Set directly, any radii >= 0 and any
+// focal offset work (PDF type 3 shadings); `in_radius` may exceed
+// `out_radius`.
 Paint_Radial_Gradient :: struct {
 	center:     Vec2,
 	in_radius:  f32,
@@ -132,6 +134,17 @@ Gradient_Spread :: enum u8 {
 	Repeat,
 }
 
+// Where a linear, radial or box gradient paints nothing (transparent), on
+// top of its spread (PDF shadings). `Before_Start` and `After_End` leave
+// out t < 0 and t > 1 (/Extend false at that end). `Outside_Cone` leaves
+// out the points no circle of a two-point radial gradient passes through
+// with a radius >= 0, where SVG takes the nearest circle instead.
+Gradient_Clip :: enum u8 {
+	Before_Start,
+	After_End,
+	Outside_Cone,
+}
+
 // Per-draw styling. Plain value: copy and modify fields freely.
 Paint :: struct {
 	flavor:     Paint_Flavor,
@@ -145,6 +158,8 @@ Paint :: struct {
 	stroke:     Stroke_Settings,
 	fill_rule:  Fill_Rule,
 	spread:     Gradient_Spread,
+	// Empty paints every point, as SVG does.
+	gradient_clip: bit_set[Gradient_Clip; u8],
 	// Maps paint space to the canvas's current space, applied before the
 	// canvas transform (SVG gradientTransform / patternTransform, or
 	// objectBoundingBox units). The zero value is the identity.
