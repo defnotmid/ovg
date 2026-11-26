@@ -179,8 +179,8 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 	r.tile_out, _ = vg.create_image_empty(c, 32, 32, .RGBA8, {.Premultiplied})
 	r.panel, _ = vg.create_image_empty(c, 80, 80, .RGBA8, {.Premultiplied})
 	r.panel_out, _ = vg.create_image_empty(c, 80, 80, .RGBA8, {.Premultiplied})
-	vert, _, vert_ok := oksl.compile(oksl.LAYER_VERTEX_GLSL, {profile = .Glsl, stage = .Vertex, no_cpu = true})
-	frag, _, frag_ok := oksl.compile(PROGRAM_FRAG, {profile = .Glsl})
+	vert, _, vert_ok := oksl.compile(oksl.LAYER_VERTEX_GLSL, {profile = .Glsl, stage = .Vertex, no_cpu = true, dxbc = true})
+	frag, _, frag_ok := oksl.compile(PROGRAM_FRAG, {profile = .Glsl, dxbc = true})
 	assert(vert_ok && frag_ok && frag.block_size == size_of(Program_Params))
 	defer oksl.destroy(vert)
 	r.program_cpu.frag = frag
@@ -193,6 +193,10 @@ setup :: proc(c: ^vg.Canvas, r: ^Resources) {
 			vert_spirv = mem.slice_to_bytes(vert.spirv),
 			vert_msl = transmute([]u8)vert.msl,
 			vert_msl_entry = oksl.MSL_ENTRY,
+			frag_dxbc = frag.dxbc,
+			frag_dxbc_entry = oksl.DXBC_ENTRY,
+			vert_dxbc = vert.dxbc,
+			vert_dxbc_entry = oksl.DXBC_ENTRY,
 			uniform_size = size_of(Program_Params),
 			num_samplers = frag.num_samplers,
 			cpu = program_cpu,

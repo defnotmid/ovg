@@ -55,7 +55,7 @@ Added in ovg:
   each pixel's coverage in closed form (see Shapes below).
 
 Two backends: a software rasterizer and an SDL_GPU backend (SDL3's GPU API:
-Vulkan on Linux and Windows, Metal on macOS). Fonts are
+Vulkan on Linux and Windows, Metal on macOS, Direct3D 12 on Windows). Fonts are
 read and text shaped by [oglyph](https://github.com/defnotmid/oglyph), shapes'
 coverage and path booleans computed by
 [ocurves](https://github.com/defnotmid/ocurves), images decoded and PNGs
@@ -122,8 +122,8 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - `init(&gpu, device)` borrows the host's `^sdl.GPUDevice` (e.g. the one its
   window renders with). With no device it initializes SDL video, falling back
   to the `offscreen` video driver when there is no display, and creates a
-  headless device accepting SPIR-V or MSL. `SDL_GPU_DRIVER` picks SDL's
-  driver.
+  headless device accepting SPIR-V, MSL or DXBC. `SDL_GPU_DRIVER` picks
+  SDL's driver.
 - `vg.flush(&c, vgsdl.output(&o))` renders the screen into a caller texture
   (`vgsdl.Output`: texture, format, size). With `o.command_buffer` set, the
   frame is recorded into that command buffer and the caller submits it; that
@@ -185,21 +185,27 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - Gray8 images are stored as R8, Gray16 as R16, RGBA16F as
   `R16G16B16A16_FLOAT`. `Generate_Mipmaps` is ignored.
 - Tested on Linux (Vulkan, RADV) and macOS (Metal, Apple M4: tests and
-  `tools/sdlgpu_parity` pass). The Windows path compiles
-  (`odin check -target:windows_amd64`) but is untested.
+  `tools/sdlgpu_parity` pass) and on Windows 11 (Direct3D 12 under WARP:
+  `tools/sdlgpu_parity` passes headless; Vulkan and a window on Windows are
+  untested).
 - New images are cleared to transparent: SDL_GPU leaves texture contents
   undefined (garbage on Metal), and a partly updated image samples texels
   it never wrote.
-- On Windows the backend runs on Vulkan: it asks SDL_GPU for SPIR-V or MSL
-  and fails with `.Unsupported_Operation` on a device that takes neither.
-  oksl can also write DXBC for SDL_GPU's D3D12 driver, which ovg doesn't use
-  yet.
+- On Windows the backend runs on Vulkan or Direct3D 12: it takes SPIR-V
+  where the device does, else MSL, else DXBC (Shader Model 5.1, from oksl),
+  and fails with `.Unsupported_Operation` on a device that takes none.
+  WARP, Windows' software adapter, renders far slower than ovg's software
+  backend, so pick hardware or the software backend. Direct3D counts a
+  draw's `SV_VertexID` from 0, so `shape.vert` reads the draw's first
+  instance row from a uniform (`first`), pushed when a draw's start
+  changes, on every driver.
 
 ### Shaders
 
 The shaders are GLSL ES 3.0 in `shaders/`, compiled by
 [oksl](https://github.com/defnotmid/oksl) when the backend starts (`init`,
-about 4 ms for all of them) to the device's SPIR-V (Vulkan) or MSL (Metal):
+about 4 ms for all of them) to the device's SPIR-V (Vulkan), MSL (Metal) or
+DXBC (Direct3D 12):
 nothing is compiled ahead of time and no shader toolchain is needed.
 `shaders.odin` lists the units: `quad.vert` and `shape.vert` (instances
 pulled from a storage buffer by `gl_VertexID`, six vertices an instance),
@@ -214,8 +220,8 @@ velocity twin). SDL_GPU has no specialization constants, so the shader type
 and glyph mode come from the paint row and are branched on at runtime, as in
 femtovg. A unit's samplers and storage buffers are checked at compile
 against the order the renderer binds them (`shader_bindings_ok`), and
-`test_shaders_compile` compiles every unit for SPIR-V, MSL and oksl's CPU
-program, linked with its vertex shader, without a GPU.
+`test_shaders_compile` compiles every unit for SPIR-V, MSL, DXBC and oksl's
+CPU program, linked with its vertex shader, without a GPU.
 
 ### Recording on other threads
 
@@ -716,6 +722,7 @@ flush, like `filter_image`.
 prog, err := vg.create_program(&c, {
 	frag_spirv = spirv, frag_msl = msl, frag_msl_entry = "main0",
 	vert_spirv = vert_spv, vert_msl = vert_msl, vert_msl_entry = "vs_main",
+	frag_dxbc = dxbc, frag_dxbc_entry = "main", vert_dxbc = vert_dxbc, vert_dxbc_entry = "main",  // Direct3D 12
 	uniform_size = size_of(Params), num_samplers = 1,
 	cpu = my_cpu_shader, cpu_user = &state,   // software backend
 })

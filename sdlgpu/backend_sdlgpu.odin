@@ -191,7 +191,7 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 				return .General
 			}
 		}
-		b.device = sdl.CreateGPUDevice({.SPIRV, .MSL}, false, nil)
+		b.device = sdl.CreateGPUDevice({.SPIRV, .MSL, .DXBC}, false, nil)
 		if b.device == nil {
 			return .General
 		}
@@ -199,11 +199,12 @@ init :: proc(b: ^SDL_Backend, device: ^sdl.GPUDevice = nil, allocator := context
 	}
 
 	formats := sdl.GetGPUShaderFormats(b.device)
-	spirv := .SPIRV in formats
-	if !spirv && .MSL not_in formats {
-		return .Unsupported_Operation
+	switch {
+	case .SPIRV in formats: b.shader_format = {.SPIRV}
+	case .MSL in formats: b.shader_format = {.MSL}
+	case .DXBC in formats: b.shader_format = {.DXBC}
+	case: return .Unsupported_Operation
 	}
-	b.shader_format = {.SPIRV} if spirv else {.MSL}
 	shaders_init(b) or_return
 	store_init(b)
 
@@ -353,6 +354,8 @@ sdl_create_program :: proc(data: rawptr, desc: vg.Program_Desc) -> (vg.Backend_P
 	vert_entry, frag_entry: cstring
 	if .SPIRV in b.shader_format {
 		vert_code, frag_code, vert_entry, frag_entry = desc.vert_spirv, desc.frag_spirv, desc.vert_spirv_entry, desc.frag_spirv_entry
+	} else if .DXBC in b.shader_format {
+		vert_code, frag_code, vert_entry, frag_entry = desc.vert_dxbc, desc.frag_dxbc, desc.vert_dxbc_entry, desc.frag_dxbc_entry
 	} else {
 		vert_code, frag_code, vert_entry, frag_entry = desc.vert_msl, desc.frag_msl, desc.vert_msl_entry, desc.frag_msl_entry
 	}
@@ -801,7 +804,8 @@ shaders_init :: proc(b: ^SDL_Backend) -> vg.Error {
 @(private = "file")
 compile_shader :: proc(b: ^SDL_Backend, source, prelude: string, stage: oksl.Stage) -> (^sdl.GPUShader, vg.Error) {
 	spirv := b.shader_format == {.SPIRV}
-	m, _, ok := oksl.compile(source, {profile = .Glsl, stage = stage, prelude = prelude, no_cpu = true, no_spirv = !spirv, no_msl = spirv})
+	dxbc := b.shader_format == {.DXBC}
+	m, _, ok := oksl.compile(source, {profile = .Glsl, stage = stage, prelude = prelude, no_cpu = true, no_spirv = !spirv, no_msl = spirv || dxbc, dxbc = dxbc})
 	if !ok {
 		return nil, .Shader_Compile
 	}
@@ -815,11 +819,11 @@ compile_shader :: proc(b: ^SDL_Backend, source, prelude: string, stage: oksl.Sta
 			return nil, .Shader_Compile
 		}
 	}
-	code := mem.slice_to_bytes(m.spirv) if spirv else transmute([]u8)m.msl
+	code := mem.slice_to_bytes(m.spirv) if spirv else m.dxbc if dxbc else transmute([]u8)m.msl
 	s := sdl.CreateGPUShader(b.device, {
 		code_size = len(code),
 		code = raw_data(code),
-		entrypoint = oksl.SPIRV_ENTRY if spirv else oksl.MSL_ENTRY,
+		entrypoint = oksl.SPIRV_ENTRY if spirv else oksl.DXBC_ENTRY if dxbc else oksl.MSL_ENTRY,
 		format = b.shader_format,
 		stage = .VERTEX if stage == .Vertex else .FRAGMENT,
 		num_samplers = u32(m.num_samplers),

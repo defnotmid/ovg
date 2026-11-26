@@ -711,6 +711,8 @@ Recorder :: struct {
 	target:   ^sdl.GPUTexture,
 	second:   ^sdl.GPUTexture,
 	origin:   [2]i32,
+	// The open pass's vertex uniforms (shape.vert's view and first).
+	view:     Shape_Uniforms,
 	// State set in the open pass.
 	pipeline: ^sdl.GPUGraphicsPipeline,
 	textures: [2]sdl.GPUTextureSamplerBinding,
@@ -718,6 +720,13 @@ Recorder :: struct {
 	// The draw being gathered: rows merge into it while they continue it.
 	pending:   Row,
 	gathering: bool,
+}
+
+@(private = "file")
+Shape_Uniforms :: struct {
+	view:  [4]f32,
+	first: u32,
+	_:     [3]u32,
 }
 
 @(private = "file")
@@ -810,9 +819,13 @@ flush :: proc(r: ^Recorder) {
 		r.scissor = row.scissor
 	}
 	if row.kind == .Shapes {
-		// Six vertices an instance, from the draw's first: gl_VertexID / 6
-		// is the instance's row (shape.vert).
-		sdl.DrawGPUPrimitives(r.pass, 6 * row.verts.count, 1, 6 * row.verts.start, 0)
+		// Six vertices an instance, from 0: first + gl_VertexID / 6 is the
+		// instance's row (shape.vert).
+		if r.view.first != u32(row.verts.start) {
+			r.view.first = u32(row.verts.start)
+			sdl.PushGPUVertexUniformData(r.cmd, 0, &r.view, size_of(r.view))
+		}
+		sdl.DrawGPUPrimitives(r.pass, 6 * row.verts.count, 1, 0, 0)
 	} else {
 		sdl.DrawGPUPrimitives(r.pass, row.verts.count, 1, row.verts.start, 0)
 	}
@@ -850,8 +863,8 @@ begin_pass :: proc(r: ^Recorder, target, second: Image, origin: [2]i32) -> bool 
 		sdl.BindGPUVertexStorageBuffers(r.pass, 0, &instances, 1)
 	}
 	// The vertex shader subtracts the origin (zw) before mapping to NDC.
-	view := [4]f32{f32(target.width), f32(target.height), f32(origin.x), f32(origin.y)}
-	sdl.PushGPUVertexUniformData(r.cmd, 0, &view, size_of(view))
+	r.view = {view = {f32(target.width), f32(target.height), f32(origin.x), f32(origin.y)}}
+	sdl.PushGPUVertexUniformData(r.cmd, 0, &r.view, size_of(r.view))
 	r.pipeline = nil
 	r.textures = {}
 	r.scissor = {-1, -1, -1, -1}

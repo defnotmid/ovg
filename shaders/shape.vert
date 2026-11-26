@@ -17,6 +17,9 @@ layout(std430) readonly buffer Instances { Shape_Instance rows[]; } instances;
 
 // Target size (xy) and the drawing coordinates of its top-left pixel (zw).
 uniform vec4 view;
+// The draw's first row: each draw counts gl_VertexID from 0, since
+// Direct3D's SV_VertexID leaves out the draw's first vertex.
+uniform uint first;
 
 // Shape units.
 layout(location = 0) out vec2 rc;
@@ -28,7 +31,7 @@ layout(location = 2) flat out vec4 uv;
 layout(location = 3) flat out uvec4 data;
 
 void main() {
-    uint id = uint(gl_VertexID) / 6u;
+    uint id = first + uint(gl_VertexID) / 6u;
     // Two triangles: (0,0) (1,0) (1,1), (0,0) (1,1) (0,1).
     uint k = uint(gl_VertexID) % 6u;
     Shape_Instance s = instances.rows[id];

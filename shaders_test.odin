@@ -5,7 +5,7 @@ import "core:testing"
 import "deps:oksl"
 
 // Every fragment unit and its motion variant compiles with oksl, for SPIR-V,
-// MSL and the CPU, linked with the vertex shader that draws it (varyings
+// MSL, DXBC (Direct3D 12) and the CPU, linked with the vertex shader that draws it (varyings
 // matched by name, type and interpolation); the samplers and buffers it
 // reads are a prefix of what the backends bind. No GPU needed.
 @(test)
@@ -18,12 +18,12 @@ test_shaders_compile :: proc(t: ^testing.T) {
 		}
 		for k in 0 ..< (2 if src.motion else 1) {
 			prelude := shader_prelude(u, k == 1, context.temp_allocator)
-			p, errors, ok := oksl.compile_pipeline({vertex = vert, fragment = src.source, fragment_prelude = prelude})
+			p, errors, ok := oksl.compile_pipeline({vertex = vert, fragment = src.source, fragment_prelude = prelude}, {dxbc = true})
 			if !testing.expectf(t, ok, "%v (motion %v): %s", u, k == 1, oksl.format_errors(errors, context.temp_allocator)) {
 				continue
 			}
 			m := p.fragment
-			testing.expectf(t, len(m.spirv) > 0 && len(m.msl) > 0 && len(m.program.code) > 0, "%v: SPIR-V, MSL and the CPU program", u)
+			testing.expectf(t, len(m.spirv) > 0 && len(m.msl) > 0 && len(m.dxbc) > 0 && len(p.vertex.dxbc) > 0 && len(m.program.code) > 0, "%v: SPIR-V, MSL, DXBC and the CPU program", u)
 			buffers := make([]string, len(m.storage_buffers), context.temp_allocator)
 			for sb, i in m.storage_buffers {
 				buffers[i] = sb.name

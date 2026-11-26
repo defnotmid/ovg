@@ -59,6 +59,10 @@ Program_Desc :: struct {
 	vert_spirv_entry: cstring,
 	vert_msl:         []u8,
 	vert_msl_entry:   cstring,
+	frag_dxbc:        []u8,
+	frag_dxbc_entry:  cstring,
+	vert_dxbc:        []u8,
+	vert_dxbc_entry:  cstring,
 	// Size of the fragment uniform block in bytes.
 	uniform_size:     int,
 	// Fragment samplers the program declares (channels 0 ..< num_samplers).
