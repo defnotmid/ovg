@@ -1876,3 +1876,76 @@ test_font_collection_bad_fallback :: proc(t: ^testing.T) {
 	testing.expect(t, font_collection_init(&fonts))
 	font_collection_destroy(&fonts)
 }
+
+// Software accumulation handles off-screen coordinates, curved y/x-turns,
+// even-odd winding, Copy blend below 1/510, and aliased pixel-center slivers.
+@(test)
+test_sw_coverage_edge_cases :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 32, 32)
+	defer sw_close(&s)
+	c := &s.canvas
+
+	// Huge off-screen coordinates overlapping the canvas must clip cleanly.
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, -1e4, -1e4, 2e4, 2e4)
+	clear_rect(c, 0, 0, 32, 32, BLACK)
+	fill_path(c, &p, paint_color(WHITE))
+	flush(c)
+	testing.expect_value(t, px(&s, 0, 0), [4]u8{255, 255, 255, 255})
+	testing.expect_value(t, px(&s, 31, 31), [4]u8{255, 255, 255, 255})
+
+	// Quadratic curves turning in y and x under even-odd fill match exact shape_coverage.
+	path_reset(&p)
+	path_move_to(&p, 4, 16)
+	path_quad_to(&p, 16, 1, 28, 16)
+	path_quad_to(&p, 16, 31, 4, 16)
+	path_close(&p)
+	path_move_to(&p, 10, 16)
+	path_quad_to(&p, 16, 8, 22, 16)
+	path_quad_to(&p, 16, 24, 10, 16)
+	path_close(&p)
+	shape, ok := shape_from_path(&p)
+	testing.expect(t, ok)
+	defer shape_destroy(&shape)
+	ep := paint_color(WHITE)
+	ep.fill_rule = .Even_Odd
+	clear_rect(c, 0, 0, 32, 32, BLACK)
+	fill_shape(c, &shape, ep)
+	inst := c.shapes[0]
+	flush(c)
+	u, v := instance_footprint(inst)
+	inv := transform_inverse(inst.transform)
+	worst := 0
+	for y in u32(0) ..< 32 {
+		for x in u32(0) ..< 32 {
+			want := u8(shape_coverage(shape.data, transform_point(inv, f32(x) + 0.5, f32(y) + 0.5), u, v, .Even_Odd) * 255 + 0.5)
+			worst = max(worst, abs(int(px(&s, x, y)[0]) - int(want)))
+		}
+	}
+	testing.expectf(t, worst <= 2, "even-odd quadratic curve mismatch: worst %d", worst)
+
+	// Copy blend leaves background pixels untouched where coverage < 1/510.
+	clear_rect(c, 0, 0, 32, 32, rgb(40, 80, 120))
+	save(c)
+	set_composite_operation(c, .Copy)
+	path_reset(&p)
+	path_rect(&p, 10, 10, 12, 12)
+	fill_path(c, &p, paint_color(WHITE))
+	restore(c)
+	flush(c)
+	testing.expect_value(t, px(&s, 2, 2), [4]u8{40, 80, 120, 255})
+	testing.expect_value(t, px(&s, 15, 15), [4]u8{255, 255, 255, 255})
+
+	// Aliased partial-row strip across the +1/64 px sample center fills via winding test.
+	clear_rect(c, 0, 0, 32, 32, BLACK)
+	path_reset(&p)
+	path_rect(&p, 8, 16.5, 16, 0.25)
+	ap := paint_color(WHITE)
+	ap.anti_alias = false
+	fill_path(c, &p, ap)
+	flush(c)
+	testing.expect_value(t, px(&s, 15, 16), [4]u8{255, 255, 255, 255})
+	testing.expect_value(t, px(&s, 15, 17), [4]u8{0, 0, 0, 255})
+}

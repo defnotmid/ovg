@@ -66,6 +66,16 @@ Software_Backend :: struct {
 	groups:        [dynamic]Sw_Group,
 	group_of:      [dynamic]i32,
 	group_grid:    Group_Grid_Scratch,
+	// A run's fills' pieces in drawing coordinates, built before its bands
+	// (sw_build_pieces) for sw_coverage: each piece monotone in y, and per
+	// instance (piece_at: its first row in piece_rows, max(u32) for none),
+	// the pieces each band it reaches reads: band piece_band0 + j's are
+	// piece_list[piece_rows[at + j]:piece_rows[at + j + 1]].
+	pieces:        [dynamic]Sw_Piece,
+	piece_at:      [dynamic]u32,
+	piece_band0:   [dynamic]i32,
+	piece_rows:    [dynamic]u32,
+	piece_list:    [dynamic]u32,
 	// The bands' shading memory, kept warm across frames: a band takes a set
 	// off `lanes_free` (making one when none is) and puts it back, so there
 	// are as many as bands ever drew at once. On the heap, which the pool's
@@ -82,6 +92,8 @@ Software_Backend :: struct {
 Sw_Unit :: enum u8 {
 	Shape,
 	Shape_Box,
+	// Shape_Box's paint at coverage 1 (SHAPE_INSIDE), for sw_coverage's quads.
+	Shape_Inside,
 	Shape_Group,
 	Marker_Group,
 	Filter,
@@ -92,6 +104,7 @@ Sw_Unit :: enum u8 {
 SW_UNITS := [Sw_Unit]Shader_Unit {
 	.Shape              = .Shape,
 	.Shape_Box          = .Shape_Box,
+	.Shape_Inside       = .Shape_Box,
 	.Shape_Group        = .Shape_Group,
 	.Marker_Group       = .Marker_Group,
 	.Filter             = .Filter,
@@ -137,6 +150,11 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.groups = make([dynamic]Sw_Group, allocator)
 	b.group_of = make([dynamic]i32, allocator)
 	b.group_grid = {make([dynamic]Bounds, allocator), make([dynamic][4]i32, allocator), make([dynamic]u32, allocator)}
+	b.pieces = make([dynamic]Sw_Piece, allocator)
+	b.piece_at = make([dynamic]u32, allocator)
+	b.piece_band0 = make([dynamic]i32, allocator)
+	b.piece_rows = make([dynamic]u32, allocator)
+	b.piece_list = make([dynamic]u32, allocator)
 	b.lanes_free = make([dynamic]^Sw_Lanes, runtime.heap_allocator())
 }
 
@@ -152,7 +170,8 @@ sw_programs_need :: proc(b: ^Software_Backend, needs: bit_set[Sw_Unit], motion: 
 			continue
 		}
 		unit := SW_UNITS[u]
-		prelude := strings.concatenate({shader_cpu_defines(unit), shader_prelude(unit, motion == 1, context.temp_allocator)}, context.temp_allocator)
+		inside := "#define SHAPE_INSIDE\n" if u == .Shape_Inside else ""
+		prelude := strings.concatenate({shader_cpu_defines(unit), inside, shader_prelude(unit, motion == 1, context.temp_allocator)}, context.temp_allocator)
 		context.allocator = b.allocator
 		m, _, ok := oksl.compile(SHADER_SOURCES[unit].source, {profile = .Glsl, prelude = prelude, no_spirv = true, no_msl = true})
 		assert(ok, "ovg's shaders compile for oksl's CPU program")
@@ -184,6 +203,11 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.groups)
 	delete(b.group_of)
 	group_grid_scratch_destroy(&b.group_grid)
+	delete(b.pieces)
+	delete(b.piece_at)
+	delete(b.piece_band0)
+	delete(b.piece_rows)
+	delete(b.piece_list)
 	for L in b.lanes_free {
 		sw_lanes_destroy(L)
 	}
@@ -622,7 +646,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
 						t := frame.shapes[i].transform
 						if c.group == 0 {
-							needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape}
+							needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape, .Shape_Inside}
 						}
 					}
 					ib := b.bounds[i]
@@ -637,6 +661,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 	b.starts[0] = 0
 	sw_programs_need(b, needs, int(run.twin.pixels != nil))
 	sw_build_groups(b, frame, cmds)
+	sw_build_pieces(&run, bands)
 	sw_bands(b, rows, &run, sw_run_band)
 }
 
@@ -712,7 +737,7 @@ sw_run_band :: proc(data: rawptr, y0, y1: int) {
 		for j < len(items) && items[j].cmd == items[i].cmd {
 			j += 1
 		}
-		sw_band_command(run, items[i].cmd, items[i:j], top, bottom, lanes)
+		sw_band_command(run, items[i].cmd, items[i:j], k, top, bottom, lanes)
 		i = j
 	}
 	sw_lanes_give(b, lanes)
@@ -758,9 +783,9 @@ sw_raster :: proc(run: ^Sw_Run, cmd: Command) -> Raster {
 	return r
 }
 
-// Command `k`'s draws in one band, rows [top, bottom).
+// Command `k`'s draws in band `band`, rows [top, bottom).
 @(private = "file")
-sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i32, lanes: ^Sw_Lanes) {
+sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top, bottom: i32, lanes: ^Sw_Lanes) {
 	cmd := run.cmds[k]
 	r := sw_raster(run, cmd)
 	r.y0 = max(r.y0, top)
@@ -800,10 +825,31 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, top, bottom: i
 			unit := Sw_Unit.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape
 			uv, data := shader_instance_inputs(inst, 0)
 			data.w = it.inst
-			buffers := [4][]u32{paints, instance_words(inst, frame.shape_words), nil, slice.reinterpret([]u32, b.motion_rows[:])}
+			words := instance_words(inst, frame.shape_words)
+			buffers := [4][]u32{paints, words, nil, slice.reinterpret([]u32, b.motion_rows[:])}
 			prog := b.programs[unit][motion]
-			uniforms := sw_shape_uniforms(prog, transform_inverse(inst.transform), uv, data)
-			sw_shade_rect(lanes, &r, prog, sw_pixels(&r, b.bounds[it.inst]), uniforms[:], buffers[:], textures[:])
+			to_rc := transform_inverse(inst.transform)
+			uniforms := sw_shape_uniforms(prog, to_rc, uv, data)
+			px := sw_pixels(&r, b.bounds[it.inst])
+			// A fill: its coverage accumulated from its pieces, when that
+			// costs less than the shader's at every pixel (about as much a
+			// piece as a quad), and its paint shaded where it covers: at
+			// coverage 1, scaled by the pixel's (the paint's colour and motion
+			// are linear in it). An aliased fill's partly covered quads take
+			// the shader's winding test.
+			if !sw_coverage(lanes, b, it.inst, inst, px, band) {
+				sw_shade_rect(lanes, &r, prog, px, uniforms[:], buffers[:], textures[:])
+				continue
+			}
+			inside := b.programs[.Shape_Inside][motion]
+			inside_uniforms := sw_shape_uniforms(inside, to_rc, uv, data)
+			sw_shade_quads(lanes, &r, inside, px, lanes.inside[:], inside_uniforms[:], buffers[:], textures[:])
+			if inst.edge == .Aliased {
+				sw_shade_quads(lanes, &r, prog, px, lanes.edge[:], uniforms[:], buffers[:], textures[:])
+			} else {
+				cov := Sw_Coverage{lanes.cov[:], px.xy &~ 1, int(px[2] - (px[0] &~ 1) + 1) / 2 * 2 + 1, inst.edge == .Smooth}
+				sw_shade_quads(lanes, &r, inside, px, lanes.edge[:], inside_uniforms[:], buffers[:], textures[:], cov)
+			}
 		}
 	}
 }
@@ -1266,6 +1312,10 @@ Sw_Lanes :: struct {
 	shaded:   [dynamic]oksl.Quad_Lanes,
 	color:    [dynamic][4]f32,
 	motion:   [dynamic][4]f32,
+	// sw_coverage's: a coverage a pixel, and the quads it sorts.
+	cov:      [dynamic]f32,
+	edge:     [dynamic][2]i32,
+	inside:   [dynamic][2]i32,
 }
 
 // A free set of the backend's shading memory, or a new one on the heap.
@@ -1285,6 +1335,9 @@ sw_lanes_take :: proc(b: ^Software_Backend) -> ^Sw_Lanes {
 		shaded = make([dynamic]oksl.Quad_Lanes, heap),
 		color = make([dynamic][4]f32, heap),
 		motion = make([dynamic][4]f32, heap),
+		cov = make([dynamic]f32, heap),
+		edge = make([dynamic][2]i32, heap),
+		inside = make([dynamic][2]i32, heap),
 	}
 	return L
 }
@@ -1306,6 +1359,9 @@ sw_lanes_destroy :: proc(L: ^Sw_Lanes) {
 	delete(L.shaded)
 	delete(L.color)
 	delete(L.motion)
+	delete(L.cov)
+	delete(L.edge)
+	delete(L.inside)
 	free(L)
 }
 
@@ -1358,56 +1414,472 @@ sw_shade_rect :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i3
 	if x0 >= x1 || y0 >= y1 {
 		return
 	}
-	m := prog.module
 	qx0, qy0 := x0 &~ 1, y0 &~ 1
 	nqx := int(x1 - qx0 + 1) / 2
 	quads := nqx * (int(y1 - qy0 + 1) / 2)
-	colour := r.target.pixels != nil
-	moves := len(m.stage_outputs) > 1 || !colour
-	most := min(quads, SW_SHADE_QUADS)
-	resize(&L.origins, most)
-	resize(&L.helpers, most)
-	resize(&L.shaded, most)
-	resize(&L.color, most * 4)
-	if moves {
-		resize(&L.motion, most * 4)
-	}
+	resize(&L.origins, SW_SHADE_QUADS)
 	for first := 0; first < quads; first += SW_SHADE_QUADS {
 		count := min(quads - first, SW_SHADE_QUADS)
-		total := count * 4
-		// The quads, the lanes off the pixels helpers.
 		for q in 0 ..< count {
 			k := first + q
-			o := [2]i32{qx0 + i32(k % nqx) * 2, qy0 + i32(k / nqx) * 2}
-			L.origins[q] = o
-			h: oksl.Quad_Lanes
-			if o.x + 1 >= x1 {h += {1, 3}}
-			if o.x < x0 {h += {0, 2}}
-			if o.y + 1 >= y1 {h += {2, 3}}
-			if o.y < y0 {h += {0, 1}}
-			L.helpers[q] = h
+			L.origins[q] = {qx0 + i32(k % nqx) * 2, qy0 + i32(k / nqx) * 2}
 		}
-		targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
-		outputs := targets[:2 if moves else 1]
-		if !colour {
-			outputs = targets[1:]
-		}
-		shaded := L.shaded[:count]
-		in_ := oksl.Fragment_Quads{count = count, origin = L.origins[:count], helpers = L.helpers[:count]}
-		oksl.run_fragment(&m.program, uniforms, in_, outputs, shaded, &L.scratch, {buffers = buffers, channel_images = textures})
-		for lanes, q in shaded {
-			o := L.origins[q]
-			for l in lanes {
-				tx, ty := u32(o.x + i32(l & 1) - r.ox), u32(o.y + i32(l >> 1) - r.oy)
-				if colour {
-					blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+		sw_shade_batch(L, r, prog, px, L.origins[:count], uniforms, buffers, textures)
+	}
+}
+
+// sw_shade_rect over the listed quads of `px` (their top-left pixels, on
+// its grid) instead of all of them.
+@(private = "file")
+sw_shade_quads :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i32, quads: [][2]i32, uniforms: []u8, buffers: [][]u32, textures: []oksl.Channel_Image, cov := Sw_Coverage{}) {
+	for first := 0; first < len(quads); first += SW_SHADE_QUADS {
+		sw_shade_batch(L, r, prog, px, quads[first:min(first + SW_SHADE_QUADS, len(quads))], uniforms, buffers, textures, cov)
+	}
+}
+
+// Coverage a pixel (sw_coverage's), which scales what a coverage-1 unit
+// shades: from grid pixel `origin`, `stride` a row; eased as shape_ease
+// when `ease`. No pixels: none.
+@(private = "file")
+Sw_Coverage :: struct {
+	pixels: []f32,
+	origin: [2]i32,
+	stride: int,
+	ease:   bool,
+}
+
+// One run_fragment call over at most SW_SHADE_QUADS quads, the lanes off
+// `px` helpers, then their pixels blended.
+@(private = "file")
+sw_shade_batch :: proc(L: ^Sw_Lanes, r: ^Raster, prog: Sw_Program_Unit, px: [4]i32, origins: [][2]i32, uniforms: []u8, buffers: [][]u32, textures: []oksl.Channel_Image, cov := Sw_Coverage{}) {
+	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
+	m := prog.module
+	colour := r.target.pixels != nil
+	moves := len(m.stage_outputs) > 1 || !colour
+	count := len(origins)
+	total := count * 4
+	resize(&L.helpers, SW_SHADE_QUADS)
+	resize(&L.shaded, SW_SHADE_QUADS)
+	resize(&L.color, SW_SHADE_QUADS * 4)
+	if moves {
+		resize(&L.motion, SW_SHADE_QUADS * 4)
+	}
+	for o, q in origins {
+		h: oksl.Quad_Lanes
+		if o.x + 1 >= x1 {h += {1, 3}}
+		if o.x < x0 {h += {0, 2}}
+		if o.y + 1 >= y1 {h += {2, 3}}
+		if o.y < y0 {h += {0, 1}}
+		L.helpers[q] = h
+	}
+	targets := [2][][4]f32{L.color[:total], L.motion[:total] if moves else nil}
+	outputs := targets[:2 if moves else 1]
+	if !colour {
+		outputs = targets[1:]
+	}
+	shaded := L.shaded[:count]
+	in_ := oksl.Fragment_Quads{count = count, origin = origins, helpers = L.helpers[:count]}
+	oksl.run_fragment(&m.program, uniforms, in_, outputs, shaded, &L.scratch, {buffers = buffers, channel_images = textures})
+	for lanes, q in shaded {
+		o := origins[q]
+		for l in lanes {
+			if cov.pixels != nil {
+				// The shader's discard below half an 8-bit step, and its
+				// scale.
+				v := cov.pixels[int(o.y + i32(l >> 1) - cov.origin.y) * cov.stride + int(o.x + i32(l & 1) - cov.origin.x)]
+				if v < 1.0 / 510 {
+					continue
 				}
+				if cov.ease {
+					v = v * v * (3 - 2 * v)
+				}
+				L.color[q * 4 + l] *= v
 				if moves {
-					mo := L.motion[q * 4 + l]
-					d := &r.twin.pixels[ty * r.twin.width + tx]
-					d^ = mo + d^ * (1 - mo[3])
+					L.motion[q * 4 + l] *= v
+				}
+			}
+			tx, ty := u32(o.x + i32(l & 1) - r.ox), u32(o.y + i32(l >> 1) - r.oy)
+			if colour {
+				blend_texel(r.target, tx, ty, r.blend, L.color[q * 4 + l])
+			}
+			if moves {
+				mo := L.motion[q * 4 + l]
+				d := &r.twin.pixels[ty * r.twin.width + tx]
+				d^ = mo + d^ * (1 - mo[3])
+			}
+		}
+	}
+}
+
+// A piece of a fill in drawing coordinates, monotone in y over [0, 1]:
+// P(s) = a s^2 + b s + c, from y = c.y to y = a.y + b.y + c.y.
+@(private = "file")
+Sw_Piece :: struct {
+	a, b, c: [2]f32,
+}
+
+// Slack for rounding in the pieces' solves, in pixels.
+@(private = "file")
+SW_EPS :: 1.0 / 64
+
+@(private = "file")
+sw_floor :: #force_inline proc "contextless" (x: f32) -> i32 {
+	i := i32(x)
+	return i - 1 if f32(i) > x else i
+}
+
+@(private = "file")
+sw_ceil :: #force_inline proc "contextless" (x: f32) -> i32 {
+	i := i32(x)
+	return i + 1 if f32(i) < x else i
+}
+
+// The pixel rows whose footprints reach a piece's rows.
+@(private = "file")
+sw_piece_rows :: #force_inline proc "contextless" (p: Sw_Piece) -> (y0, y1: i32) {
+	ya, yb := p.c.y, p.a.y + p.b.y + p.c.y
+	return sw_floor(min(ya, yb) - SW_EPS), sw_ceil(max(ya, yb) + SW_EPS)
+}
+
+// The run's fills' pieces for sw_coverage, once a run instead of once a
+// band: each instance's pieces mapped to drawing coordinates and split
+// where y turns (`pieces`), then listed by the bands whose rows their
+// footprints reach, counted and then placed (`piece_rows`, `piece_list`).
+@(private = "file")
+sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
+	b := run.b
+	frame := run.frame
+	clear(&b.pieces)
+	clear(&b.piece_rows)
+	clear(&b.piece_list)
+	if len(b.piece_at) < len(frame.shapes) {
+		resize(&b.piece_at, len(frame.shapes))
+		resize(&b.piece_band0, len(frame.shapes))
+	}
+	for cmd in run.cmds {
+		c, is_draw := cmd.type.(Cmd_Draw_Shapes)
+		if !is_draw || c.group != 0 {
+			continue
+		}
+		r := sw_raster(run, cmd)
+		for i in c.instances.start ..< c.instances.start + c.instances.count {
+			b.piece_at[i] = max(u32)
+			inst := frame.shapes[i]
+			ib := b.bounds[i]
+			y0, y1 := clamp_i32(math.floor(ib.miny), r.y0, r.y1), clamp_i32(math.ceil(ib.maxy), r.y0, r.y1)
+			// A hairline's or a marker's coverage isn't its pieces' area,
+			// nor a widened footprint's a pixel's.
+			if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || y0 >= y1 {
+				continue
+			}
+			// As sw_coverage's band, the whole instance: no pieces when they
+			// outnumber its quads.
+			words := instance_words(inst, frame.shape_words)
+			x0, x1 := clamp_i32(math.floor(ib.minx), r.x0, r.x1), clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
+			if x0 >= x1 || sw_piece_count(words) > int(x1 - x0 + 2) / 2 * (int(y1 - y0 + 2) / 2) {
+				continue
+			}
+			first := len(b.pieces)
+			sw_append_pieces(&b.pieces, inst, words)
+			band0 := int(y0 - run.origin.y) / SW_BAND_ROWS
+			band1 := int(y1 - 1 - run.origin.y) / SW_BAND_ROWS
+			nb := band1 - band0 + 1
+			at := len(b.piece_rows)
+			base := u32(len(b.piece_list))
+			b.piece_at[i] = u32(at)
+			b.piece_band0[i] = i32(band0)
+			resize(&b.piece_rows, at + nb + 1)
+			rows := b.piece_rows[at:]
+			slice.zero(rows)
+			// Count each band's pieces into rows[j + 1], prefix-sum from `base`
+			// shifted right by one slot, then fill each from rows[j + 1]
+			// (leaving rows[j + 1] at band j's end).
+			for fill in ([2]bool{false, true}) {
+				if fill {
+					rows[0] = base
+					for j in 0 ..< nb {
+						rows[j + 1] += rows[j]
+					}
+					resize(&b.piece_list, int(rows[nb]))
+					for j := nb; j > 0; j -= 1 {
+						rows[j] = rows[j - 1]
+					}
+				}
+				for p, k in b.pieces[first:] {
+					py0, py1 := sw_piece_rows(p)
+					if py1 <= y0 || py0 >= y1 {
+						continue
+					}
+					j0 := (max(int(py0), int(y0)) - int(run.origin.y)) / SW_BAND_ROWS - band0
+					j1 := (min(int(py1), int(y1)) - 1 - int(run.origin.y)) / SW_BAND_ROWS - band0
+					for j in max(j0, 0) ..= min(j1, nb - 1) {
+						if fill {
+							b.piece_list[rows[j + 1]] = u32(first + k)
+							rows[j + 1] += 1
+						} else {
+							rows[j + 1] += 1
+						}
+					}
 				}
 			}
 		}
 	}
+}
+
+// How many pieces a shape's words hold (curves.FORMAT).
+@(private = "file")
+sw_piece_count :: proc "contextless" (words: []u32) -> int {
+	first := int(words[6])
+	end := len(words)
+	if o := int(words[4]); o > first {
+		end = o
+	}
+	return (end - first) / 6
+}
+
+// An instance's pieces (its words' curves.FORMAT pieces) mapped to drawing
+// coordinates, split where y turns into pieces on [0, 1].
+@(private = "file")
+sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words: []u32) {
+	t := inst.transform
+	first := int(words[6])
+	for at := first; at < first + 6 * sw_piece_count(words); at += 6 {
+		f := slice.reinterpret([]f32, words[at:at + 6])
+		p1 := transform_point(t, f[0], f[1])
+		p2 := transform_point(t, f[2], f[3])
+		p3 := transform_point(t, f[4], f[5])
+		a := p1 - 2 * p2 + p3
+		b := 2 * (p2 - p1)
+		if a.y != 0 {
+			if s := -b.y / (2 * a.y); s > 0 && s < 1 {
+				q0 := p1 + s * (p2 - p1)
+				q1 := p2 + s * (p3 - p2)
+				pm := q0 + s * (q1 - q0)
+				// Both halves keep exact y-monotonicity at the split point.
+				q0.y = pm.y
+				q1.y = pm.y
+				if p1.y != pm.y {
+					append(pieces, Sw_Piece{p1 - 2 * q0 + pm, 2 * (q0 - p1), p1})
+				}
+				if pm.y != p3.y {
+					append(pieces, Sw_Piece{pm - 2 * q1 + p3, 2 * (q1 - pm), pm})
+				}
+				continue
+			}
+		}
+		if p1.y != p3.y {
+			append(pieces, Sw_Piece{a, b, p1})
+		}
+	}
+}
+
+// A fill instance's coverage over the quads of `px` in band `band` (on
+// sw_shade_rect's grid), by accumulation: each piece adds, to each pixel
+// cell it crosses, the signed area between it and the cell's right side,
+// and the rest of its rise to the next cell, so a row's running sum is each
+// pixel's signed area, read by the fill rule as curves_fill reads the
+// shader's. That is the area the shader integrates over the pixel's
+// footprint, which for a fill without widen is the pixel's box. Its quads
+// covered whole go to `L.inside`, those with any coverage to `L.edge`, and
+// the coverage to `L.cov` (one f32 a pixel of the grid, row by row). False,
+// working out nothing, when the instance has no pieces (sw_build_pieces) or
+// the band more pieces than quads.
+@(private = "file")
+sw_coverage :: proc(L: ^Sw_Lanes, b: ^Software_Backend, i: u32, inst: Shape_Instance, px: [4]i32, band: int) -> bool {
+	clear(&L.edge)
+	clear(&L.inside)
+	if b.piece_at[i] == max(u32) {
+		return false
+	}
+	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
+	if x0 >= x1 || y0 >= y1 {
+		return true
+	}
+	qx0, qy0 := x0 &~ 1, y0 &~ 1
+	nqx := int(x1 - qx0 + 1) / 2
+	nqy := int(y1 - qy0 + 1) / 2
+	at := int(b.piece_at[i]) + band - int(b.piece_band0[i])
+	list := b.piece_list[b.piece_rows[at]:b.piece_rows[at + 1]]
+	if len(list) > nqx * nqy {
+		return false
+	}
+	w, h := 2 * nqx, 2 * nqy
+	// One more column: a piece's rise past the last cell.
+	stride := w + 1
+	resize(&L.cov, stride * h)
+	slice.zero(L.cov[:])
+	gx, gy := f32(qx0), f32(qy0)
+	for k in list {
+		p := b.pieces[k]
+		// In grid units; y over [0, 1] from ya to yb.
+		a := p.a
+		bb := p.b
+		c := p.c - {gx, gy}
+		ya, yb := c.y, a.y + bb.y + c.y
+		ylo, yhi := max(min(ya, yb), 0), min(max(ya, yb), f32(h))
+		if ylo >= yhi {
+			continue
+		}
+		// Each row it crosses, from its entry to its exit, split where x
+		// turns and at each column's side.
+		for row in sw_floor(ylo) ..< sw_ceil(yhi) {
+			ra, rb := max(f32(row), ylo), min(f32(row + 1), yhi)
+			if ra >= rb {
+				continue
+			}
+			ta := sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, ra if yb > ya else rb)
+			tb := sw_solve_monotone(a.y, bb.y, c.y, 0, 1, ya, yb, rb if yb > ya else ra)
+			if ta >= tb {
+				continue
+			}
+			acc := L.cov[int(row) * stride:][:stride]
+			ends := [3]f32{ta, tb, tb}
+			n := 1
+			if a.x != 0 {
+				if s := -bb.x / (2 * a.x); s > ta && s < tb {
+					ends = {ta, s, tb}
+					n = 2
+				}
+			}
+			for e in 0 ..< n {
+				sw_accumulate_cells(acc, a, bb, c, ends[e], ends[e + 1], w)
+			}
+		}
+	}
+	even_odd := inst.rule == .Even_Odd
+	for row in 0 ..< h {
+		acc := L.cov[row * stride:][:stride]
+		sum: f32 = 0
+		for &v in acc[:w] {
+			sum += v
+			cov := abs(sum)
+			v = 1 - abs(1 - (cov * 0.5 - math.floor(cov * 0.5)) * 2) if even_odd else min(cov, 1)
+		}
+	}
+	FULL :: 1 - 1.0 / 4096
+	EMPTY :: 1.0 / 510
+	for qr in 0 ..< nqy {
+		for q in 0 ..< nqx {
+			o := [2]i32{qx0 + 2 * i32(q), qy0 + 2 * i32(qr)}
+			full, any := true, false
+			for l in 0 ..< 4 {
+				px_x, px_y := o.x + i32(l & 1), o.y + i32(l >> 1)
+				if px_x < x0 || px_x >= x1 || px_y < y0 || px_y >= y1 {
+					continue
+				}
+				v := L.cov[(2 * qr + (l >> 1)) * stride + 2 * q + (l & 1)]
+				full &&= v >= FULL
+				any ||= v >= EMPTY
+			}
+			if full {
+				append(&L.inside, o)
+			} else if any {
+				append(&L.edge, o)
+			}
+		}
+	}
+	return true
+}
+
+// Adds a stretch [ta, tb] of P(t) = a t^2 + b t + c (grid units, monotone in
+// x and y, within one row) to that row's cells: per column it crosses, the
+// signed area between it and the column's right side (to that pixel), and
+// the rest of its rise (to the next).
+@(private = "file")
+sw_accumulate_cells :: proc "contextless" (acc: []f32, a, b, c: [2]f32, ta, tb: f32, w: int) {
+	xa, xb := sw_quad_at(a.x, b.x, c.x, ta), sw_quad_at(a.x, b.x, c.x, tb)
+	ya := sw_quad_at(a.y, b.y, c.y, ta)
+	if max(xa, xb) <= 0 {
+		acc[0] += sw_quad_at(a.y, b.y, c.y, tb) - ya
+		return
+	}
+	if min(xa, xb) >= f32(w) {
+		return
+	}
+	t, x, y := ta, xa, ya
+	step: i32 = 1 if xb > xa else -1
+	if step > 0 && x < 0 {
+		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, 0)
+		y0 := sw_quad_at(a.y, b.y, c.y, u0)
+		acc[0] += y0 - y
+		t, x, y = u0, 0, y0
+	} else if step < 0 && x > f32(w) {
+		u0 := sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, f32(w))
+		y0 := sw_quad_at(a.y, b.y, c.y, u0)
+		t, x, y = u0, f32(w), y0
+	}
+	col := sw_floor(x) if xb >= xa else sw_ceil(x) - 1
+	for {
+		if col >= i32(w) {
+			break
+		}
+		if col < 0 {
+			acc[0] += sw_quad_at(a.y, b.y, c.y, tb) - y
+			break
+		}
+		// Where it leaves this column, or its end.
+		side := f32(col + 1) if step > 0 else f32(col)
+		u, xu := tb, xb
+		if (step > 0 && xb > side) || (step < 0 && xb < side) {
+			u = sw_solve_monotone(a.x, b.x, c.x, t, tb, x, xb, side)
+			xu = side
+		}
+		yu := sw_quad_at(a.y, b.y, c.y, u)
+		dy := yu - y
+		// The area between the piece and the column's right side, by
+		// the integral of (right - x(t)) y'(t) over [t, u], about t.
+		area := sw_cell_area(a, b, f32(col + 1) - x, t, u - t)
+		acc[col] += area
+		acc[col + 1] += dy - area
+		if u >= tb {
+			break
+		}
+		t, x, y = u, xu, yu
+		col += step
+	}
+}
+
+// The integral over s in [0, d] of (g0 - (x(t + s) - x(t))) y'(t + s), where
+// x and y are a t^2 + b t + c: g0 is the column's right side less x(t).
+@(private = "file")
+sw_cell_area :: #force_inline proc "contextless" (a, b: [2]f32, g0, t, d: f32) -> f32 {
+	// x(t + s) - x(t) = dx s + a.x s^2, y'(t + s) = dy + 2 a.y s.
+	dx := 2 * a.x * t + b.x
+	dy := 2 * a.y * t + b.y
+	// (g0 - dx s - a.x s^2)(dy + 2 a.y s)
+	c0 := g0 * dy
+	c1 := 2 * a.y * g0 - dx * dy
+	c2 := -2 * a.y * dx - a.x * dy
+	c3 := -2 * a.y * a.x
+	return d * (c0 + d * (c1 / 2 + d * (c2 / 3 + d * c3 / 4)))
+}
+
+@(private = "file")
+sw_quad_at :: #force_inline proc "contextless" (a, b, c, s: f32) -> f32 {
+	return (a * s + b) * s + c
+}
+
+// The s in [sa, sb] where a s^2 + b s + c = v, the quadratic monotone there
+// from ya to yb (v between them): the root within the range, by the stable
+// form of the quadratic formula.
+@(private = "file")
+sw_solve_monotone :: proc "contextless" (a, b, c, sa, sb, ya, yb, v: f32) -> f32 {
+	if v == ya {
+		return sa
+	}
+	if v == yb {
+		return sb
+	}
+	s: f32
+	cv := c - v
+	if abs(a) <= 1e-7 * abs(b) {
+		s = -cv / b
+	} else {
+		sq := math.sqrt(max(b * b - 4 * a * cv, 0))
+		q := -0.5 * (b + (sq if b >= 0 else -sq))
+		r1 := q / a
+		r2 := cv / q if q != 0 else r1
+		s = r1 if abs(r1 - (sa + sb) * 0.5) <= abs(r2 - (sa + sb) * 0.5) else r2
+	}
+	return clamp(s, sa, sb)
 }

@@ -4,6 +4,8 @@
 // draw, in order. SHAPE_BOX: instances without rotation or skew (the
 // pixel's footprint a box), a leaner shader than the parallelogram one, so
 // it runs with more waves. MOTION: a target with a velocity twin.
+// SHAPE_INSIDE (the software backend's): pixels inside the fill, covered
+// whole, with no coverage work.
 
 // A hairline (ovg hairline_shape) is the shape's outline drawn data.z's
 // width in pixels wide under any transform. The width is a positive normal
@@ -18,6 +20,11 @@ void main() {
     paint_index = data.y;
     float coverage;
     uint flags = data.z;
+#ifdef SHAPE_INSIDE
+    // The software backend's pixels inside a fill whose footprint no piece
+    // reaches (sw_coverage): covered whole.
+    coverage = 1.0;
+#else
     if (shape_is_hairline(data.z)) {
         coverage = curves_hairline(data.x, rc, uv.xy, uv.zw, uintBitsToFloat(data.z));
         flags = 0u;
@@ -35,6 +42,7 @@ void main() {
         coverage = curves_coverage_affine(data.x, rc, uv.xy, uv.zw, shape_rule(data.z));
 #endif
     }
+#endif
     // Below half an 8-bit step the pixel is left alone: rounding leaves such
     // slivers where the shape is absent, and a blend like Copy would clear
     // them.
