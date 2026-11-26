@@ -190,8 +190,10 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
 - New images are cleared to transparent: SDL_GPU leaves texture contents
   undefined (garbage on Metal), and a partly updated image samples texels
   it never wrote.
-- On Windows the backend runs on Vulkan: oksl writes SPIR-V and MSL, not
-  D3D12's DXIL.
+- On Windows the backend runs on Vulkan: it asks SDL_GPU for SPIR-V or MSL
+  and fails with `.Unsupported_Operation` on a device that takes neither.
+  oksl can also write DXBC for SDL_GPU's D3D12 driver, which ovg doesn't use
+  yet.
 
 ### Shaders
 
