@@ -480,7 +480,9 @@ fill_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	t := state(c).transform
 	b := &c.scratch.builder
 	shape_builder_reset(b)
-	b.tol = 1.0 / 16
+	// Quadratics within 1/256 px of the cubics: an edge pixel's coverage
+	// within one 8-bit level of the path's.
+	b.tol = 1.0 / 256
 	shape_add_path(b, p, t)
 	fill_built(c, paint, t)
 }
@@ -873,8 +875,12 @@ stroke_path :: proc(c: ^Canvas, p: ^Path, paint: Paint) {
 	}
 	b := &c.scratch.builder
 	shape_builder_reset(b)
-	b.tol = 1.0 / 16
-	if !stroke_add(&c.scratch, p, t, paint.stroke, b.tol / scale, c.limits[.Dash_Segments]) {
+	// Half fill_path's: the outline is within tol of the path's offset and
+	// its quadratics within tol of that, so an edge pixel's coverage stays
+	// within about one 8-bit level of the stroke's.
+	b.tol = 1.0 / 512
+	// Zero length: within a hundredth of a pixel.
+	if !stroke_add(&c.scratch, p, t, paint.stroke, b.tol / scale, 0.01 / scale, c.limits[.Dash_Segments]) {
 		c.limited += {.Dash_Segments}
 	}
 	fill := paint

@@ -22,9 +22,9 @@ import cv "deps:ocurves"
 // Adds the stroke of `p` with `s` to the scratch's builder under `t`, as
 // contours to fill non-zero, within `tol` path units: dashed in path units
 // (at most `max_dashes` segments; false when they ran out), outlined, and
-// the dots of zero-length subpaths' caps.
+// the dots of the caps of subpaths no longer than `dot` path units.
 @(private)
-stroke_add :: proc(scratch: ^Shape_Scratch, p: ^Path, t: Transform2D, s: Stroke_Settings, tol: f32, max_dashes: int) -> (complete: bool) {
+stroke_add :: proc(scratch: ^Shape_Scratch, p: ^Path, t: Transform2D, s: Stroke_Settings, tol, dot: f32, max_dashes: int) -> (complete: bool) {
 	b := &scratch.builder
 	complete = true
 	p := p
@@ -35,8 +35,7 @@ stroke_add :: proc(scratch: ^Shape_Scratch, p: ^Path, t: Transform2D, s: Stroke_
 	}
 	stroke_outline(b, p, t, s, tol, &scratch.segs)
 	if s.line_cap_start != .Butt || s.line_cap_end != .Butt {
-		// Zero length: within about a hundredth of a pixel.
-		stroke_dots(p, s, tol * 0.16, &scratch.dots)
+		stroke_dots(p, s, dot, &scratch.dots)
 		shape_add_path(b, &scratch.dots, t)
 	}
 	return

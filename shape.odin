@@ -614,7 +614,7 @@ shape_from_stroke :: proc(p: ^Path, s: Stroke_Settings, allocator := context.all
 	if tol <= 0 {
 		tol = max(hi.x - lo.x, hi.y - lo.y, s.line_width) / 4096
 	}
-	complete = stroke_add(sc, p, TRANSFORM_IDENTITY, s, tol, max_dashes)
+	complete = stroke_add(sc, p, TRANSFORM_IDENTITY, s, tol, tol * 0.16, max_dashes)
 	shape, ok = shape_build(&sc.builder, allocator, search, &sc.levels)
 	return
 }
