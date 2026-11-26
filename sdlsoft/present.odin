@@ -40,14 +40,20 @@ window_pixels :: proc(window: ^sdl.Window) -> (width, height: u32) {
 	return u32(max(w, 0)), u32(max(h, 0))
 }
 
-// Copies the backend's screen into the window and shows it. The screen is
-// premultiplied: where it isn't opaque the window shows it over black. A
-// screen of another size than the window fills the corner they share.
-// False when SDL gives the window no surface or can't update it
-// (sdl.GetError says why).
+// Copies the backend's screen into the window and shows it (present_pixels).
 present :: proc(p: ^Presenter, b: ^vg.Software_Backend) -> bool {
-	src := vg.software_backend_pixels(b)
-	if len(src.data) == 0 || src.width == 0 || src.height == 0 {
+	return present_pixels(p, vg.software_backend_pixels(b))
+}
+
+// Copies RGBA8 pixels into the window and shows them: the backend's screen,
+// or an image of a software canvas (vg.software_backend_image), such as one a
+// frame was drawn into whole. They're premultiplied: where they aren't
+// opaque the window shows them over black. Pixels of another size than the
+// window fill the corner they share. False for another format or tightly
+// packed rows short of their size, or when SDL gives the window no surface
+// or can't update it (sdl.GetError says why).
+present_pixels :: proc(p: ^Presenter, src: vg.Image_Source) -> bool {
+	if src.format != .RGBA8 || src.width == 0 || src.height == 0 || vg.image_source_stride(src) != src.width * 4 || len(src.data) < int(src.width * src.height * 4) {
 		return false
 	}
 	if p.from == nil || p.pixels != raw_data(src.data) || p.width != src.width || p.height != src.height {

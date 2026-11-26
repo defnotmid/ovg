@@ -239,9 +239,12 @@ sdlsoft.present(&pr, &sw)       // false when SDL gives no surface (sdl.GetError
   lines of text, redrawn every frame) runs at 135-250 fps (render 2.8-4.9
   ms, present 0.5-1.0 ms), where an app's comparable frame through SDL_GPU on
   WARP took about 830 ms. On Linux with 24 threads it runs at about 188 fps.
-- `odin test sdlsoft` checks a frame reaches the window pixel for pixel on
-  SDL's `offscreen` video driver; it skips where that driver makes no window
-  (macOS, without an EGL library).
+- `sdlsoft.present_pixels(&pr, src)` presents any RGBA8 pixels, such as an
+  image a frame was drawn into whole: `vg.software_backend_image(&c, id)` is
+  an image's pixels in place on the software backend, as of the last flush.
+- `odin test sdlsoft` checks a frame and an image reach the window pixel for
+  pixel on SDL's `offscreen` video driver; it skips where that driver makes
+  no window (macOS, without an EGL library).
 
 ### Shaders
 

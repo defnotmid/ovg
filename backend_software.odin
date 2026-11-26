@@ -263,6 +263,26 @@ software_backend_pixels :: proc(b: ^Software_Backend) -> Image_Source {
 	return image_source_rgba(b.pixels, b.width, b.height)
 }
 
+// Image `id`'s pixels on canvas `c`'s software backend, in place, as stored
+// (RGBA8 premultiplied when drawn into), as of the last flush: valid until
+// the image is next updated, reallocated, removed or drawn into. False on
+// another backend, for no such image, or for a transient one (its pixels
+// are lent for one render).
+software_backend_image :: proc(c: ^Canvas, id: Image_Id) -> (Image_Source, bool) {
+	if c.backend.render != sw_render {
+		return {}, false
+	}
+	entry := image_store_get(&c.images, id)
+	if entry == nil || entry.virtual || .Transient in entry.info.flags {
+		return {}, false
+	}
+	n := int(entry.info.width) * int(entry.info.height) * int(bytes_per_pixel(entry.info.format))
+	if len(entry.image.pixels) < n {
+		return {}, false
+	}
+	return {entry.info.format, entry.image.pixels[:n], entry.info.width, entry.info.height, 0}, true
+}
+
 // Motion blur (canvas_motion_blur): the last frame's velocity (pixels, the
 // shutter's middle minus its opening) and nearness at each screen pixel,
 // top-down, each the draws' over the pixel by their coverage over still,
