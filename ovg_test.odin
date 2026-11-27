@@ -557,6 +557,96 @@ test_sw_mask_luminance :: proc(t: ^testing.T) {
 	}
 }
 
+// A translucent luminance mask lets the layer through by its straight
+// colour's luminance times its alpha (the premultiplied colour's
+// luminance), within a level of the exact value, for either weights.
+@(test)
+test_sw_mask_luminance_translucent :: proc(t: ^testing.T) {
+	s: Sw
+	sw_open(&s, 16, 16)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	path_rect(&p, 0, 0, 16, 16)
+	weights_of := [Mask_Luminance][3]f64{.Rec709 = {0.2125, 0.7154, 0.0721}, .Pdf = {0.3, 0.59, 0.11}}
+	masks := [?][4]u8{{200, 30, 90, 40}, {10, 250, 120, 200}, {255, 255, 255, 3}, {90, 90, 255, 128}}
+	for weights in Mask_Luminance {
+		for m in masks {
+			clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
+			layer_stack_begin(&ls, c, 16, 16)
+			layer_push(&ls, c, {mask_luminance = weights})
+			layer_mask_begin(&ls, c)
+			fill_path(c, &p, paint_color(rgba(m.r, m.g, m.b, m.a)))
+			layer_mask_end(&ls, c)
+			fill_path(c, &p, paint_color(WHITE))
+			layer_pop(&ls, c)
+			layer_stack_end(&ls, c)
+			flush(c)
+			w := weights_of[weights]
+			lum := (w[0] * f64(m.r) + w[1] * f64(m.g) + w[2] * f64(m.b)) / 255
+			want := lum * f64(m.a)
+			a := px(&s, 8, 8).a
+			testing.expectf(t, abs(f64(a) - want) <= 1, "%v %v: alpha %d want %.2f", weights, m, a, want)
+		}
+	}
+}
+
+// A Multiply layer drawn over part of the canvas (its window that part,
+// not the canvas), alone and inside a layer that holds the backdrop (a
+// layer is an isolated group: its children blend with what it holds):
+// inside it, the backdrop times the source at the layer's opacity, within a
+// level of the exact value; outside it, the backdrop unchanged.
+@(test)
+test_sw_blend_layer_window :: proc(t: ^testing.T) {
+	W, H :: 64, 48
+	s: Sw
+	sw_open(&s, W, H)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	defer path_destroy(&p)
+	back := [2][3]u8{{200, 100, 50}, {40, 160, 220}}
+	src := [3]u8{128, 255, 64}
+	opacity :: 0.5
+	for nested in ([2]bool{false, true}) {
+		layer_stack_begin(&ls, c, W, H, nil, true)
+		if nested {
+			layer_push(&ls, c, {})
+		}
+		clear_rect(c, 0, 0, W / 2, H, rgb(back[0].r, back[0].g, back[0].b))
+		clear_rect(c, W / 2, 0, W / 2, H, rgb(back[1].r, back[1].g, back[1].b))
+		layer_push(&ls, c, {blend = .Multiply, opacity = opacity})
+		path_reset(&p)
+		path_rect(&p, 20, 12, 24, 16)
+		fill_path(c, &p, paint_color(rgb(src.r, src.g, src.b)))
+		layer_pop(&ls, c)
+		if nested {
+			layer_pop(&ls, c)
+		}
+		layer_stack_end(&ls, c)
+		flush(c)
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				b := back[0] if x < W / 2 else back[1]
+				got := px(&s, u32(x), u32(y))
+				if x < 20 || x >= 44 || y < 12 || y >= 28 {
+					testing.expectf(t, got == {b.r, b.g, b.b, 255}, "nested %v: (%d, %d) %v, backdrop %v", nested, x, y, got, b)
+					continue
+				}
+				for k in 0 ..< 3 {
+					want := (1 - opacity) * f64(b[k]) + opacity * f64(b[k]) * f64(src[k]) / 255
+					testing.expectf(t, abs(f64(got[k]) - want) <= 1, "nested %v: (%d, %d)[%d] %d want %.2f", nested, x, y, k, got[k], want)
+				}
+			}
+		}
+	}
+}
+
 @(test)
 test_sw_destination_over :: proc(t: ^testing.T) {
 	s: Sw
@@ -2060,6 +2150,29 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 		path_rect(&p, 38, 38, 20, 20)
 		fill_path(c, &p, paint_color(rgb(255, 220, 40)))
 		layer_pop(&ls, c)
+		// Luminance masks (read by Fill_Image_Luminance): alone (the mask
+		// blit Source_Over), in a clip (Source_In) and inverted
+		// (Destination_Out), over a translucent image and colour.
+		path_reset(&clip)
+		path_circle(&clip, 20, 48, 11)
+		for params, k in ([3]Layer_Params{{mask_luminance = .Pdf}, {clip_path = &clip}, {mask_invert = true}}) {
+			ox := f32(k * 20 + 2)
+			layer_push(&ls, c, params)
+			path_reset(&p)
+			path_rect(&p, ox, 36, 18, 22)
+			fill_path(c, &p, paint_color(rgb(250, 250, 250)))
+			layer_mask_begin(&ls, c)
+			lp := paint_image(img_pre, ox, 38, 16, 16, 0)
+			lp.anti_alias = false
+			path_reset(&p)
+			path_rect(&p, ox, 38, 16, 16)
+			fill_path(c, &p, lp)
+			path_reset(&p)
+			path_rect(&p, ox + 2, 50, 14, 7)
+			fill_path(c, &p, paint_color(rgba(90, 200, 30, 120)))
+			layer_mask_end(&ls, c)
+			layer_pop(&ls, c)
+		}
 		layer_stack_end(&ls, c)
 
 		flush(c)

@@ -11,6 +11,7 @@
 
 const int FILL_GRADIENT = 0;
 const int FILL_IMAGE = 1;
+const int FILL_IMAGE_LUMINANCE = 2;
 const int FILL_IMAGE_GRADIENT = 3;
 const int FILTER_IMAGE = 4;
 const int FILL_COLOR = 5;
@@ -179,6 +180,11 @@ vec4 fill_color(int type, vec2 fpos) {
         return mix(inner_col(), outer_col(), conic_fraction(fpos));
     } else if (type == FILL_IMAGE_GRADIENT_CONIC) {
         return textureLod(tex, vec2(conic_fraction(fpos), 0.0), 0.0) * inner_col();
+    } else if (type == FILL_IMAGE_LUMINANCE) {
+        // A premultiplied image's luminance (Shader_Type.Fill_Image_Luminance).
+        vec2 pt = transform_point(3, fpos) / extent();
+        vec3 w = tex_type() == 1 ? vec3(0.3, 0.59, 0.11) : vec3(0.2125, 0.7154, 0.0721);
+        return vec4(clamp(dot(textureLod(tex, pt, image_lod()).xyz, w), 0.0, 1.0)) * inner_col();
     }
     return inner_col();
 }

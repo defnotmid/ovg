@@ -395,12 +395,9 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 	f.mask_luminance = params.mask_luminance
 	f.velocity = ls.targets[len(ls.targets) - 1].velocity
 	f.scissor = scissor_pixels(state(c).scissor)
-	if params.blend != .Normal {
-		// Blending reads the target as an image of the canvas size.
-		f.full = true
-		if depth > 0 {
-			ls.frames[depth - 1].full = true
-		}
+	if params.blend != .Normal && depth > 0 {
+		// Blending reads the layer under it as an image of the canvas size.
+		ls.frames[depth - 1].full = true
 	}
 	if params.clip_path != nil {
 		for len(ls.clips) <= depth {
@@ -502,16 +499,11 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	if f.blur_px > 0 {
 		content = layer_blur(ls, c, content, f.blur_px)
 	}
+	// A luminance mask is read as its luminance (the straight color's
+	// times alpha) where it's drawn (Shader_Type.Fill_Image_Luminance).
+	mask_read: Maybe(Mask_Luminance)
 	if f.masked && !f.mask_alpha {
-		// Luminance mask: luminance of the (straight) color times alpha.
-		lum := layer_acquire(ls, c, w, h)
-		lm := color_matrix_luminance_to_alpha()
-		if f.mask_luminance == .Pdf {
-			lm.m[15], lm.m[16], lm.m[17] = 0.3, 0.59, 0.11
-		}
-		filter_image(c, lum, lm, mask)
-		filter_image(c, mask, Composite{.In, {}, mask}, lum)
-		layer_release(ls, lum)
+		mask_read = f.mask_luminance
 	}
 	if f.has_clip || f.masked {
 		keep := layer_acquire(ls, c, w, h)
@@ -533,14 +525,18 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 			if f.has_clip {
 				set_composite_operation(c, .Source_In)
 			}
+			c.image_luminance = mask_read
 			layer_blit(ls, c, mask, x, y, w, h, 1)
+			c.image_luminance = nil
 		}
 		set_composite_operation(c, .Source_In if f.has_clip || masks else .Source_Over)
 		layer_blit(ls, c, content, x, y, w, h, 1)
 		if f.masked && f.mask_invert {
 			// What the mask covers comes out.
 			set_composite_operation(c, .Destination_Out)
+			c.image_luminance = mask_read
 			layer_blit(ls, c, mask, x, y, w, h, 1)
+			c.image_luminance = nil
 		}
 		restore(c)
 		layer_target_end(ls, c)
@@ -551,7 +547,7 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		content = keep
 	}
 	if f.blend != .Normal {
-		layer_blend_onto_target(ls, c, content, f.opacity, f.blend, f.scissor)
+		layer_blend_onto_target(ls, c, content, x, y, f.opacity, f.blend, f.scissor)
 	} else {
 		layer_blit(ls, c, content, x, y, w, h, f.opacity, f.scissor)
 	}
@@ -791,17 +787,28 @@ layer_relocate :: proc(c: ^Canvas, start: int, si: Layer_Stand_In, content, mask
 	}
 }
 
-// Blends `src` onto the current target within `clip`, which must be a layer
-// image. The layer covers the whole canvas (see `Layer_Frame.full`).
+// Blends `src`, a window-sized image at (x, y), onto the current target
+// within `clip`, which must be a layer image of the canvas size (see
+// `Layer_Frame.full`): through a copy of the window's backdrop, so that no
+// draw reads the target it writes.
 @(private = "file")
-layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opacity: f32, mode: Blend_Mode, clip: Maybe(Rect)) {
+layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, x, y, opacity: f32, mode: Blend_Mode, clip: Maybe(Rect)) {
 	w, h := ls.window.w, ls.window.h
-	backdrop, is_image := ls.targets[len(ls.targets) - 1].target.(Image_Id)
+	target, is_image := ls.targets[len(ls.targets) - 1].target.(Image_Id)
 	if !is_image {
 		// No backdrop image to read: composite normally.
-		layer_blit(ls, c, src, 0, 0, w, h, opacity, clip)
+		layer_blit(ls, c, src, x, y, w, h, opacity, clip)
 		return
 	}
+	backdrop := layer_acquire(ls, c, w, h)
+	layer_target_begin(ls, c, backdrop, keep = true, origin = {i32(x), i32(y)})
+	save(c)
+	set_composite_operation(c, .Copy)
+	// The copy has no twin to write motion to: the motion is left as it is,
+	// so that what's drawn after keeps its nearness.
+	layer_blit(ls, c, target, 0, 0, ls.width, ls.height, 1, keep_motion = true)
+	restore(c)
+	layer_target_end(ls, c)
 	source := src
 	faded := Image_Id{}
 	if opacity < 1 {
@@ -815,9 +822,10 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opa
 	filter_image(c, blended, Blend{mode, backdrop}, source)
 	save(c)
 	set_composite_operation(c, .Copy)
-	layer_blit(ls, c, blended, 0, 0, w, h, 1, clip)
+	layer_blit(ls, c, blended, x, y, w, h, 1, clip)
 	restore(c)
 	layer_release(ls, blended)
+	layer_release(ls, backdrop)
 	if image_id_valid(faded) {
 		layer_release(ls, faded)
 	}
@@ -827,10 +835,12 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, opa
 // and clipped only to `clip` (drawing coordinates), at `opacity` times the
 // global alpha. It writes no motion: a layer's goes by its velocity twin
 // (layer_pop).
-layer_blit :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, x, y: f32, w, h: u32, opacity: f32, clip: Maybe(Rect) = nil) {
+layer_blit :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, x, y: f32, w, h: u32, opacity: f32, clip: Maybe(Rect) = nil, keep_motion := false) {
 	alpha := opacity * state(c).alpha
 	save(c)
-	state(c).motion = {}
+	if !keep_motion {
+		state(c).motion = {}
+	}
 	set_global_alpha(c, 1)
 	reset_transform(c)
 	reset_scissor(c)

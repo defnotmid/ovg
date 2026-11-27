@@ -37,6 +37,10 @@ Range :: struct {
 Shader_Type :: enum u8 {
 	Fill_Gradient             = 0,
 	Fill_Image                = 1,
+	// An image read as a luminance mask (Params.tex_type 0 Rec. 709
+	// weights, 1 PDF's): its premultiplied color's luminance (the straight
+	// color's times alpha) as white of that alpha.
+	Fill_Image_Luminance      = 2,
 	Fill_Image_Gradient       = 3,
 	Filter_Image              = 4,
 	Fill_Color                = 5,

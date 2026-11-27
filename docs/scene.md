@@ -233,7 +233,10 @@ Structure is nesting in the draw list, not render targets:
   the value. It subsumes inversion (a track matte's invert is a reversed
   table). A mask is drawn in device space, once, whatever the clips of the
   draws that read it: those clip what the draw paints, not the mask. It
-  covers the union of its readers' clipped bounds, at most the target.
+  covers the union of its readers' clipped bounds, at most the target. A
+  luminance mask keeps its group's premultiplied colour and each read takes
+  its luminance there, which is the straight colour's times alpha: no pass
+  of its own (v0.1.13). Only a transfer table needs one, once.
 - **Patterns** are draw ranges a paint refers to, drawn per lattice cell.
 
 How a layer materialises is the backend's choice. Both backends start from
@@ -442,6 +445,20 @@ and parity. Each is released on its own.
    rendered once per index and read per draw by the shared shaders, and
    layers and masks bounded tightly. A CPU-only layer compositor only if the
    profile still shows the layer passes dominating after that.
+
+   Done in v0.1.13, before the Scene types. The profile found
+   tile_clamp_bug's four Multiply layers at the canvas size though they
+   draw a tenth of it, and every luminance mask paying two filter passes
+   (8 to 11 ns a pixel each on the CPU) before it was read. Blend layers now
+   cover their window, through a copy of the backdrop under it, and a
+   luminance mask is read as luminance where it's drawn. Per pass at 72
+   dpi, in instructions: tile_clamp_bug 3.45 G to 2.01 G (hayro 0.47 G),
+   mask_bc 0.251 G to 0.073 G (0.025 G), fireworks 0.295 G to 0.201 G
+   (0.037 G). A blend in the shape shader would save at most the blend
+   pass left, 2.8 of tile_clamp_bug's 88 ms, and isn't built. Rendering
+   each mask once needs every reader known before the mask is drawn, so it
+   waits for the Scene: fireworks draws 4 masks 64 times, about 4 of its
+   11.7 ms.
 5. **Blend modes per draw, isolation and knockout, and the GPU's new shader
    work for them (see Backends),** with layer planning moved behind the
    boundary. The new image formats (`Luma8` a texture-type branch on both

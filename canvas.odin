@@ -18,6 +18,9 @@ Canvas :: struct {
 	current_render_origin: [2]i32,
 	// The target keeps a velocity twin (Cmd_Set_Render_Target.velocity).
 	current_render_velocity: bool,
+	// Image paints read their (premultiplied) image's luminance by these
+	// weights (Shader_Type.Fill_Image_Luminance): layer masks set it.
+	image_luminance:       Maybe(Mask_Luminance),
 	states:                [dynamic]State,
 	commands:              [dynamic]Command,
 	paints:                [dynamic]Params,
@@ -761,6 +764,10 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	}
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
+	if l, read := c.image_luminance.?; read && params.shader_type == .Fill_Image {
+		params.shader_type = .Fill_Image_Luminance
+		params.tex_type = 1 if l == .Pdf else 0
+	}
 	params.spread = f32(u8(paint.spread) | transmute(u8)paint.gradient_clip << 2)
 	return cmd, add_paint(c, params)
 }

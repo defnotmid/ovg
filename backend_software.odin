@@ -2037,7 +2037,8 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 		return
 	}
 	pr := &b.paint_rows[inst.paint]
-	if pr[10][3] != f32(Shader_Type.Fill_Image) || pr[10][2] != 0 || pr[10][0] < 1 {
+	luminance := pr[10][3] == f32(Shader_Type.Fill_Image_Luminance)
+	if (pr[10][3] != f32(Shader_Type.Fill_Image) || pr[10][2] != 0) && !luminance || pr[10][0] < 1 {
 		return
 	}
 	if pr[0][1] != 0 || pr[1][0] != 0 {
@@ -2188,6 +2189,35 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				dst^ = transmute(u32)cast(#simd[4]u8)simd.clamp(df * #simd[4]f32{ia, ia, ia, ia} + half, 0, 255)
 			}
 		}
+	}
+
+	if pr[10][3] == f32(Shader_Type.Fill_Image_Luminance) {
+		// Each texel's luminance as white of that alpha (fill_color's
+		// FILL_IMAGE_LUMINANCE), then blended as the shader's.
+		lw := #simd[4]f32{0.3, 0.59, 0.11, 0} if pr[10][2] == 1 else #simd[4]f32{0.2125, 0.7154, 0.0721, 0}
+		for y in y0 ..< y1 {
+			my: f32 = 1
+			if has_scissor {
+				my = clamp(0.5 - (abs(ay * (f32(y) + 0.5) + by) - ey) * sy, 0, 1)
+			}
+			srow := src_px[int(y - oy) * src_stride + sx0 :][:w]
+			drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
+			for su, cx in srow {
+				if su == 0 && (op == .Source_Over || op == .Destination_Out) {
+					continue
+				}
+				mx := my
+				if has_scissor {
+					mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+				}
+				sb := transmute([4]u8)su
+				l := clamp(simd.reduce_add_ordered(#simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), 0} * lw), 0, 255)
+				// As an 8-bit texel of that luminance, which blend_px reads.
+				lu := u32(u8(l + 0.5)) * 0x01010101
+				blend_px(&drow[cx], lu, op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+			}
+		}
+		return true
 	}
 
 	for y in y0 ..< y1 {
