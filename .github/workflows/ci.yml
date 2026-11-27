@@ -59,7 +59,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: defnotmid/oksl
-          ref: v0.1.2
+          ref: v0.1.5
           path: oksl
 
       - name: Cache Odin
