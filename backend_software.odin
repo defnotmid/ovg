@@ -887,11 +887,11 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 				continue
 			}
 			words := instance_words(inst, frame.shape_words)
-			if g := b.grid_at[it.inst]; g.count > 0 {
-				words = b.grid_words[g.start:][:g.count]
-			}
 			if sw_blit_image(b, run.images, cmd, &r, it.inst, inst, words, px) {
 				continue
+			}
+			if g := b.grid_at[it.inst]; g.count > 0 {
+				words = b.grid_words[g.start:][:g.count]
 			}
 			unit := Sw_Unit.Shape_Box if inst.transform[1] == 0 && inst.transform[2] == 0 else .Shape
 			uv, data := shader_instance_inputs(inst, 0)
@@ -1679,26 +1679,27 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 			b.piece_at[i] = max(u32)
 			b.grid_at[i] = {}
 			inst := frame.shapes[i]
-			// The shader reads the grid of a feathered fill and of an aliased
-			// one's edges: built here for a fill recorded without one.
-			if inst.marker == .None && inst.hairline == 0 && (inst.widen != 0 || inst.edge == .Aliased) {
-				if words := instance_words(inst, frame.shape_words); !cv.has_grid(words) {
-					at := len(b.grid_words)
-					if cv.grid_append(&b.grid_builder, words, &b.grid_words) {
-						b.grid_at[i] = {u32(at), u32(len(b.grid_words) - at)}
-					}
-				}
-			}
+			words := instance_words(inst, frame.shape_words)
 			ib := b.bounds[i]
 			y0, y1 := clamp_i32(math.floor(ib.miny), r.y0, r.y1), clamp_i32(math.ceil(ib.maxy), r.y0, r.y1)
-			// A hairline's or a marker's coverage isn't its pieces' area,
-			// nor a widened footprint's a pixel's.
-			if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || y0 >= y1 {
+			x0, x1 := clamp_i32(math.floor(ib.minx), r.x0, r.x1), clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
+			// The shader reads the grid of a feathered fill and of an aliased
+			// one's edges: built here for a fill recorded without one. A
+			// hairline's or a marker's coverage isn't its pieces' area, nor a
+			// widened footprint's a pixel's. A blitted image reads neither.
+			plain := inst.marker == .None && inst.hairline == 0
+			needs_grid := plain && (inst.widen != 0 || inst.edge == .Aliased) && !cv.has_grid(words)
+			needs_pieces := plain && inst.widen == 0 && y0 < y1 && x0 < x1
+			if !needs_grid && !needs_pieces || sw_can_blit_image(b, run.images, cmd, run.target, run.twin, i, inst, frame.shape_words) {
 				continue
 			}
-			words := instance_words(inst, frame.shape_words)
-			x0, x1 := clamp_i32(math.floor(ib.minx), r.x0, r.x1), clamp_i32(math.ceil(ib.maxx), r.x0, r.x1)
-			if x0 >= x1 || sw_can_blit_image(b, run.images, cmd, run.target, run.twin, i, inst, frame.shape_words) {
+			if needs_grid {
+				at := len(b.grid_words)
+				if cv.grid_append(&b.grid_builder, words, &b.grid_words) {
+					b.grid_at[i] = {u32(at), u32(len(b.grid_words) - at)}
+				}
+			}
+			if !needs_pieces {
 				continue
 			}
 			first := len(b.pieces)
@@ -2022,11 +2023,17 @@ sw_scissor_x :: proc "contextless" (pr: ^[14][4]f32, x0, w: int, is_copy: bool) 
 // Checks whether an instance is a 1:1 axis-aligned premultiplied RGBA8 image
 // rectangle eligible for direct blitting (`sw_blit_image`).
 @(private = "file")
-sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, twin: Sw_Twin, idx: u32, inst: Shape_Instance, words: []u32) -> (src: Sw_Texture, op: Sw_Blit_Op, rx0, ry0, rx1, ry1, ox, oy: i32, ok: bool) {
+// An image draw the 1:1 blit takes: an RGBA8 image whose texels land one per
+// pixel, at whole pixels, on an axis-aligned rectangle with whole-pixel
+// corners, where an exact edge covers each pixel fully or not at all. Rows
+// may run bottom-up (Image_Flag.Flip_Y), and the image may hold straight
+// alpha, premultiplied per texel as the shader's apply_tt does. A texel's
+// row for pixel row y is y - oy, or oy - 1 - y when flipped.
+sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, twin: Sw_Twin, idx: u32, inst: Shape_Instance, words: []u32) -> (src: Sw_Texture, op: Sw_Blit_Op, rx0, ry0, rx1, ry1, ox, oy: i32, flip, straight, ok: bool) {
 	if b.no_fast_paths || target.format != .RGBA8 || target.pixels == nil {
 		return
 	}
-	if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || inst.edge != .Aliased {
+	if inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || inst.edge == .Smooth {
 		return
 	}
 	if twin.pixels != nil && int(idx) < len(b.motion_rows) && b.motion_rows[idx][1][2] != 0 {
@@ -2037,16 +2044,21 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 		return
 	}
 	pr := &b.paint_rows[inst.paint]
+	// A luminance read's tex_type picks its weights; an image's is 0 for
+	// premultiplied texels and 1 for straight ones.
 	luminance := pr[10][3] == f32(Shader_Type.Fill_Image_Luminance)
-	if (pr[10][3] != f32(Shader_Type.Fill_Image) || pr[10][2] != 0) && !luminance || pr[10][0] < 1 {
+	image := pr[10][3] == f32(Shader_Type.Fill_Image) && (pr[10][2] == 0 || pr[10][2] == 1)
+	if !image && !luminance || pr[10][0] < 1 {
 		return
 	}
+	straight = image && pr[10][2] == 1
 	if pr[0][1] != 0 || pr[1][0] != 0 {
 		return
 	}
-	if pr[3][0] != 1 || pr[3][1] != 0 || pr[4][0] != 0 || pr[4][1] != 1 {
+	if pr[3][0] != 1 || pr[3][1] != 0 || pr[4][0] != 0 || (pr[4][1] != 1 && pr[4][1] != -1) {
 		return
 	}
+	flip = pr[4][1] == -1
 	tex, tex_ok := lookup_texture(images, cmd.image)
 	if !tex_ok || tex.format != .RGBA8 || .Repeat_X in tex.flags || .Repeat_Y in tex.flags {
 		return
@@ -2054,7 +2066,9 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 	if pr[9][0] != f32(tex.width) || pr[9][1] != f32(tex.height) {
 		return
 	}
-	ox_f, oy_f := -pr[5][0], -pr[5][1]
+	// A texel's position is the pixel's, offset by pr[5] (y negated first
+	// when flipped).
+	ox_f, oy_f := -pr[5][0], pr[5][1] if flip else -pr[5][1]
 	ox_i, oy_i := i32(math.round(ox_f)), i32(math.round(oy_f))
 	if abs(f32(ox_i) - ox_f) > 1e-4 || abs(f32(oy_i) - oy_f) > 1e-4 {
 		return
@@ -2108,16 +2122,23 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 	if abs(f32(ix0) - minx) > 1e-4 || abs(f32(iy0) - miny) > 1e-4 || abs(f32(ix1) - maxx) > 1e-4 || abs(f32(iy1) - maxy) > 1e-4 {
 		return
 	}
-	if ix0 >= ix1 || iy0 >= iy1 || ix0 < ox_i || iy0 < oy_i || ix1 > ox_i + i32(tex.width) || iy1 > oy_i + i32(tex.height) {
+	if ix0 >= ix1 || iy0 >= iy1 || ix0 < ox_i || ix1 > ox_i + i32(tex.width) {
 		return
 	}
-	return tex, bop, ix0, iy0, ix1, iy1, ox_i, oy_i, true
+	rows_lo, rows_hi := oy_i - i32(tex.height), oy_i
+	if !flip {
+		rows_lo, rows_hi = oy_i, oy_i + i32(tex.height)
+	}
+	if iy0 < rows_lo || iy1 > rows_hi {
+		return
+	}
+	return tex, bop, ix0, iy0, ix1, iy1, ox_i, oy_i, flip, straight, true
 }
 
 @(private = "file")
 sw_can_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, twin: Sw_Twin, idx: u32, inst: Shape_Instance, frame_words: []u32) -> bool {
 	words := instance_words(inst, frame_words)
-	_, _, _, _, _, _, _, _, ok := sw_match_blit_image(b, images, cmd, target, twin, idx, inst, words)
+	_, _, _, _, _, _, _, _, _, _, ok := sw_match_blit_image(b, images, cmd, target, twin, idx, inst, words)
 	return ok
 }
 
@@ -2125,7 +2146,7 @@ sw_can_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Comma
 // shape.frag (`textureLod * inner_col * scissor_mask`) without JIT shading.
 @(private = "file")
 sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, r: ^Raster, idx: u32, inst: Shape_Instance, words: []u32, px: [4]i32) -> bool {
-	src_tex, op, rx0, ry0, rx1, ry1, ox, oy, ok := sw_match_blit_image(b, images, cmd, r.target, r.twin, idx, inst, words)
+	src_tex, op, rx0, ry0, rx1, ry1, ox, oy, flip, straight, ok := sw_match_blit_image(b, images, cmd, r.target, r.twin, idx, inst, words)
 	if !ok {
 		return false
 	}
@@ -2143,7 +2164,9 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 	if !alive {
 		return true
 	}
-	unit_tint := tint == {1, 1, 1, 1}
+	// Straight texels are premultiplied in floats as each is blended, so
+	// they take blend_px rather than the unit tint's byte loops.
+	unit_tint := tint == {1, 1, 1, 1} && !straight
 	tint4 := simd.from_array(tint)
 	src_px := slice.reinterpret([]u32, src_tex.pixels)
 	dst_px := slice.reinterpret([]u32, r.target.pixels)
@@ -2157,9 +2180,14 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 	half := #simd[4]f32{0.5, 0.5, 0.5, 0.5}
 	c255 := #simd[4]f32{255, 255, 255, 255}
 
-	blend_px :: #force_inline proc "contextless" (dst: ^u32, su: u32, op: Sw_Blit_Op, scale: #simd[4]f32, inv255, half, c255: #simd[4]f32) {
+	blend_px :: #force_inline proc "contextless" (dst: ^u32, su: u32, op: Sw_Blit_Op, scale: #simd[4]f32, inv255, half, c255: #simd[4]f32, straight: bool) {
 		sb := transmute([4]u8)su
-		sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])} * inv255 * scale
+		sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])} * inv255
+		if straight {
+			a := simd.extract(sf, 3)
+			sf *= #simd[4]f32{a, a, a, 1}
+		}
+		sf *= scale
 		sf = simd.clamp(sf, 0, 1)
 		switch op {
 		case .Copy:
@@ -2200,7 +2228,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 			if has_scissor {
 				my = clamp(0.5 - (abs(ay * (f32(y) + 0.5) + by) - ey) * sy, 0, 1)
 			}
-			srow := src_px[int(y - oy) * src_stride + sx0 :][:w]
+			srow := src_px[int(oy - 1 - y if flip else y - oy) * src_stride + sx0 :][:w]
 			drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
 			for su, cx in srow {
 				if su == 0 && (op == .Source_Over || op == .Destination_Out) {
@@ -2214,7 +2242,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				l := clamp(simd.reduce_add_ordered(#simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), 0} * lw), 0, 255)
 				// As an 8-bit texel of that luminance, which blend_px reads.
 				lu := u32(u8(l + 0.5)) * 0x01010101
-				blend_px(&drow[cx], lu, op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+				blend_px(&drow[cx], lu, op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255, false)
 			}
 		}
 		return true
@@ -2228,7 +2256,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				continue
 			}
 		}
-		srow := src_px[int(y - oy) * src_stride + sx0 :][:w]
+		srow := src_px[int(oy - 1 - y if flip else y - oy) * src_stride + sx0 :][:w]
 		drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
 		row_full := my >= 1
 		i0 := in_x0 if row_full else 0
@@ -2236,7 +2264,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 
 		for cx in 0 ..< i0 {
 			mx := my * clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
-			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255, straight)
 		}
 
 		if i1 > i0 {
@@ -2311,7 +2339,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 					if su == 0 && op != .Copy && op != .Source_In {
 						continue
 					}
-					blend_px(&dr[cx], su, op, tint4, inv255, half, c255)
+					blend_px(&dr[cx], su, op, tint4, inv255, half, c255, straight)
 				}
 			}
 		}
@@ -2321,7 +2349,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 			if has_scissor && (cx < in_x0 || cx >= in_x1) {
 				mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
 			}
-			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255)
+			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255, straight)
 		}
 	}
 	return true

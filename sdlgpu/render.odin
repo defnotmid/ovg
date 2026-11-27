@@ -984,9 +984,12 @@ program_pipeline :: proc(b: ^SDL_Backend, p: ^Program, format: sdl.GPUTextureFor
 
 // ---- textures -------------------------------------------------------------------------
 
-// Cached textures unused for this many frames are released.
+// Filter scratch textures and velocity twins unused for this many frames
+// (renders) are released, as the layer stack frees its images: one missing
+// for a frame finds its texture again, and a window that moves and resizes
+// leaves no trail of sizes.
 @(private = "file")
-TEXTURE_KEEP_FRAMES :: 30
+TEXTURE_KEEP_FRAMES :: 2
 
 @(private = "file")
 evict_textures :: proc(b: ^SDL_Backend, cache: ^[dynamic]Cached_Texture) {

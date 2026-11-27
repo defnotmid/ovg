@@ -2044,7 +2044,8 @@ test_sw_coverage_edge_cases :: proc(t: ^testing.T) {
 // across blends, fill rules, axis-aligned scissors, layer compositing and motion.
 @(test)
 test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
-	W, H :: 64, 64
+	// Rows 64 and down hold the widened blits, under nothing drawn later.
+	W, H :: 64, 128
 	render_scene :: proc(no_fast_paths: bool) -> (pixels: [W * H * 4]u8, vel: [W * H][2]f32, compiled_inside: bool) {
 		s: Sw
 		sw_open(&s, W, H)
@@ -2128,14 +2129,39 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 			restore(c)
 		}
 
+		// Also blitted: straight alpha, rows bottom-up (Flip_Y) and exact
+		// (anti-aliased) edges on whole pixels, each with and without the
+		// others, under the four blits' operations, over a translucent ground.
+		clear_rect(c, 0, 64, W, 64, rgba(200, 40, 90, 140))
+		img_raw_flip, _ := create_image(c, image_source_rgba(src_raw[:], 16, 16), {.Flip_Y})
+		img_pre_flip, _ := create_image(c, image_source_rgba(src_pre[:], 16, 16), {.Premultiplied, .Flip_Y})
+		for op, k in ([4]Composite_Operation{.Source_Over, .Copy, .Source_In, .Destination_Out}) {
+			for img, j in ([3]Image_Id{img_raw, img_raw_flip, img_pre_flip}) {
+				save(c)
+				set_composite_operation(c, op)
+				ox := f32(j * 20 + 2)
+				oy := f32(64 + k * 16)
+				if k == 3 {
+					scissor(c, ox + 2.5, oy + 1.75, 11, 12.5)
+				}
+				tint := rgba(255, 255, 255, 255) if j != 1 else rgba(200, 230, 160, 210)
+				ip := paint_image_tint(img, ox, oy, 16, 16, 0, tint)
+				ip.anti_alias = j != 2
+				path_reset(&p)
+				path_rect(&p, ox, oy, 16, 16)
+				fill_path(c, &p, ip)
+				restore(c)
+			}
+		}
+
 		flush(c)
 		compiled_inside = s.backend.programs[.Shape_Inside][0].module != nil
 
-		// Unpremultiplied 1:1 image + clipped opacity layer exercises fallback & layer_blit.
-		ir := paint_image(img_raw, 4, 4, 16, 16, 0, 0.75)
-		ir.anti_alias = false
+		// A 1:1 image off whole pixels (shaded) + clipped opacity layer
+		// exercises the fallback & layer_blit.
+		ir := paint_image(img_raw, 4.5, 4, 16, 16, 0, 0.75)
 		path_reset(&p)
-		path_rect(&p, 4, 4, 16, 16)
+		path_rect(&p, 4.5, 4, 16, 16)
 		fill_path(c, &p, ir)
 
 		ls: Layer_Stack
@@ -2208,6 +2234,56 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 		max_vel_diff = max(max_vel_diff, abs(fast_vel[i].x - slow_vel[i].x), abs(fast_vel[i].y - slow_vel[i].y))
 	}
 	testing.expectf(t, max_vel_diff <= 1e-3, "fast path velocity diff %v > 1e-3", max_vel_diff)
+}
+
+// A straight-alpha image stored bottom-up (Flip_Y), drawn 1:1 at whole pixels
+// with anti-aliased edges (the blit), lands each texel on its pixel: row y
+// shows the image's row h - 1 - y, premultiplied and composited over the
+// ground, within one level of the exact formula; outside, the ground stays.
+@(test)
+test_sw_blit_straight_flipped :: proc(t: ^testing.T) {
+	W, H :: 24, 16
+	IW, IH :: 10, 6
+	s: Sw
+	sw_open(&s, W, H)
+	defer sw_close(&s)
+	c := &s.canvas
+	src: [IW * IH * 4]u8
+	for y in 0 ..< IH {
+		for x in 0 ..< IW {
+			i := (y * IW + x) * 4
+			src[i + 0] = u8(25 * x)
+			src[i + 1] = u8(40 * y)
+			src[i + 2] = u8(200 - 15 * x)
+			src[i + 3] = u8(30 + 37 * y + 3 * x)
+		}
+	}
+	img, _ := create_image(c, image_source_rgba(src[:], IW, IH), {.Flip_Y})
+	ground := [4]f32{30, 90, 160, 255}
+	clear_rect(c, 0, 0, W, H, rgb(30, 90, 160))
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	path_rect(&p, 7, 5, IW, IH)
+	fill_path(c, &p, paint_image(img, 7, 5, IW, IH, 0))
+	flush(c)
+	worst: f64
+	for y in 0 ..< H {
+		for x in 0 ..< W {
+			want := ground
+			if x >= 7 && x < 7 + IW && y >= 5 && y < 5 + IH {
+				i := ((IH - 1 - (y - 5)) * IW + (x - 7)) * 4
+				a := f32(src[i + 3]) / 255
+				for ch in 0 ..< 3 {
+					want[ch] = f32(src[i + ch]) * a + ground[ch] * (1 - a)
+				}
+			}
+			for ch in 0 ..< 4 {
+				worst = max(worst, abs(f64(s.backend.pixels[(y * W + x) * 4 + ch]) - f64(want[ch])))
+			}
+		}
+	}
+	testing.expectf(t, worst <= 1, "straight flipped blit is %.2f levels off the formula", worst)
 }
 
 // Image_Flag.Generate_Mipmaps: an image drawn seven times smaller averages what
@@ -2289,4 +2365,69 @@ test_sw_image_mipmaps :: proc(t: ^testing.T) {
 	testing.expect_value(t, err, nil)
 	testing.expect_value(t, update_image(&s.canvas, id, image_source_rgba(pix[:2 * 2 * 4], 2, 2), 1, 1), Error.Unsupported_Operation)
 	testing.expect_value(t, update_image(&s.canvas, id, image_source_rgba(pix[:4 * 4 * 4], 4, 4), 0, 0), nil)
+}
+
+// The layer pool keeps images two frames: a layer that moves and resizes
+// every frame leaves no trail of image sizes behind it, and a layer missing
+// for one frame finds its image again when it comes back.
+@(test)
+test_layer_pool_trim :: proc(t: ^testing.T) {
+	W, H :: 256, 256
+	s: Sw
+	sw_open(&s, W, H)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	frame :: proc(ls: ^Layer_Stack, c: ^Canvas, p: ^Path, x, y, w, h: f32) {
+		layer_stack_begin(ls, c, W, H)
+		if w > 0 {
+			layer_push(ls, c, {opacity = 0.5, blur = 1.5})
+			path_reset(p)
+			path_rect(p, x, y, w, h)
+			fill_path(c, p, paint_color(rgb(200, 90, 30)))
+			layer_pop(ls, c)
+		}
+		layer_stack_end(ls, c)
+		flush(c)
+	}
+	// Bytes pooled after each frame against what each frame used.
+	most_held, most_used := 0, 0
+	for f in 0 ..< 40 {
+		frame(&ls, c, &p, f32(f) * 2, f32(f), 20 + f32(f) * 4, 16 + f32(f) * 3)
+		held, used := 0, 0
+		for l in ls.pool {
+			n := int(l.w * l.h * 4)
+			held += n
+			if l.last_used == ls.frame {
+				used += n
+			}
+		}
+		most_held, most_used = max(most_held, held), max(most_used, used)
+	}
+	testing.expectf(t, most_held <= 3 * most_used, "a moving layer left %d bytes pooled; a frame uses at most %d", most_held, most_used)
+
+	frame(&ls, c, &p, 10, 10, 60, 40)
+	frame(&ls, c, &p, 10, 10, 60, 40)
+	// An image the layer used (not one the moving layer left).
+	id: Image_Id
+	for l in ls.pool {
+		if l.last_used == ls.frame {
+			id = l.id
+		}
+	}
+	frame(&ls, c, &p, 0, 0, 0, 0)
+	frame(&ls, c, &p, 10, 10, 60, 40)
+	found := false
+	for l in ls.pool {
+		found ||= l.id == id
+	}
+	testing.expect(t, found, "a layer missing for one frame lost its image")
+	frame(&ls, c, &p, 0, 0, 0, 0)
+	frame(&ls, c, &p, 0, 0, 0, 0)
+	frame(&ls, c, &p, 0, 0, 0, 0)
+	testing.expectf(t, len(ls.pool) == 0, "%d images kept after three frames with no layer", len(ls.pool))
 }

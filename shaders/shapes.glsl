@@ -26,17 +26,22 @@ struct Shape_Instance {
 // An instance's motion (ovg Shape_Motion): at drawing coordinates p its
 // velocity is velocity.xy * p.x + velocity.zw * p.y + offset.xy, and
 // offset.z its nearness (0: it writes no motion). Row for row with the
-// frame's instances; read by the motion variants only.
+// frame's instances; declared and bound for the motion variants only, so a
+// still variant reflects (and SDL_GPU binds) three storage buffers.
+#ifdef MOTION
 struct Shape_Motion {
     vec4 velocity;
     vec4 offset;
 };
+#endif
 
 // The shapes' words (curves.FORMAT).
 layout(std430) readonly buffer Shapes { uint words[]; } shapes;
 // The frame's instances (and groups' records), for scissors and groups.
 layout(std430) readonly buffer Members { Shape_Instance rows[]; } members;
+#ifdef MOTION
 layout(std430) readonly buffer Motions { Shape_Motion rows[]; } motions;
+#endif
 
 uint curves_word(uint i) { return shapes.words[i]; }
 
@@ -102,6 +107,7 @@ int shape_rule(uint flags) {
     return int(flags & 1u);
 }
 
+#ifdef MOTION
 // Instance `index`'s motion at p over `under` (a twin pixel) by coverage a.
 vec4 motion_over(uint index, vec2 p, float a, vec4 under) {
     Shape_Motion m = motions.rows[index];
@@ -111,6 +117,7 @@ vec4 motion_over(uint index, vec2 p, float a, vec4 under) {
     vec2 v = m.velocity.xy * p.x + m.velocity.zw * p.y + m.offset.xy;
     return vec4(v, m.offset.z, 1.0) * a + under * (1.0 - a);
 }
+#endif
 
 // The cells of a group's grid (Cmd_Draw_Shapes.group) the pixel's cell
 // lists: its first word `at` and the lists' start (`lists`), from the

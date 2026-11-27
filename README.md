@@ -181,8 +181,8 @@ shot, _ := vg.screenshot(&c)    // RGBA8, top-down
   (quads, shapes, box shapes, groups, hairlines, groups of markers, and
   motion blur's composite and resolve) and second target (a velocity
   twin's, or the resolve's nearness). There is no depth or stencil buffer. Blur
-  intermediates are kept per image shape and released after 30 frames
-  unused.
+  intermediates and velocity twins are kept per image shape and released
+  after 2 frames unused.
 - Gray8 images are stored as R8, Gray16 as R16, RGBA16F as
   `R16G16B16A16_FLOAT`. An image with `Generate_Mipmaps` gets a texture of
   that many levels, uploaded from the same CPU builder as the software

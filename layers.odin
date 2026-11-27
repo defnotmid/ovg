@@ -198,9 +198,16 @@ Layer_Stack :: struct {
 	filter_last:    [dynamic]int,
 }
 
-// Pooled images and tiles unused for this many frames are freed.
+// Pooled images and tiles unused for this many frames (layer_stack_begin
+// calls) are freed: a layer missing for a frame or two finds its image
+// again, and a window that moves and resizes leaves no trail of sizes.
 @(private = "file")
-LAYER_KEEP_FRAMES :: 30
+LAYER_KEEP_FRAMES :: 2
+
+// Turbulence lattices (a 10 KB table per seed) unused for this many frames
+// are freed.
+@(private = "file")
+LATTICE_KEEP_FRAMES :: 30
 
 // The widest blur `layer_blur` runs at full size (wider ones downscale).
 @(private = "file")
@@ -282,7 +289,7 @@ layer_stack_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, width, height: u32, targ
 	layer_pool_reset(c, &ls.images, ls.frame)
 	layer_pool_reset(c, &ls.uploads, ls.frame)
 	for i := 0; i < len(ls.lattices); {
-		if ls.frame - ls.lattices[i].last_used > LAYER_KEEP_FRAMES {
+		if ls.frame - ls.lattices[i].last_used > LATTICE_KEEP_FRAMES {
 			delete_image(c, ls.lattices[i].id)
 			unordered_remove(&ls.lattices, i)
 			continue

@@ -467,12 +467,6 @@ and parity. Each is released on its own.
 6. Apps migrate: odpdf writes its adapter and the others follow through the
    canvas. Then the "What goes" list is deleted.
 
-## Later, not in these steps
-
-- Mesh shadings (PDF types 4 to 7): Gouraud-shaded triangles, as a draw
-  taking vertices with a colour each. odpdf tessellates Coons and tensor
-  patches itself, and samples function-based shadings into a Pixel_View.
-
 ## Decided in review
 
 - **Patterns** are draw ranges outside `main`, with only `main` painted.
