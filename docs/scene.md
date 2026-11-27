@@ -2,8 +2,13 @@
 
 Status: reviewed 2026-11-26, after ovg v0.1.11, and revised the same day
 after a native CPU renderer prototype was measured and set aside (see
-Backends). Nothing here is built yet. Each step in "Staging" lands on its
-own, measured, as a release.
+Backends). Revised 2026-11-27 for the API and the data's shape: every index
+a one-based `*_Id` handle whose zero is never a row, clips by rectangle as
+well as path,
+masks and patterns in dependency order, lifetimes and glyph reuse kept out of
+the Scene, and exact-truth tests (see "Decided in review"). Nothing here is
+built yet. Each step in "Staging" lands on its own, as a release; the
+priority is the boundary and correctness, not speed.
 
 ## Why
 
@@ -80,7 +85,35 @@ today's code at first (see "What stays").
 ## The Scene
 
 A Scene is a set of tables and a list of draws that refer to them by index.
-Indices are `u32`, ranges are `Range{start, count}`, as in `Frame` today.
+Every index is a handle of its own type, one-based, read as `table[id - 1]`:
+one indexing rule everywhere. Ranges are `Range{start, count}`, as in
+`Frame` today, and an empty range is none.
+
+```odin
+Path_Id      :: distinct u32 // paths[id - 1]
+Transform_Id :: distinct u32 // transforms[id - 1]
+Paint_Id     :: distinct u32 // paints[id - 1]
+Run_Id       :: distinct u32 // runs[id - 1]
+Pattern_Id   :: distinct u32 // patterns[id - 1]
+Mask_Id      :: distinct u32 // masks[id - 1]
+Stroke_Id    :: distinct u32 // strokes[id - 1]
+Motion_Id    :: distinct u32 // motions[id - 1]
+Lut_Id       :: distinct u32 // luts[id - 1]
+Scene_Image_Id :: distinct u32 // images[id - 1]: a Scene_Image, not the store's Image_Id
+```
+
+Zero is never a row. For an optional handle (a mask, a stroke style, a
+motion, a transfer table) it means none, so a `Draw{}` has none of them. For
+a required one (a draw's path, transform, paint or run) it means the field
+was left out, which the check at compile time rejects instead of drawing
+row 0. Distinct types also keep a path handle from being passed where a
+transform is wanted. `Image_Id` keeps its own form (a slot key), as today.
+
+A Scene holds what the caller describes and nothing a backend derives from
+it: no image lifetimes, no glyph-reuse keys, no compiled rows. Those are
+worked out when the scene is compiled, in one pass over its draws, so a
+Scene can't contradict itself (an index pointing at the wrong row is the one
+mistake left, and the contract below makes it a checked one).
 
 ```odin
 Scene :: struct {
@@ -138,7 +171,7 @@ Scene_Paint :: union {
 	Linear,           // start, end, stops range, spread, clip bits
 	Radial,           // two circles (focal), stops range, spread, clip bits
 	Conic,            // center, angle, stops range
-	Image_Paint,      // image index, image-to-paint transform, sampling, tint
+	Image_Paint,      // Scene_Image_Id, image-to-paint transform, sampling, tint
 	Pattern,          // a pattern cell index (below)
 }
 ```
@@ -191,11 +224,14 @@ Every painting draw (Fill, Stroke, Glyphs) carries, besides its geometry and
 paint:
 
 - an opacity (PDF's ca and CA, SVG's fill- and stroke-opacity, the canvas's
-  global alpha), applied to any paint, gradients and images included;
+  global alpha), applied to any paint, gradients and images included. It
+  means what it says: 0 is transparent (and such a draw is culled), 1
+  opaque. The builder procedures default it to 1; the Scene doesn't carry
+  today's `Layer_Params` rule that an opacity of 0 means 1;
 - a blend: one of the 11 Porter-Duff composite operations the canvas has
   today (Copy, Source_In, Destination_Out, Xor, Lighter...), or source-over
   with one of the 16 blend modes, so the canvas maps onto it without loss;
-- an optional mask index, read by that draw alone.
+- an optional mask (`Mask_Id`), read by that draw alone.
 
 That's PDF's graphics state, where a soft mask, a blend mode and an opacity
 apply to each painting operation separately (ISO 32000 11.6.3, 11.6.5).
@@ -207,22 +243,40 @@ that names it.
 Draw :: union {
 	Fill,        // path, transform, paint, rule, edge (exact, aliased, feather)
 	Stroke,      // path, transform, stroke style, paint; hairline: device width
-	Glyphs,      // run, paint, mode: fill, stroke style, or clip
+	Glyphs,      // run, paint, stroke (none: filled)
 	Clear,       // rectangle, colour
-	Clip_Push,   // path or glyph run, transform, rule; intersects the current clip
+	Clip_Push,   // Clip_Shape (below), intersected with the current clip
 	Clip_Pop,
-	Layer_Push,  // opacity, blend mode, isolated, knockout, filter range, mask index
+	Layer_Push,  // opacity, blend mode, isolated, knockout, filter range, mask
 	Layer_Pop,
 	Program,     // a custom program run into an image (today's run_program)
 	External,    // the host's callback (today's run_external, 3D interop)
 }
 ```
 
+```odin
+Clip_Shape :: union {
+	Clip_Rect, // [4]i32: whole device pixels x0, y0, x1, y1 (a scissor, PDF's re W n, SVG overflow)
+	Clip_Path, // path, transform, rule
+	Clip_Run,  // glyph run: the union of its glyphs (PDF's text clip modes)
+}
+```
+
 Structure is nesting in the draw list, not render targets:
 
-- **Clips** are a stack of coverage. A clip by path or by glyph run (PDF
-  text clip modes) intersects the current clip until its pop. Today's
-  scissor is the rectangle case.
+- **Clips** are a stack of coverage. Each push intersects the current clip
+  until its pop. A rectangle is its own case rather than a four-point path,
+  because it is the common one and both backends cut to it without
+  rasterizing it: the GPU as a scissor, the CPU by clamping rows and
+  columns. It is whole pixels, so nothing is partly covered; a rectangle with
+  fractional edges is a `Clip_Path`, whose edge pixels get their exact
+  coverage. A text clip is a `Clip_Run`; a `Glyphs` draw only paints. A clip by path or run has exact coverage like a fill's, and draws
+  multiply theirs by it. It cuts what the draws paint and nothing else: a
+  clip doesn't make a layer, so clipped draws stay separate draws with their
+  own opacity and blend, as PDF and SVG define them. v0.1.15's clip
+  shortcuts (dropping a clip layer its clip covers, compositing the others
+  in one pass) are interim, on today's layers; the Scene's clips replace
+  them.
 - **Layers** are a range of draws composited as one: opacity, a blend as a
   draw's, isolated or not, knockout or not (PDF transparency groups and
   SVG's group opacity, mix-blend-mode and filters), and an optional mask.
@@ -238,6 +292,13 @@ Structure is nesting in the draw list, not render targets:
   its luminance there, which is the straight colour's times alpha: no pass
   of its own (v0.1.13). Only a transfer table needs one, once.
 - **Patterns** are draw ranges a paint refers to, drawn per lattice cell.
+- **Dependency order.** A mask's or a pattern cell's draws may name only
+  masks and patterns before it in their tables (PDF nests soft masks, and a
+  pattern may paint with a pattern). So the order is topological by
+  construction, no cycle can be written, and a backend compiles every mask
+  and cell in one forward pass, each before the first draw that reads it. A
+  scene that breaks the order is rejected when it's compiled, not drawn
+  wrong.
 
 How a layer materialises is the backend's choice. Both backends start from
 today's offscreen images: `Layer_Stack`'s planning, pooling and group fold
@@ -279,10 +340,20 @@ document, from oglyph. ovg's `Font` and `Text_Layout` become one producer
 of runs, with their outlines kept as paths (or kept shapes) for the font's
 life. Hairline glyph outlines are a stroke mode of the run.
 
+A glyph's transform is exactly what the caller gives. Placing glyphs on a
+sub-pixel grid is the caller's decision, made before it builds the Scene:
+odpdf rounds each glyph's device origin to a quarter pixel for its still
+pages, and a UI or a video that moves text leaves positions as they are.
+How a backend reuses a glyph's coverage is its own business and appears
+nowhere in the Scene: the CPU covers each (outline, linear transform, phase
+to 1/1024 px) once a frame and copies it, as v0.1.15's glyph table does, so
+glyphs a caller put on one grid share an entry.
+
 ### Motion blur
 
-As today: per-draw motion, held in `motions` row for row with the draws that
-have it. Only the GPU backend and its CPU reference implement velocity
+As today: per-draw motion, held in `motions` and named by a draw's
+`Motion_Id` (none: the draw doesn't move), so draws that never move, and the
+structural ones (clips, layers), have no row. Only the GPU backend and its CPU reference implement velocity
 twins.
 
 ### Contract
@@ -300,6 +371,35 @@ twins.
   separate backends, one per thread. Persistent images belong to a backend;
   borrowed views belong to the scene, so separate backends can draw the same
   borrowed pixels.
+- Compiling a scene checks it once, up front: every index in range, every
+  range inside its table, every required handle set, masks and patterns in
+  dependency order, and clip and layer pushes and pops balanced within each
+  draw range on its own (`main`, each mask's, each pattern cell's). A scene that fails is rejected whole with the first
+  offending draw named; past the check, the backends read the tables
+  without bounds checks.
+
+### Correctness
+
+Each part of the contract has a test against exact truth, not against an
+earlier output of ovg or against another renderer:
+
+- coverage: exact areas of fills, strokes and glyph runs (the run's union,
+  not a summed winding), within one 8-bit level, on both backends;
+- aliased edges: the centre rule, and shapes sharing an edge partitioning
+  the pixels with no gap or overlap;
+- composites and blend modes: the Porter-Duff and blend-mode formulas
+  evaluated in floats on known colours, per draw and per layer;
+- masks: alpha and luminance (both weightings) on translucent colours, the
+  backdrop colour and the transfer table, against the formula;
+- groups: isolated and non-isolated, knockout and not, against PDF 11.4's
+  equations;
+- clips: rectangle, path and run, nested, against the product of their
+  exact coverages.
+
+Parity between the backends (`tools/sdlgpu_parity`) is a second check on
+top, not the reference. Where ovg differs from a reference renderer (resvg,
+a PDF juror) and the specification decides, ovg follows the specification
+and the difference is documented, not matched with a path of its own.
 
 ### Lifetimes and threads
 
@@ -308,6 +408,14 @@ twins.
   warm.
 - `render(backend, &scene, target)` reads it and nothing else. Borrowed views
   and caller-kept shapes must live until it returns.
+- The memory a render works in is the backend's, sized when it compiles the
+  scene: layer and mask targets, velocity twins and scratch take their
+  lifetimes (first and last draw that uses them) from that pass, and
+  targets whose lifetimes don't overlap share memory (on the CPU, one block
+  packed as v0.1.15's transient images are; on the GPU, textures reused by
+  size within the render). Blocks kept from render to render grow by at
+  least half again, so a need that varies doesn't reallocate each time.
+  None of this is in the Scene.
 - Recording canvases and `Player` become unnecessary: a Scene *is* a
   recorded frame. Build it on one thread and render it on another, with the
   same ordering rule a player has today. `Shared_Images` becomes persistent
@@ -323,7 +431,8 @@ image calls, `Layer_Stack`) and appends to a Scene instead of a `Frame`:
   deduplicated against the last one;
 - a `Paint` becomes a `Scene_Paint` row, with the current transform's index
   and the global alpha folded in;
-- a scissor becomes a rectangular `Clip_Push`;
+- a scissor becomes a `Clip_Push` of a `Clip_Rect` (a rotated scissor, a
+  `Clip_Path` of its rectangle);
 - `layer_push` and `layer_pop` become `Layer_Push` and `Layer_Pop`, and
   the draws between `layer_mask_begin` and the pop move to a mask range
   outside `main`, which the layer names;
@@ -364,11 +473,17 @@ Parity holds the CPU backend to the result.
 today, per band of rows on the work pool:
 - coverage by its exact quadratic accumulation (`sw_build_pieces`,
   `sw_accumulate_cells`);
-- a solid colour, or an image drawn 1:1 at a whole-pixel offset, written
-  directly (`sw_fill_solid`, `sw_blit_image`), now read from the Scene's
-  paints and transforms rather than matched in the GPU's shape;
+- a solid colour, or an image whose texels land one per pixel at whole
+  pixels, written directly under any coverage (`sw_fill_solid`, and the
+  copy for a rectangle), now read from the Scene's paints and transforms
+  rather than matched in the GPU's shape;
 - every other paint and blend through the GPU's shaders on oksl's JIT;
-- a glyph run as a group, so a translucent run paints once;
+- a glyph run as a group, so a translucent run paints once, each glyph's
+  coverage worked out once a frame per phase (v0.1.15's glyph table);
+- clips as a stack of coverage per band: a push works out its coverage over
+  the band's rows, times the clip under it, and every draw's coverage is
+  multiplied by the top one, in the direct fills and in the shaders' output
+  alike, with no layer and no change to the shaders;
 - each mask rendered once per mask index, and read per draw by the shared
   shaders, as on the GPU.
 
@@ -459,6 +574,16 @@ and parity. Each is released on its own.
    each mask once needs every reader known before the mask is drawn, so it
    waits for the Scene: fireworks draws 4 masks 64 times, about 4 of its
    11.7 ms.
+   After it, on today's layers: v0.1.14 widened the CPU's 1:1 image copy;
+   v0.1.15 added the glyph table, lifetime-shared transient memory and two
+   clip shortcuts (a topographic map at 100 dpi, 15.7 G to 13.0 G
+   instructions; removing its clip layers entirely measured 8.2 G, which is
+   what the Scene's clips are for).
+
+   Next, the Scene itself: its types as above, the up-front check, the
+   exact-truth tests under "Correctness", and `Canvas` building Scenes onto
+   today's machinery, with clips as coverage on the CPU and masks rendered
+   once per index.
 5. **Blend modes per draw, isolation and knockout, and the GPU's new shader
    work for them (see Backends),** with layer planning moved behind the
    boundary. The new image formats (`Luma8` a texture-type branch on both
@@ -481,8 +606,29 @@ and parity. Each is released on its own.
   levels that maps rely on; callers that don't use them (odpdf) leave it
   nil.
 
-## Open question
+- **Every index is a one-based `*_Id` handle** (`Path_Id` through `Lut_Id`,
+  and `Scene_Image_Id`), read as `table[id - 1]`: 0 is none for an optional
+  one and a missing field, rejected by the check, for a required one.
+- **Clips have a rectangle case** (`Clip_Rect`) beside paths and glyph
+  runs.
+- **Masks and patterns are in dependency order**: each names only earlier
+  ones, so compiling is one forward pass and cycles can't be written.
+- **Derived state stays out of the Scene**: image and target lifetimes,
+  glyph-reuse keys and compiled rows are the backend's, worked out when it
+  compiles a scene.
+- **Glyph transforms are exact**: snapping is the caller's choice before it
+  builds the Scene; reuse of coverage is internal to the backend.
+- **Tests are against exact truth** (see "Correctness"), with parity on
+  top; a difference from a reference renderer is documented, never matched
+  by a path of its own.
+
+## Open questions
 
 1. **The `Player` replacement.** onimite records on one thread and plays on
    another today. A Scene handed across threads covers it, but its images
    created on the recording side need the same ordering rule players use.
+2. **Clips by path on the GPU.** Leaning to a coverage texture per clip,
+   bounded to the draws it clips and read by the same fetch as a mask in
+   `shape.frag`: it matches the CPU's exact coverage within parity. A
+   one-bit stencil is aliased without multisampling, and would fail both
+   the exact-coverage clip tests and parity.
