@@ -3,6 +3,8 @@ package ovg
 import "core:math"
 import "core:slice"
 
+import cv "deps:ocurves"
+
 // Offscreen layers for group effects, like Skia's saveLayer: drawing between
 // `layer_push` and `layer_pop` goes to a transparent layer, which is then
 // blurred, clipped by a path, masked and composited onto what was there
@@ -478,6 +480,9 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	if layer_group(c, &f, c.commands[f.content:drawn], bounds) {
 		return
 	}
+	if layer_unclipped(ls, c, &f, depth, drawn, bounds) {
+		return
+	}
 	// The global alpha applied to the draws recorded into the layer; the
 	// filter, clip, mask and composite run at alpha 1, the layer's own
 	// opacity applied once.
@@ -511,6 +516,52 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	mask_read: Maybe(Mask_Luminance)
 	if f.masked && !f.mask_alpha {
 		mask_read = f.mask_luminance
+	}
+	if f.has_clip && !f.masked && f.blend == .Normal {
+		// A clip alone: the clip path filled onto the target with the
+		// content as its paint, one pass (content x clip coverage x
+		// opacity, source-over), cut at the scissor's whole pixels as the
+		// blit would be.
+		alpha := f.opacity * state(c).alpha
+		save(c)
+		state(c).motion = {}
+		set_global_alpha(c, 1)
+		// The clip in device space, where the content's pixels are, cut to
+		// the content's window (whole pixels: past it an image paint would
+		// repeat its edge) and the scissor's whole pixels.
+		reset_transform(c)
+		reset_scissor(c)
+		scissor(c, x, y, f32(w), f32(h))
+		if r, ok := f.scissor.?; ok {
+			intersect_scissor(c, r.x, r.y, r.w, r.h)
+		}
+		path_reset(&ls.scratch)
+		path_append(&ls.scratch, &ls.clips[depth], f.clip_xform)
+		p := paint_image(content, x, y, f32(w), f32(h), 0, alpha)
+		p.fill_rule = f.clip_rule
+		fill_path(c, &ls.scratch, p)
+		restore(c)
+		if f.velocity && c.motion_blur {
+			// The motion composites cut to the clipped content's coverage,
+			// as the composite cut the pixels: the clip filled in its own
+			// layer, the content kept inside it.
+			keep := layer_acquire(ls, c, w, h)
+			layer_target_begin(ls, c, keep, origin = {i32(win.x), i32(win.y)})
+			save(c)
+			reset_scissor(c)
+			set_transform(c, f.clip_xform)
+			cp := paint_color(WHITE)
+			cp.fill_rule = f.clip_rule
+			fill_path(c, &ls.clips[depth], cp)
+			set_composite_operation(c, .Source_In)
+			layer_blit(ls, c, content, x, y, w, h, 1)
+			restore(c)
+			layer_target_end(ls, c)
+			layer_composite_velocity(c, drew, keep, x, y, w, h, f.opacity)
+			layer_release(ls, keep)
+		}
+		layer_release(ls, content)
+		return
 	}
 	if f.has_clip || f.masked {
 		keep := layer_acquire(ls, c, w, h)
@@ -560,6 +611,106 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	}
 	layer_composite_velocity(c, drew, content, x, y, w, h, f.opacity)
 	layer_release(ls, content)
+}
+
+// A layer that only clips, and whose drawing lies inside its clip, changes
+// nothing: its draws go onto the target under it as they were recorded,
+// without the layer (its target switches, clear and composite dropped).
+// That takes the drawn bounds, rounded out to whole pixels, covered by the
+// clip's fill (so each pixel drawn is covered by the clip whole and nothing
+// is cut), opacity 1 and source-over draws only, on the same
+// pixels as the layer's composite (the stand-in spans the canvas at its
+// origin). A map's repeated neatline clip around each of its features is
+// the common case.
+@(private = "file")
+layer_unclipped :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, depth, drawn: int, bounds: Bounds) -> bool {
+	if !f.has_clip || f.masked || f.has_filter || f.blur_px > 0 || f.full || f.blend != .Normal || f.opacity != 1 {
+		return false
+	}
+	for cmd in c.commands[f.content:drawn] {
+		d, is_draw := cmd.type.(Cmd_Draw_Shapes)
+		if !is_draw || cmd.composite_operation != composite_state_from_op(.Source_Over) {
+			return false
+		}
+		_ = d
+	}
+	px := Bounds{math.floor(bounds.minx), math.floor(bounds.miny), math.ceil(bounds.maxx), math.ceil(bounds.maxy)}
+	if r, ok := f.scissor.?; ok && (px.minx < r.x || px.miny < r.y || px.maxx > r.x + r.w || px.maxy > r.y + r.h) {
+		return false
+	}
+	path_reset(&ls.scratch)
+	path_append(&ls.scratch, &ls.clips[depth], f.clip_xform)
+	if !path_covers_rect(&ls.scratch, f.clip_rule, px) {
+		return false
+	}
+	// [mark, content) holds the switch to the stand-in and its clear; the
+	// switch back is the last command.
+	n := drawn - f.content
+	copy(c.commands[f.mark.commands:], c.commands[f.content:drawn])
+	resize(&c.commands, f.mark.commands + n)
+	return true
+}
+
+// Whether the fill of `p` by `rule` covers rectangle `r` whole: no outline
+// enters it (a line by its exact crossing, a curve by its bounds, which can
+// only answer no too often) and its centre is inside (ocurves' winding),
+// so every point of it is.
+@(private = "file")
+path_covers_rect :: proc(p: ^Path, rule: Fill_Rule, r: Bounds) -> bool {
+	enters :: proc "contextless" (q: [4][2]f32, line: bool, r: Bounds) -> bool {
+		lo, hi := cv.cubic_bounds(q)
+		if hi.x < r.minx || lo.x > r.maxx || hi.y < r.miny || lo.y > r.maxy {
+			return false
+		}
+		if !line {
+			return true
+		}
+		// The line from a to b against the rectangle (Liang-Barsky), its
+		// edges counting as inside.
+		a, d := q[0], q[3] - q[0]
+		t0, t1: f32 = 0, 1
+		for k in 0 ..< 4 {
+			pk, qk: f32
+			switch k {
+			case 0: pk, qk = -d.x, a.x - r.minx
+			case 1: pk, qk = d.x, r.maxx - a.x
+			case 2: pk, qk = -d.y, a.y - r.miny
+			case 3: pk, qk = d.y, r.maxy - a.y
+			}
+			if pk == 0 {
+				if qk < 0 {
+					return false
+				}
+				continue
+			}
+			t := qk / pk
+			if pk < 0 {
+				t0 = max(t0, t)
+			} else {
+				t1 = min(t1, t)
+			}
+			if t0 > t1 {
+				return false
+			}
+		}
+		return true
+	}
+	for i in 0 ..< len(p.contours) {
+		it := cv.contour_segments(p, i)
+		for seg in cv.segments_next(&it) {
+			if enters({seg.p[0], seg.p[1], seg.p[2], seg.p[3]}, seg.kind == .Line, r) {
+				return false
+			}
+		}
+		// An open contour closes by a line, as fills close it.
+		if a, b := p.pts[it.at - 1], p.pts[p.contours[i].start]; a != b {
+			if enters({a, a, b, b}, true, r) {
+				return false
+			}
+		}
+	}
+	w, _ := cv.contours_winding(p, 0, len(p.contours), {f64(r.minx + r.maxx) / 2, f64(r.miny + r.maxy) / 2})
+	return cv.fill_inside(w, rule)
 }
 
 // The whole pixels a scissor covers, in drawing coordinates (a rotated
@@ -1052,8 +1203,11 @@ layer_bucket :: proc "contextless" (n, limit: u32) -> u32 {
 // the pool, one not released after release number `released_by`.
 layer_acquire :: proc(ls: ^Layer_Stack, c: ^Canvas, w, h: u32, released_by := max(u32), format: Maybe(Pixel_Format) = nil) -> Image_Id {
 	format := format.? or_else ls.format
+	// Reused within the frame only where that is how images share memory
+	// (Backend.transient_by_lifetime).
+	again := !c.backend.transient_by_lifetime
 	for &l in ls.pool {
-		if !l.in_use && l.w == w && l.h == h && l.format == format && l.released <= released_by {
+		if !l.in_use && l.w == w && l.h == h && l.format == format && l.released <= released_by && (again || l.last_used != ls.frame) {
 			l.in_use = true
 			l.last_used = ls.frame
 			return l.id

@@ -420,6 +420,13 @@ Backend :: struct {
 	// Images are read from memory as stored (`Backend_Image.pixels`): a
 	// player borrows stable shared pixels instead of copying them.
 	memory_images: bool,
+	// `.Transient` images whose uses in a render don't overlap share
+	// memory (the software backend lends each its bytes by lifetime), so
+	// a pool of them (the layer stack's) holds a fresh image for each use
+	// in a frame rather than handing one back out, which would join its
+	// uses into one lifetime. Without it each image is its own memory (a
+	// GPU texture), and reusing one within the frame is what shares it.
+	transient_by_lifetime: bool,
 	// Custom programs (program.odin); nil when unsupported.
 	create_program: proc(data: rawptr, desc: Program_Desc) -> (Backend_Program, Error),
 	delete_program: proc(data: rawptr, program: Backend_Program),

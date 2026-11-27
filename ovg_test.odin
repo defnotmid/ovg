@@ -2154,6 +2154,23 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 			}
 		}
 
+		// Curved paths filled with a 1:1 image (a clip layer's one-pass
+		// composite): straight and premultiplied, flipped, a translucent
+		// tint, under a scissor.
+		for img, j in ([3]Image_Id{img_raw, img_pre_flip, img_pre}) {
+			save(c)
+			if j == 2 {
+				scissor(c, 44.5, 66.25, 13, 11.5)
+			}
+			path_reset(&p)
+			path_circle(&p, f32(j) * 20 + 9.5, 72.25, 7.3)
+			tint := rgba(255, 255, 255, 255) if j != 1 else rgba(230, 210, 255, 170)
+			ip := paint_image_tint(img, f32(j) * 20 + 2, 64, 16, 16, 0, tint)
+			ip.fill_rule = .Even_Odd if j == 1 else .Non_Zero
+			fill_path(c, &p, ip)
+			restore(c)
+		}
+
 		flush(c)
 		compiled_inside = s.backend.programs[.Shape_Inside][0].module != nil
 
@@ -2430,4 +2447,109 @@ test_layer_pool_trim :: proc(t: ^testing.T) {
 	frame(&ls, c, &p, 0, 0, 0, 0)
 	frame(&ls, c, &p, 0, 0, 0, 0)
 	testing.expectf(t, len(ls.pool) == 0, "%d images kept after three frames with no layer", len(ls.pool))
+}
+
+// The frame's glyph table: a kept shape's draws at one phase (to 1/1024 px)
+// are covered once and copied, landing within a level of the shader's
+// exact coverage (no fast paths: neither table nor solid fill). A caller
+// placing glyphs on a quarter-pixel grid gets one entry per phase although
+// the shape's origin, folded into each transform, leaves noise in its last
+// bits.
+@(test)
+test_sw_glyph_table :: proc(t: ^testing.T) {
+	W, H :: 160, 96
+	// Returns the table's entries; `exact` draws through the shader.
+	render :: proc(offsets: []Vec2, exact: bool, out: []u8) -> int {
+		s: Sw
+		sw_open(&s, W, H)
+		defer sw_close(&s)
+		s.backend.no_fast_paths = exact
+		c := &s.canvas
+		p: Path
+		path_init(&p)
+		defer path_destroy(&p)
+		path_move_to(&p, 0, 0)
+		path_quad_to(&p, 9, -3, 11, 7)
+		path_line_to(&p, 6, 13.5)
+		path_quad_to(&p, 1, 9, 3.5, 5)
+		path_close(&p)
+		path_rect(&p, 2.2, 1.3, 1.1, 9.7)
+		shape, _ := shape_from_path(&p)
+		defer shape_destroy(&shape)
+		clear_rect(c, 0, 0, W, H, rgb(250, 248, 240))
+		for o in offsets {
+			save(c)
+			translate(c, o.x, o.y)
+			fill_shape(c, &shape, paint_color(rgba(20, 30, 60, 230)))
+			restore(c)
+		}
+		flush(c)
+		copy(out, s.backend.pixels)
+		return len(s.backend.glyph_rects)
+	}
+	worst :: proc(a, b: []u8) -> int {
+		w := 0
+		for i in 0 ..< len(a) {
+			w = max(w, abs(int(a[i]) - int(b[i])))
+		}
+		return w
+	}
+	quarters, anywhere: [dynamic]Vec2
+	defer delete(quarters)
+	defer delete(anywhere)
+	for k in 0 ..< 60 {
+		q := Vec2{f32(k % 10) * 15.25 + 2, f32(k / 10) * 15.5 + 1.75}
+		append(&quarters, q)
+		append(&anywhere, q + {f32(k % 7) * 0.061, f32(k % 5) * 0.047})
+	}
+	a := make([]u8, W * H * 4)
+	defer delete(a)
+	b := make([]u8, W * H * 4)
+	defer delete(b)
+	for offs in ([2][]Vec2{quarters[:], anywhere[:]}) {
+		render(offs, false, a)
+		render(offs, true, b)
+		testing.expectf(t, worst(a, b) <= 1, "drawn from the table, %d levels off exact coverage", worst(a, b))
+	}
+	// Quarter-pixel origins: 4 phases in x, 2 in y.
+	entries := render(quarters[:], false, a)
+	testing.expectf(t, entries >= 1 && entries <= 8, "60 draws at 8 phases made %d entries", entries)
+}
+
+// The software backend lends transient images their bytes by lifetime:
+// layers drawn one after another, each of its own size, share the block,
+// which holds what is live at once rather than every layer the frame made.
+@(test)
+test_sw_transient_by_lifetime :: proc(t: ^testing.T) {
+	W, H :: 256, 256
+	s: Sw
+	sw_open(&s, W, H)
+	defer sw_close(&s)
+	c := &s.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	layer_stack_begin(&ls, c, W, H)
+	clear_rect(c, 0, 0, W, H, rgb(255, 255, 255))
+	for k in 0 ..< 24 {
+		layer_push(&ls, c, {opacity = 0.5, blur = 1.5})
+		path_reset(&p)
+		path_rect(&p, f32(k * 9), f32(k * 7), 20 + f32(k) * 7, 16 + f32(k) * 5)
+		fill_path(c, &p, paint_color(rgb(200, 90, 30)))
+		layer_pop(&ls, c)
+	}
+	layer_stack_end(&ls, c)
+	flush(c)
+	apart, largest := 0, 0
+	for &slot in c.images.entries.slots {
+		if e := &slot.value; slot.occupied && .Transient in e.info.flags {
+			n := int(e.info.width * e.info.height * bytes_per_pixel(e.info.format))
+			apart += n
+			largest = max(largest, n)
+		}
+	}
+	testing.expectf(t, len(s.backend.transient) < apart / 4, "the block holds %d bytes of %d apart", len(s.backend.transient), apart)
+	testing.expectf(t, len(s.backend.transient) >= largest, "the block (%d) is smaller than its largest image (%d)", len(s.backend.transient), largest)
 }

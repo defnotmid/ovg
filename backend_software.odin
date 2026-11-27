@@ -32,9 +32,37 @@ Software_Backend :: struct {
 	binned:    [dynamic]Sw_Binned,
 	starts:    [dynamic]u32,
 	bounds:    [dynamic]Bounds,
-	// `.Transient` images' pixels, one block carved in order for a render
-	// (sw_lend) and kept at the largest render's size.
+	// The frame's glyph table (sw_glyph_assign): per instance its entry
+	// (SW_NO_GLYPH for none) and the whole-pixel origin it lands at; per
+	// entry its key, its rect (relative to the origin), the instance and
+	// phase it is made from and where its accumulation rows start in
+	// `glyph_acc` (stride rect width + 1); `glyph_slots` finds an entry by
+	// key (entry + 1, 0 empty, zeroed once a frame has a draw it could
+	// take). Nothing in it outlives the frame.
+	glyph_of:        [dynamic]u32,
+	glyph_org:       [dynamic][2]i32,
+	glyph_keys:      [dynamic]Sw_Glyph_Key,
+	glyph_slots:     [dynamic]u32,
+	glyph_slots_set: bool,
+	glyph_rects:     [dynamic][4]i32,
+	glyph_src:       [dynamic]u32,
+	glyph_phase:     [dynamic][2]f32,
+	glyph_at:        [dynamic]u32,
+	glyph_acc:       [dynamic]f32,
+	// Entries accumulated so far (sw_glyph_fill).
+	glyph_filled:    int,
+	// `.Transient` images' pixels, one block for a render (sw_lend) and kept
+	// at the largest render's size: images whose uses in the frame don't
+	// overlap share bytes, so it holds what is live at once. Per image slot
+	// its first and last command and its offset; the images by first use,
+	// those still live, and the free runs (offset, size) by offset.
 	transient: []u8,
+	lend_use:   [dynamic][2]int,
+	lend_size:  [dynamic]int,
+	lend_at:    [dynamic]int,
+	lend_order: [dynamic][2]int,
+	lend_live:  [dynamic]int,
+	lend_free:  [dynamic][2]int,
 	// The caller's pool a frame's row bands run on (oicut's Work_Pool: one
 	// band a range); nil runs them all on the calling thread. A band takes
 	// its shading memory from `lanes_free`.
@@ -151,6 +179,21 @@ software_backend_init :: proc(b: ^Software_Backend, allocator := context.allocat
 	b.binned = make([dynamic]Sw_Binned, allocator)
 	b.starts = make([dynamic]u32, allocator)
 	b.bounds = make([dynamic]Bounds, allocator)
+	b.glyph_of = make([dynamic]u32, allocator)
+	b.lend_use = make([dynamic][2]int, allocator)
+	b.lend_size = make([dynamic]int, allocator)
+	b.lend_at = make([dynamic]int, allocator)
+	b.lend_order = make([dynamic][2]int, allocator)
+	b.lend_live = make([dynamic]int, allocator)
+	b.lend_free = make([dynamic][2]int, allocator)
+	b.glyph_org = make([dynamic][2]i32, allocator)
+	b.glyph_keys = make([dynamic]Sw_Glyph_Key, allocator)
+	b.glyph_slots = make([dynamic]u32, allocator)
+	b.glyph_rects = make([dynamic][4]i32, allocator)
+	b.glyph_src = make([dynamic]u32, allocator)
+	b.glyph_phase = make([dynamic][2]f32, allocator)
+	b.glyph_at = make([dynamic]u32, allocator)
+	b.glyph_acc = make([dynamic]f32, allocator)
 	b.twin_at = make([dynamic]int, allocator)
 	b.velocity = make([dynamic][2]f32, allocator)
 	b.nearness = make([dynamic]f32, allocator)
@@ -205,6 +248,21 @@ software_backend_destroy :: proc(b: ^Software_Backend) {
 	delete(b.binned)
 	delete(b.starts)
 	delete(b.bounds)
+	delete(b.glyph_of)
+	delete(b.lend_use)
+	delete(b.lend_size)
+	delete(b.lend_at)
+	delete(b.lend_order)
+	delete(b.lend_live)
+	delete(b.lend_free)
+	delete(b.glyph_org)
+	delete(b.glyph_keys)
+	delete(b.glyph_slots)
+	delete(b.glyph_rects)
+	delete(b.glyph_src)
+	delete(b.glyph_phase)
+	delete(b.glyph_at)
+	delete(b.glyph_acc)
 	delete(b.transient, b.allocator)
 	delete(b.twins, b.allocator)
 	delete(b.twin_at)
@@ -253,6 +311,7 @@ software_backend :: proc(b: ^Software_Backend) -> Backend {
 		screenshot = sw_screenshot,
 		read_image = sw_read_image,
 		memory_images = true,
+		transient_by_lifetime = true,
 		create_program = sw_create_program,
 		delete_program = sw_delete_program,
 	}
@@ -420,7 +479,7 @@ sw_active_target :: proc(b: ^Software_Backend, images: ^Image_Store) -> (Sw_Targ
 @(private = "file")
 sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, frame: Frame) {
 	b := (^Software_Backend)(data)
-	sw_lend(b, images)
+	sw_lend(b, images, frame)
 	sw_twins(b, images, frame)
 	b.target = {}
 	b.origin = {}
@@ -429,6 +488,7 @@ sw_render :: proc(data: rawptr, output: Render_Output, images: ^Image_Store, fra
 	if len(b.bounds) < len(frame.shapes) {
 		resize(&b.bounds, len(frame.shapes))
 	}
+	sw_glyph_frame(b, len(frame.shapes))
 	// The paints and motions as the shaders read them, once a frame.
 	resize(&b.paint_rows, len(frame.paints))
 	for p, i in frame.paints {
@@ -480,25 +540,50 @@ sw_twins :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame) {
 	if !frame.motion {
 		return
 	}
-	resize(&b.twin_at, len(images.entries.slots))
-	for &at in b.twin_at {
-		at = -1
+	// Each image's twin, from the first command that draws into the image
+	// with velocity to the last that does or that composites its motion,
+	// shares the block with twins whose uses don't overlap it; the
+	// screen's comes first, live throughout.
+	slots := images.entries.slots[:]
+	resize(&b.lend_use, len(slots))
+	resize(&b.lend_size, len(slots))
+	for &u in b.lend_use {
+		u = {-1, -1}
 	}
-	total := int(b.width * b.height)
-	for cmd in frame.commands {
-		rt, is_target := cmd.type.(Cmd_Set_Render_Target)
-		id, is_image := rt.target.(Image_Id)
-		if !is_target || !is_image || !rt.velocity || int(id.key.idx) >= len(b.twin_at) || b.twin_at[id.key.idx] >= 0 {
-			continue
+	slice.zero(b.lend_size[:])
+	use :: proc(b: ^Software_Backend, slots: []Slot(Image_Entry), id: Image_Id, at: int) {
+		i := int(id.key.idx)
+		if !image_id_valid(id) || i >= len(slots) || !slots[i].occupied || slots[i].gen != id.key.gen {
+			return
 		}
-		if e := image_store_get(images, id); e != nil {
-			b.twin_at[id.key.idx] = total
-			total += int(e.info.width * e.info.height)
+		u := &b.lend_use[i]
+		if u[0] < 0 {
+			u[0] = at
 		}
+		u[1] = at
+		b.lend_size[i] = int(slots[i].value.info.width * slots[i].value.info.height)
+	}
+	for cmd, k in frame.commands {
+		#partial switch c in cmd.type {
+		case Cmd_Set_Render_Target:
+			if id, is_image := c.target.(Image_Id); is_image && c.velocity {
+				use(b, slots, id, k)
+			}
+		case Cmd_Composite_Velocity:
+			// Only an image drawn into with velocity has a twin to read.
+			if i := int(c.source.key.idx); i < len(b.lend_use) && b.lend_use[i][0] >= 0 {
+				use(b, slots, c.source, k)
+			}
+		}
+	}
+	screen := int(b.width * b.height)
+	total := screen + sw_pack(b, b.lend_use[:], b.lend_size[:], &b.twin_at)
+	for u, i in b.lend_use {
+		b.twin_at[i] = screen + b.twin_at[i] if u[0] >= 0 else -1
 	}
 	if len(b.twins) < total {
 		delete(b.twins, b.allocator)
-		b.twins, _ = make([][4]f32, total, b.allocator)
+		b.twins, _ = make([][4]f32, sw_grown(len(b.twins), total), b.allocator)
 	}
 	if len(b.twins) < total {
 		clear(&b.twin_at)
@@ -566,24 +651,169 @@ sw_resolve_velocity :: proc(b: ^Software_Backend) {
 // Out of memory leaves them without pixels: what draws into one or samples
 // it is skipped.
 @(private = "file")
-sw_lend :: proc(b: ^Software_Backend, images: ^Image_Store) {
-	total := 0
-	for &slot in images.entries.slots {
-		if e := &slot.value; slot.occupied && sw_transient(e) {
-			total += sw_span(e.info)
+sw_lend :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame) {
+	slots := images.entries.slots[:]
+	resize(&b.lend_use, len(slots))
+	for &u in b.lend_use {
+		u = {-1, -1}
+	}
+	// Each transient image's first and last command.
+	use :: proc(b: ^Software_Backend, slots: []Slot(Image_Entry), id: Image_Id, at: int) {
+		i := int(id.key.idx)
+		if !image_id_valid(id) || i >= len(slots) || !slots[i].occupied || slots[i].gen != id.key.gen || !sw_transient(&slots[i].value) {
+			return
+		}
+		u := &b.lend_use[i]
+		if u[0] < 0 {
+			u[0] = at
+		}
+		u[1] = at
+	}
+	externals := false
+	for cmd, k in frame.commands {
+		use(b, slots, cmd.image, k)
+		switch c in cmd.type {
+		case Cmd_Set_Render_Target:
+			if id, ok := c.target.(Image_Id); ok {
+				use(b, slots, id, k)
+			}
+		case Cmd_Composite_Velocity:
+			use(b, slots, c.source, k)
+			use(b, slots, c.alpha, k)
+		case Cmd_Filter_Image:
+			use(b, slots, c.target_image, k)
+			#partial switch f in frame.filters[c.filter] {
+			case Blend:
+				use(b, slots, f.backdrop, k)
+			case Composite:
+				use(b, slots, f.backdrop, k)
+			case Component_Transfer:
+				use(b, slots, f.lut, k)
+			case Displacement_Map:
+				use(b, slots, f.displacement, k)
+			case Bloom_Add:
+				use(b, slots, f.glow, k)
+			}
+		case Cmd_Run_Program:
+			r := frame.runs[c.run]
+			use(b, slots, r.target, k)
+			for ch in r.channels {
+				use(b, slots, ch, k)
+			}
+		case Cmd_Run_External:
+			externals = true
+		case Cmd_Clear_Rect, Cmd_Draw_Shapes:
 		}
 	}
+	// External work may read or write any image: whatever is used before
+	// one stays live through it, and whatever is used after, from it.
+	if externals {
+		for cmd, k in frame.commands {
+			if _, ok := cmd.type.(Cmd_Run_External); !ok {
+				continue
+			}
+			for &u in b.lend_use {
+				if u[0] >= 0 {
+					u[0], u[1] = min(u[0], k), max(u[1], k)
+				}
+			}
+		}
+	}
+	resize(&b.lend_size, len(slots))
+	for &slot, i in slots {
+		b.lend_size[i] = sw_span(slot.value.info) if slot.occupied && sw_transient(&slot.value) else 0
+	}
+	total := sw_pack(b, b.lend_use[:], b.lend_size[:], &b.lend_at)
 	if len(b.transient) < total {
 		delete(b.transient, b.allocator)
-		b.transient, _ = sw_make_pixels(total, b.allocator)
+		b.transient, _ = sw_make_pixels(sw_grown(len(b.transient), total), b.allocator)
 	}
-	at := 0
-	for &slot in images.entries.slots {
+	for &slot, i in slots {
 		if e := &slot.value; slot.occupied && sw_transient(e) {
-			n := int(e.info.width * e.info.height * bytes_per_pixel(e.info.format))
-			e.image.pixels = b.transient[at:][:n] if len(b.transient) >= total else nil
-			at += sw_span(e.info)
+			e.image.pixels = nil
+			if b.lend_use[i][0] >= 0 && len(b.transient) >= total {
+				n := int(e.info.width * e.info.height * bytes_per_pixel(e.info.format))
+				e.image.pixels = b.transient[b.lend_at[i]:][:n]
+			}
 		}
+	}
+}
+
+// Places each slot used (`uses[i][0] >= 0`) at an offset of one block, in
+// order of first use: the smallest free run its size fits (what slots whose
+// last use has passed gave back, adjacent runs merged), else the block's
+// end. Slots whose uses don't overlap share room, so the block, whose size
+// it returns, holds what is live at once.
+@(private = "file")
+sw_pack :: proc(b: ^Software_Backend, uses: [][2]int, sizes: []int, at: ^[dynamic]int) -> int {
+	clear(&b.lend_order)
+	for u, i in uses {
+		if u[0] >= 0 {
+			append(&b.lend_order, [2]int{u[0], i})
+		}
+	}
+	slice.sort_by(b.lend_order[:], proc(x, y: [2]int) -> bool {
+		return x[0] < y[0] || x[0] == y[0] && x[1] < y[1]
+	})
+	resize(at, len(uses))
+	clear(&b.lend_free)
+	clear(&b.lend_live)
+	total := 0
+	for o in b.lend_order {
+		first, i := o[0], o[1]
+		// Give back the runs of slots whose last use came before this one.
+		for k := 0; k < len(b.lend_live); {
+			l := b.lend_live[k]
+			if uses[l][1] >= first {
+				k += 1
+				continue
+			}
+			sw_lend_free(&b.lend_free, at[l], sizes[l])
+			unordered_remove(&b.lend_live, k)
+		}
+		n := sizes[i]
+		best := -1
+		for f, k in b.lend_free {
+			if f[1] >= n && (best < 0 || f[1] < b.lend_free[best][1]) {
+				best = k
+			}
+		}
+		if best >= 0 {
+			at[i] = b.lend_free[best][0]
+			b.lend_free[best] += {n, -n}
+			if b.lend_free[best][1] == 0 {
+				ordered_remove(&b.lend_free, best)
+			}
+		} else if len(b.lend_free) > 0 && slice.last(b.lend_free[:])[0] + slice.last(b.lend_free[:])[1] == total {
+			// The free run at the block's end grows to fit.
+			f := pop(&b.lend_free)
+			at[i] = f[0]
+			total = f[0] + n
+		} else {
+			at[i] = total
+			total += n
+		}
+		append(&b.lend_live, i)
+	}
+	return total
+}
+
+// Returns [at, at + n) to the free runs (sorted by offset), merged with the
+// runs it touches.
+@(private = "file")
+sw_lend_free :: proc(free: ^[dynamic][2]int, at, n: int) {
+	k := 0
+	for k < len(free) && free[k][0] < at {
+		k += 1
+	}
+	inject_at(free, k, [2]int{at, n})
+	if k + 1 < len(free) && free[k][0] + free[k][1] == free[k + 1][0] {
+		free[k][1] += free[k + 1][1]
+		ordered_remove(free, k + 1)
+	}
+	if k > 0 && free[k - 1][0] + free[k - 1][1] == free[k][0] {
+		free[k - 1][1] += free[k][1]
+		ordered_remove(free, k)
 	}
 }
 
@@ -686,11 +916,16 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 				for i in c.instances.start ..< c.instances.start + c.instances.count {
 					if !fill {
 						b.bounds[i] = instance_bounds(frame.shapes[i], frame.shape_words)
+						if cmd.composite_operation == composite_state_from_op(.Source_Over) {
+							b.bounds[i] = sw_scissor_cut(&b.paint_rows[frame.shapes[i].paint], b.bounds[i])
+						}
 						t := frame.shapes[i].transform
-						if c.group == 0 {
+						if c.group == 0 && sw_glyph_assign(b, frame, cmd, target, i) {
+							// Drawn by sw_fill_solid from the glyph table.
+						} else if c.group == 0 {
 							s := frame.shapes[i]
 							if !sw_can_blit_image(b, images, cmd, target, run.twin, i, s, frame.shape_words) {
-								fill_solid := s.hairline == 0 && s.marker == .None && s.widen == 0 && s.edge != .Aliased && sw_can_fill_solid(b, cmd, target, s)
+								fill_solid := s.hairline == 0 && s.marker == .None && s.widen == 0 && s.edge != .Aliased && sw_can_fill_solid(b, images, cmd, target, s)
 								if !fill_solid {
 									needs += {.Shape_Box if t[1] == 0 && t[2] == 0 else .Shape}
 									if s.hairline == 0 && s.marker == .None && s.widen == 0 {
@@ -713,6 +948,7 @@ sw_draw_run :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame, cm
 	sw_programs_need(b, needs, int(run.twin.pixels != nil))
 	sw_build_groups(b, frame, cmds)
 	sw_build_pieces(&run, bands)
+	sw_glyph_fill(b, frame)
 	sw_bands(b, rows, &run, sw_run_band)
 }
 
@@ -883,7 +1119,7 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 			if px[0] >= px[2] || px[1] >= px[3] {
 				continue
 			}
-			if sw_fill_solid(lanes, &r, b, it.inst, inst, px, band) {
+			if sw_fill_solid(lanes, &r, b, run.images, cmd, it.inst, inst, px, band) {
 				continue
 			}
 			words := instance_words(inst, frame.shape_words)
@@ -1678,6 +1914,9 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 		for i in c.instances.start ..< c.instances.start + c.instances.count {
 			b.piece_at[i] = max(u32)
 			b.grid_at[i] = {}
+			if b.glyph_of[i] != SW_NO_GLYPH {
+				continue
+			}
 			inst := frame.shapes[i]
 			words := instance_words(inst, frame.shape_words)
 			ib := b.bounds[i]
@@ -1711,7 +1950,7 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 			base := u32(len(b.piece_list))
 			b.piece_at[i] = u32(at)
 			b.piece_band0[i] = i32(band0)
-			resize(&b.piece_rows, at + nb + 1)
+			sw_grow(&b.piece_rows, at + nb + 1)
 			rows := b.piece_rows[at:]
 			slice.zero(rows)
 			// Count each band's pieces into rows[j + 1], prefix-sum from `base`
@@ -1723,7 +1962,7 @@ sw_build_pieces :: proc(run: ^Sw_Run, bands: int) {
 					for j in 0 ..< nb {
 						rows[j + 1] += rows[j]
 					}
-					resize(&b.piece_list, int(rows[nb]))
+					sw_grow(&b.piece_list, int(rows[nb]))
 					for j := nb; j > 0; j -= 1 {
 						rows[j] = rows[j - 1]
 					}
@@ -1764,7 +2003,7 @@ sw_piece_count :: proc "contextless" (words: []u32) -> int {
 // coordinates, split where y turns into pieces on [0, 1]. Nearly-flat curves
 // collapse to straight segments (a == 0) so accumulation skips solving roots.
 @(private = "file")
-sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words: []u32) {
+sw_append_pieces :: proc(pieces: ^$T, inst: Shape_Instance, words: []u32) {
 	t := inst.transform
 	first := int(words[6])
 	for at := first; at < first + 6 * sw_piece_count(words); at += 6 {
@@ -1776,7 +2015,7 @@ sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words
 		// Max chord deviation of P(t) = a t^2 + b t + c on [0, 1] is |a|/4.
 		if max(abs(a.x), abs(a.y)) <= 1.0 / 256 {
 			if p1.y != p3.y {
-				append(pieces, Sw_Piece{{}, p3 - p1, p1})
+				sw_piece_out(pieces, Sw_Piece{{}, p3 - p1, p1})
 			}
 			continue
 		}
@@ -1790,18 +2029,40 @@ sw_append_pieces :: proc(pieces: ^[dynamic]Sw_Piece, inst: Shape_Instance, words
 				q0.y = pm.y
 				q1.y = pm.y
 				if p1.y != pm.y {
-					append(pieces, Sw_Piece{p1 - 2 * q0 + pm, 2 * (q0 - p1), p1})
+					sw_piece_out(pieces, Sw_Piece{p1 - 2 * q0 + pm, 2 * (q0 - p1), p1})
 				}
 				if pm.y != p3.y {
-					append(pieces, Sw_Piece{pm - 2 * q1 + p3, 2 * (q1 - pm), pm})
+					sw_piece_out(pieces, Sw_Piece{pm - 2 * q1 + p3, 2 * (q1 - pm), pm})
 				}
 				continue
 			}
 		}
 		if p1.y != p3.y {
-			append(pieces, Sw_Piece{a, b, p1})
+			sw_piece_out(pieces, Sw_Piece{a, b, p1})
 		}
 	}
+}
+
+// Where sw_append_pieces puts each piece: a list, or straight into a grid's
+// accumulation (a glyph table entry's).
+@(private = "file")
+Sw_Piece_Grid :: struct {
+	cov:            []f32,
+	gx, gy:         f32,
+	w, h, stride:   int,
+}
+
+@(private = "file")
+sw_piece_out :: proc{sw_piece_append, sw_piece_accumulate}
+
+@(private = "file")
+sw_piece_append :: #force_inline proc(pieces: ^[dynamic]Sw_Piece, p: Sw_Piece) {
+	append(pieces, p)
+}
+
+@(private = "file")
+sw_piece_accumulate :: #force_inline proc(g: ^Sw_Piece_Grid, p: Sw_Piece) {
+	sw_accumulate_piece(g.cov, p, g.gx, g.gy, g.w, g.h, g.stride)
 }
 
 // Accumulates a straight segment from (xa, sy0) to (xb, sy1) within one pixel row.
@@ -1909,18 +2170,26 @@ sw_accumulate_pieces :: proc(L: ^Sw_Lanes, b: ^Software_Backend, list: []u32, gx
 	slice.zero(L.cov[:])
 	fgx, fgy := f32(gx), f32(gy)
 	for k in list {
-		p := b.pieces[k]
+		sw_accumulate_piece(L.cov[:], b.pieces[k], fgx, fgy, w, h, stride)
+	}
+}
+
+// A piece's signed areas added to `cov` (rows of `stride`, a grid of w x h
+// cells at gx, gy).
+@(private = "file")
+sw_accumulate_piece :: #force_inline proc(cov: []f32, p: Sw_Piece, fgx, fgy: f32, w, h, stride: int) {
+	{
 		a := p.a
 		bb := p.b
 		c := p.c - {fgx, fgy}
 		if a.x == 0 && a.y == 0 {
-			sw_accumulate_line(L.cov[:], c.x, c.y, bb.x, bb.y, w, h, stride)
-			continue
+			sw_accumulate_line(cov, c.x, c.y, bb.x, bb.y, w, h, stride)
+			return
 		}
 		ya, yb := c.y, a.y + bb.y + c.y
 		ylo, yhi := max(min(ya, yb), 0), min(max(ya, yb), f32(h))
 		if ylo >= yhi {
-			continue
+			return
 		}
 		r0, r1 := sw_floor(ylo), sw_ceil(yhi)
 		inc := yb > ya
@@ -1944,7 +2213,7 @@ sw_accumulate_pieces :: proc(L: ^Sw_Lanes, b: ^Software_Backend, list: []u32, gx
 			if ta >= tb {
 				continue
 			}
-			acc := L.cov[int(row) * stride:][:stride]
+			acc := cov[int(row) * stride:][:stride]
 			if has_x_turn && sx_turn > ta && sx_turn < tb {
 				xm := sw_quad_at(a.x, bb.x, c.x, sx_turn)
 				ym := sw_quad_at(a.y, bb.y, c.y, sx_turn)
@@ -2044,35 +2313,11 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 		return
 	}
 	pr := &b.paint_rows[inst.paint]
-	// A luminance read's tex_type picks its weights; an image's is 0 for
-	// premultiplied texels and 1 for straight ones.
-	luminance := pr[10][3] == f32(Shader_Type.Fill_Image_Luminance)
-	image := pr[10][3] == f32(Shader_Type.Fill_Image) && (pr[10][2] == 0 || pr[10][2] == 1)
-	if !image && !luminance || pr[10][0] < 1 {
+	tex, ox_i, oy_i, tflip, tstraight, _, map_ok := sw_texel_map(images, cmd, pr, true)
+	if !map_ok {
 		return
 	}
-	straight = image && pr[10][2] == 1
-	if pr[0][1] != 0 || pr[1][0] != 0 {
-		return
-	}
-	if pr[3][0] != 1 || pr[3][1] != 0 || pr[4][0] != 0 || (pr[4][1] != 1 && pr[4][1] != -1) {
-		return
-	}
-	flip = pr[4][1] == -1
-	tex, tex_ok := lookup_texture(images, cmd.image)
-	if !tex_ok || tex.format != .RGBA8 || .Repeat_X in tex.flags || .Repeat_Y in tex.flags {
-		return
-	}
-	if pr[9][0] != f32(tex.width) || pr[9][1] != f32(tex.height) {
-		return
-	}
-	// A texel's position is the pixel's, offset by pr[5] (y negated first
-	// when flipped).
-	ox_f, oy_f := -pr[5][0], pr[5][1] if flip else -pr[5][1]
-	ox_i, oy_i := i32(math.round(ox_f)), i32(math.round(oy_f))
-	if abs(f32(ox_i) - ox_f) > 1e-4 || abs(f32(oy_i) - oy_f) > 1e-4 {
-		return
-	}
+	flip, straight = tflip, tstraight
 	if sw_piece_count(words) != 4 {
 		return
 	}
@@ -2133,6 +2378,44 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 		return
 	}
 	return tex, bop, ix0, iy0, ix1, iy1, ox_i, oy_i, flip, straight, true
+}
+
+// An image paint whose texels land one per pixel at whole pixels: its
+// RGBA8 texture, the offset a pixel's texel is at (row y - oy, or oy - 1 - y
+// flipped), and whether texels are straight (premultiplied as the shader's
+// apply_tt does) or read as luminance (`luminance_ok`).
+@(private = "file")
+sw_texel_map :: proc(images: ^Image_Store, cmd: Command, pr: ^[14][4]f32, luminance_ok: bool) -> (tex: Sw_Texture, ox, oy: i32, flip, straight, luminance, ok: bool) {
+	// A luminance read's tex_type picks its weights; an image's is 0 for
+	// premultiplied texels and 1 for straight ones.
+	luminance = luminance_ok && pr[10][3] == f32(Shader_Type.Fill_Image_Luminance)
+	image := pr[10][3] == f32(Shader_Type.Fill_Image) && (pr[10][2] == 0 || pr[10][2] == 1)
+	if !image && !luminance || pr[10][0] < 1 {
+		return
+	}
+	straight = image && pr[10][2] == 1
+	if pr[0][1] != 0 || pr[1][0] != 0 {
+		return
+	}
+	if pr[3][0] != 1 || pr[3][1] != 0 || pr[4][0] != 0 || (pr[4][1] != 1 && pr[4][1] != -1) {
+		return
+	}
+	flip = pr[4][1] == -1
+	t, tex_ok := lookup_texture(images, cmd.image)
+	if !tex_ok || t.format != .RGBA8 || .Repeat_X in t.flags || .Repeat_Y in t.flags {
+		return
+	}
+	if pr[9][0] != f32(t.width) || pr[9][1] != f32(t.height) {
+		return
+	}
+	// A texel's position is the pixel's, offset by pr[5] (y negated first
+	// when flipped).
+	ox_f, oy_f := -pr[5][0], pr[5][1] if flip else -pr[5][1]
+	ox, oy = i32(math.round(ox_f)), i32(math.round(oy_f))
+	if abs(f32(ox) - ox_f) > 1e-4 || abs(f32(oy) - oy_f) > 1e-4 {
+		return
+	}
+	return t, ox, oy, flip, straight, luminance, true
 }
 
 @(private = "file")
@@ -2367,7 +2650,7 @@ sw_solid_blend :: proc "contextless" (blend: Composite_Operation_State) -> (ok: 
 }
 
 @(private = "file")
-sw_can_fill_solid :: proc "contextless" (b: ^Software_Backend, cmd: Command, target: Sw_Target, inst: Shape_Instance) -> bool {
+sw_can_fill_solid :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, target: Sw_Target, inst: Shape_Instance) -> bool {
 	if b.no_fast_paths || target.format != .RGBA8 || target.pixels == nil {
 		return false
 	}
@@ -2379,7 +2662,12 @@ sw_can_fill_solid :: proc "contextless" (b: ^Software_Backend, cmd: Command, tar
 		return false
 	}
 	pr := &b.paint_rows[inst.paint]
-	return pr[10][3] == f32(Shader_Type.Fill_Color) && pr[0][1] == 0 && pr[1][0] == 0
+	if pr[10][3] == f32(Shader_Type.Fill_Color) {
+		return pr[0][1] == 0 && pr[1][0] == 0
+	}
+	// A 1:1 image under source-over: its texels give each pixel's colour.
+	_, _, _, _, _, _, ok := sw_texel_map(images, cmd, pr, false)
+	return ok && cmd.composite_operation == composite_state_from_op(.Source_Over)
 }
 
 // Fast path for solid-colour, axis-aligned-scissored fills on RGBA8 targets
@@ -2387,11 +2675,12 @@ sw_can_fill_solid :: proc "contextless" (b: ^Software_Backend, cmd: Command, tar
 // spans and fills interior full-coverage spans without running the shader or
 // building 2x2 quad lists. False when the instance must fall back.
 @(private = "file")
-sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, i: u32, inst: Shape_Instance, px: [4]i32, band: int) -> bool {
+sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^Image_Store, cmd: Command, i: u32, inst: Shape_Instance, px: [4]i32, band: int) -> bool {
 	if b.no_fast_paths || r.target.format != .RGBA8 || r.target.pixels == nil {
 		return false
 	}
-	if inst.edge == .Aliased || b.piece_at[i] == max(u32) {
+	glyph := b.glyph_of[i]
+	if inst.edge == .Aliased || b.piece_at[i] == max(u32) && glyph == SW_NO_GLYPH {
 		return false
 	}
 	blend_ok, is_copy := sw_solid_blend(r.blend)
@@ -2399,7 +2688,17 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, i: u32, in
 		return false
 	}
 	pr := &b.paint_rows[inst.paint]
-	if pr[10][3] != f32(Shader_Type.Fill_Color) || pr[0][1] != 0 || pr[1][0] != 0 {
+	tex: Sw_Texture
+	tox, toy: i32
+	tflip, tstraight, texels: bool
+	if pr[10][3] != f32(Shader_Type.Fill_Color) {
+		ok: bool
+		tex, tox, toy, tflip, tstraight, _, ok = sw_texel_map(images, cmd, pr, false)
+		if !ok || is_copy {
+			return false
+		}
+		texels = true
+	} else if pr[0][1] != 0 || pr[1][0] != 0 {
 		return false
 	}
 	x0, y0, x1, y1 := px[0], px[1], px[2], px[3]
@@ -2414,10 +2713,14 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, i: u32, in
 	if !alive {
 		return true
 	}
-	at := int(b.piece_at[i]) + band - int(b.piece_band0[i])
-	list := b.piece_list[b.piece_rows[at]:b.piece_rows[at + 1]]
 	stride := w + 1
-	sw_accumulate_pieces(L, b, list, x0, y0, w, h, stride)
+	if glyph != SW_NO_GLYPH {
+		sw_glyph_rows(L, b, glyph, b.glyph_org[i], x0, y0, w, h, stride)
+	} else {
+		at := int(b.piece_at[i]) + band - int(b.piece_band0[i])
+		list := b.piece_list[b.piece_rows[at]:b.piece_rows[at + 1]]
+		sw_accumulate_pieces(L, b, list, x0, y0, w, h, stride)
+	}
 
 	// Base premultiplied color scaled by stroke_mask(0.5, 1).
 	base := saturate4(pr[6] * min(f32(1), pr[10][0]))
@@ -2441,6 +2744,80 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, i: u32, in
 	dst_stride := int(r.target.width)
 	dst_px := slice.reinterpret([]u32, r.target.pixels)
 	dst_x0 := int(x0 - r.ox)
+
+	if texels {
+		// Each pixel's colour is its texel (premultiplied, clamped to the
+		// image's edge as the shader's sampler is) times the tint, times
+		// coverage and scissor, source-over.
+		src_px := slice.reinterpret([]u32, tex.pixels)
+		tw, th := int(tex.width), int(tex.height)
+		tint4 := simd.from_array(pr[6] * min(f32(1), pr[10][0]))
+		inv255 := #simd[4]f32{1.0 / 255, 1.0 / 255, 1.0 / 255, 1.0 / 255}
+		for row in 0 ..< h {
+			py := int(y0) + row
+			py_c := f32(py) + 0.5
+			my: f32 = 1
+			if has_scissor {
+				my = clamp(0.5 - (abs(ay * py_c + by) - ey) * sy, 0, 1)
+				if my <= 0 {
+					continue
+				}
+			}
+			acc := L.cov[row * stride:][:stride]
+			ty := int(i32(py) - r.oy)
+			drow := dst_px[ty * dst_stride + dst_x0 :][:w]
+			trow := clamp(int(toy) - 1 - py if tflip else py - int(toy), 0, th - 1)
+			srow := src_px[trow * tw:][:tw]
+			// Coverage holds across a run of zero accumulation: one value a
+			// run, the texels per pixel.
+			sum: f32 = 0
+			x := 0
+			for x < w {
+				sum += acc[x]
+				end := sw_skip_zeros(acc, x + 1, w)
+				raw := abs(sum)
+				cov := 1 - abs(1 - (raw * 0.5 - f32(sw_floor(raw * 0.5))) * 2) if even_odd else min(raw, 1)
+				if cov < EMPTY {
+					x = end
+					continue
+				}
+				kr := (cov * cov * (3 - 2 * cov) if smooth else cov) * my
+				for cx in x ..< end {
+					k := kr
+					px_x := int(x0) + cx
+					if has_scissor && (cx < in_x0 || cx >= in_x1) {
+						k *= clamp(0.5 - (abs(ax * (f32(px_x) + 0.5) + bx) - ex) * sx, 0, 1)
+					}
+					su := srow[clamp(px_x - int(tox), 0, tw - 1)]
+					if k <= 0 || su == 0 {
+						continue
+					}
+					sb := transmute([4]u8)su
+					sf := #simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), f32(sb[3])} * inv255
+					if tstraight {
+						a := simd.extract(sf, 3)
+						sf *= #simd[4]f32{a, a, a, 1}
+					}
+					sf = simd.clamp(sf * tint4 * #simd[4]f32{k, k, k, k}, 0, 1)
+					ia := 1 - simd.extract(sf, 3)
+					d := &drow[cx]
+					if ia <= 0 {
+						d^ = transmute(u32)cast(#simd[4]u8)simd.fma(sf, #simd[4]f32{255, 255, 255, 255}, #simd[4]f32{0.5, 0.5, 0.5, 0.5})
+					} else {
+						db := transmute([4]u8)d^
+						df := #simd[4]f32{f32(db[0]), f32(db[1]), f32(db[2]), f32(db[3])}
+						out := simd.fma(df, #simd[4]f32{ia, ia, ia, ia}, simd.fma(sf, #simd[4]f32{255, 255, 255, 255}, #simd[4]f32{0.5, 0.5, 0.5, 0.5}))
+						d^ = transmute(u32)cast(#simd[4]u8)simd.clamp(out, 0, 255)
+					}
+					if moves {
+						write_motion(r.twin, dst_x0 + cx, ty, m, f32(px_x) + 0.5, py_c, simd.extract(sf, 3))
+					}
+				}
+				x = end
+			}
+		}
+		return true
+	}
 
 	blend_partial :: #force_inline proc "contextless" (dst: ^u32, base255_s: #simd[4]f32, base_a, k: f32, is_copy: bool) -> f32 {
 		ca := base_a * k
@@ -2748,4 +3125,276 @@ sw_coverage :: proc(L: ^Sw_Lanes, b: ^Software_Backend, i: u32, inst: Shape_Inst
 		}
 	}
 	return true
+}
+
+// ---- glyph table ----------------------------------------------------------------
+
+@(private = "file")
+SW_NO_GLYPH :: max(u32)
+
+// What makes two draws one glyph table entry: the words they draw, the
+// linear part of their transform, and the fraction of a pixel their origin
+// sits at, to 1/1024 px. That much rounding moves a draw at most 1/2048 px
+// (under 0.15 of a level), and absorbs what a kept shape's origin, folded
+// into the transform, leaves in its last bits: glyphs a caller places on
+// the same grid (a PDF renderer's quarter pixels) find each other.
+@(private = "file")
+Sw_Glyph_Key :: struct {
+	words: rawptr,
+	count: int,
+	m:     [4]f32,
+	phase: [2]i32,
+}
+
+@(private = "file")
+SW_GLYPH_STEPS :: 1024
+
+// The largest pixel area of a draw the table takes: a glyph's at text
+// sizes. Larger shapes rarely repeat in a frame, and their own pieces draw
+// them in parallel bands where an entry is accumulated whole.
+@(private = "file")
+SW_GLYPH_MAX_AREA :: 64 * 64
+
+// A frame's table starts empty; its slots are zeroed by the first draw it
+// could take (sw_glyph_assign).
+@(private = "file")
+sw_glyph_frame :: proc(b: ^Software_Backend, shapes: int) {
+	if len(b.glyph_of) < shapes {
+		resize(&b.glyph_of, shapes)
+		resize(&b.glyph_org, shapes)
+	}
+	clear(&b.glyph_keys)
+	b.glyph_slots_set = false
+	clear(&b.glyph_rects)
+	clear(&b.glyph_src)
+	clear(&b.glyph_phase)
+	clear(&b.glyph_at)
+	clear(&b.glyph_acc)
+	b.glyph_filled = 0
+}
+
+@(private = "file")
+sw_glyph_hash :: proc "contextless" (k: Sw_Glyph_Key) -> u64 {
+	h := u64(uintptr(k.words)) * 0x9E3779B97F4A7C15 ~ u64(k.count)
+	for v in k.m {
+		h = (h ~ u64(transmute(u32)v)) * 0x100000001B3
+	}
+	for v in k.phase {
+		h = (h ~ u64(u32(v))) * 0x100000001B3
+	}
+	return h ~ (h >> 29)
+}
+
+// Gives instance i an entry of the frame's glyph table when sw_fill_solid
+// will draw it (a kept shape's small solid fill with exact edges under
+// source-over or copy, into RGBA8): the first draw of a key makes it, and
+// every later one shares it. Even a key drawn once is cheaper so: its
+// coverage is worked out whole, in parallel with the run's other entries,
+// where its pieces would be binned into each band they cross. A draw lands
+// at its origin rounded to 1/1024 px, and b.bounds[i] becomes the pixels it
+// then covers.
+@(private = "file")
+sw_glyph_assign :: proc(b: ^Software_Backend, frame: Frame, cmd: Command, target: Sw_Target, i: u32) -> bool {
+	b.glyph_of[i] = SW_NO_GLYPH
+	inst := frame.shapes[i]
+	if b.no_fast_paths || target.format != .RGBA8 || target.pixels == nil {
+		return false
+	}
+	// Only a kept shape's words can be drawn again in the frame.
+	if inst.shape == nil || inst.hairline > 0 || inst.marker != .None || inst.widen != 0 || inst.edge != .Exact {
+		return false
+	}
+	if ok, _ := sw_solid_blend(cmd.composite_operation); !ok {
+		return false
+	}
+	pr := &b.paint_rows[inst.paint]
+	if pr[10][3] != f32(Shader_Type.Fill_Color) || pr[0][1] != 0 || pr[1][0] != 0 {
+		return false
+	}
+	bb := b.bounds[i]
+	if (bb.maxx - bb.minx + 2) * (bb.maxy - bb.miny + 2) > SW_GLYPH_MAX_AREA {
+		return false
+	}
+	if !b.glyph_slots_set {
+		resize(&b.glyph_slots, max(int(math.next_power_of_two(2 * len(frame.shapes))), 16))
+		slice.zero(b.glyph_slots[:])
+		b.glyph_slots_set = true
+	}
+	// In f64, so a page's far corners keep every 1/1024 px.
+	t := inst.transform
+	qx := math.round(f64(t[4]) * SW_GLYPH_STEPS)
+	qy := math.round(f64(t[5]) * SW_GLYPH_STEPS)
+	ox, oy := math.floor(qx / SW_GLYPH_STEPS), math.floor(qy / SW_GLYPH_STEPS)
+	steps := [2]i32{i32(qx - ox * SW_GLYPH_STEPS), i32(qy - oy * SW_GLYPH_STEPS)}
+	words := instance_words(inst, frame.shape_words)
+	// + 0 makes -0 +0, so keys that compare equal hash the same.
+	key := Sw_Glyph_Key{raw_data(words), len(words), {t[0] + 0, t[1] + 0, t[2] + 0, t[3] + 0}, steps}
+	mask := u64(len(b.glyph_slots) - 1)
+	at := sw_glyph_hash(key) & mask
+	entry := SW_NO_GLYPH
+	for b.glyph_slots[at] != 0 {
+		if b.glyph_keys[b.glyph_slots[at] - 1] == key {
+			entry = b.glyph_slots[at] - 1
+			break
+		}
+		at = (at + 1) & mask
+	}
+	if entry == SW_NO_GLYPH {
+		entry = sw_glyph_make(b, frame, i, key, {f32(steps.x), f32(steps.y)} / SW_GLYPH_STEPS)
+		b.glyph_slots[at] = entry + 1
+	}
+	r := b.glyph_rects[entry]
+	org := [2]i32{i32(ox), i32(oy)}
+	b.glyph_of[i] = entry
+	b.glyph_org[i] = org
+	b.bounds[i] = {f32(org.x + r[0]), f32(org.y + r[1]), f32(org.x + r[0] + r[2]), f32(org.y + r[1] + r[3])}
+	return true
+}
+
+// A new entry, sized: the pixels the draw covers at its phase and its span
+// of `glyph_acc`, which sw_glyph_fill accumulates.
+@(private = "file")
+sw_glyph_make :: proc(b: ^Software_Backend, frame: Frame, i: u32, key: Sw_Glyph_Key, phase: [2]f32) -> u32 {
+	at_phase := frame.shapes[i]
+	at_phase.transform[4], at_phase.transform[5] = phase.x, phase.y
+	ib := instance_bounds(at_phase, frame.shape_words)
+	gx0, gy0 := i32(math.floor(ib.minx)), i32(math.floor(ib.miny))
+	ew, eh := max(i32(math.ceil(ib.maxx)) - gx0, 0), max(i32(math.ceil(ib.maxy)) - gy0, 0)
+	start := u32(0)
+	if n := len(b.glyph_rects); n > 0 {
+		r := b.glyph_rects[n - 1]
+		start = b.glyph_at[n - 1] + u32(r[2] + 1) * u32(r[3])
+	}
+	entry := u32(len(b.glyph_rects))
+	append(&b.glyph_keys, key)
+	append(&b.glyph_rects, [4]i32{gx0, gy0, ew, eh})
+	append(&b.glyph_src, i)
+	append(&b.glyph_phase, phase)
+	append(&b.glyph_at, start)
+	return entry
+}
+
+@(private = "file")
+Sw_Glyph_Fill :: struct {
+	b:     ^Software_Backend,
+	frame: Frame,
+	first: int,
+}
+
+// Accumulates the entries made since the last fill (a run's new glyphs),
+// each into its own span, on the pool.
+@(private = "file")
+sw_glyph_fill :: proc(b: ^Software_Backend, frame: Frame) {
+	n, first := len(b.glyph_rects), b.glyph_filled
+	b.glyph_filled = n
+	if n == first {
+		return
+	}
+	r := b.glyph_rects[n - 1]
+	sw_grow(&b.glyph_acc, int(b.glyph_at[n - 1]) + int(r[2] + 1) * int(r[3]))
+	job := Sw_Glyph_Fill{b, frame, first}
+	if b.pool == nil {
+		sw_glyph_fill_range(&job, 0, n - first)
+		return
+	}
+	b.pool.run(b.pool, n - first, sw_glyph_fill_range, &job)
+}
+
+@(private = "file")
+sw_glyph_fill_range :: proc(data: rawptr, first, end: int) {
+	job := (^Sw_Glyph_Fill)(data)
+	b := job.b
+	for k in job.first + first ..< job.first + end {
+		r := b.glyph_rects[k]
+		inst := job.frame.shapes[b.glyph_src[k]]
+		inst.transform[4], inst.transform[5] = b.glyph_phase[k].x, b.glyph_phase[k].y
+		stride := int(r[2]) + 1
+		acc := b.glyph_acc[b.glyph_at[k]:][:stride * int(r[3])]
+		slice.zero(acc)
+		g := Sw_Piece_Grid{acc, f32(r[0]), f32(r[1]), int(r[2]), int(r[3]), stride}
+		sw_append_pieces(&g, inst, instance_words(inst, job.frame.shape_words))
+	}
+}
+
+// An entry's accumulation rows copied into L.cov for the grid of w x h at
+// (x0, y0), as sw_accumulate_pieces would leave them: what lies left of the
+// grid folds into its first cell.
+@(private = "file")
+sw_glyph_rows :: proc(L: ^Sw_Lanes, b: ^Software_Backend, entry: u32, org: [2]i32, x0, y0: i32, w, h, stride: int) {
+	resize(&L.cov, stride * h)
+	slice.zero(L.cov[:])
+	r := b.glyph_rects[entry]
+	ax, ay := org.x + r[0], org.y + r[1]
+	es := int(r[2]) + 1
+	src := b.glyph_acc[b.glyph_at[entry]:]
+	for row in 0 ..< h {
+		ey := int(y0) + row - int(ay)
+		if ey < 0 || ey >= int(r[3]) {
+			continue
+		}
+		srow := src[ey * es:][:es]
+		drow := L.cov[row * stride:][:stride]
+		skip := int(x0 - ax)
+		if skip > 0 {
+			for v in srow[:min(skip, es)] {
+				drow[0] += v
+			}
+		}
+		for c in 0 ..< stride {
+			ex := c + max(skip, 0) if skip > 0 else c + skip
+			if ex < 0 {
+				continue
+			}
+			if ex >= es {
+				break
+			}
+			drow[c] += srow[ex]
+		}
+	}
+}
+
+// The room a block kept across renders grows to when `need` passes `have`:
+// at least half again, so a need that creeps up render by render (packed
+// lifetimes vary) reallocates a few times, not each time. Each reallocation
+// frees a large block, and macOS's allocator keeps freed large blocks
+// resident a while: 52 small growths over a video's software render held
+// 2.3 GB at its peak, 8 growths by half 0.6 GB.
+@(private = "file")
+sw_grown :: proc "contextless" (have, need: int) -> int {
+	return max(need, have + have / 2)
+}
+
+// Resizes `a` to n, its room grown geometrically: lists sized one shape at
+// a time must not reallocate for each.
+@(private = "file")
+sw_grow :: proc(a: ^[dynamic]$T, n: int) {
+	if n > cap(a) {
+		reserve(a, max(2 * cap(a), n))
+	}
+	resize(a, n)
+}
+
+// A source-over draw's bounds cut to its axis-aligned scissor: the pixels
+// whose centres the scissor mask leaves above 0 (shape.frag's
+// scissor_mask), past which it changes nothing.
+@(private = "file")
+sw_scissor_cut :: proc "contextless" (pr: ^[14][4]f32, bb: Bounds) -> Bounds {
+	ax, bx, ex, sx := pr[0][0], pr[2][0], pr[8][0], pr[8][2]
+	ay, by, ey, sy := pr[1][1], pr[2][1], pr[8][1], pr[8][3]
+	if pr[0][1] != 0 || pr[1][0] != 0 || ax == 0 || ay == 0 || sx <= 0 || sy <= 0 {
+		return bb
+	}
+	// |a * centre + b| < e + 0.5 / s, widened by half a pixel to the
+	// pixels' edges.
+	cx0, cx1 := (-bx - (ex + 0.5 / sx)) / ax, (-bx + (ex + 0.5 / sx)) / ax
+	cy0, cy1 := (-by - (ey + 0.5 / sy)) / ay, (-by + (ey + 0.5 / sy)) / ay
+	r := bb
+	r.minx = max(r.minx, min(cx0, cx1) - 0.5)
+	r.maxx = min(r.maxx, max(cx0, cx1) + 0.5)
+	r.miny = max(r.miny, min(cy0, cy1) - 0.5)
+	r.maxy = min(r.maxy, max(cy0, cy1) + 0.5)
+	if r.minx > r.maxx || r.miny > r.maxy {
+		r.maxx, r.maxy = r.minx, r.miny
+	}
+	return r
 }
