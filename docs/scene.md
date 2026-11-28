@@ -292,7 +292,7 @@ Structure is nesting in the draw list, not render targets:
   `clip_path` (in the save/restore state), the one way to clip by path; a
   layer pushed under a clip starts unclipped and its composite is what the
   clip cuts, so a group is clipped once, as a whole (SVG's clip-path on a
-  group: `clip_path`, then the layer). Both backends render
+  group: `clip_path`, then the layer; on one paint, no layer). Both backends render
   each clip's coverage, times its parent's, into an image (RGBA8 for now,
   coverage in every channel) just before its first draw, bounded to the
   clip, its parent, the target and what is drawn under it, and a clipped

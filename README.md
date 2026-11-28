@@ -582,8 +582,9 @@ vg.layer_stack_end(&ls, &c)
 - `svg.draw(c, ls, r, doc, transform, overrides)` draws in the document's
   `width x height` space. Effects map to one layer (opacity, clip-as-mask,
   mask, filter, blend; a path clip is `clip_path` around it), two when a
-  non-path clip meets a mask; a single fill or stroke folds opacity into the
-  alpha. Pattern tiles render
+  non-path clip meets a mask; one paint (a fill, a stroke or an image, or a
+  group or use of one) folds its opacity into the alpha and takes its path
+  clip per draw, with no layer. Pattern tiles render
   at the current scale (nearest sampling, as resvg). `svg.Override{id,
   transform, replace_transform, opacity, fill, stroke, visible}` changes
   every instance of an id per draw (the transform applies inside the

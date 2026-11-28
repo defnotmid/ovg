@@ -507,9 +507,14 @@ push_effects :: proc(d: ^Draw, n: ^Node, opacity: f32, fl: ^vg.Filter, clip_mode
 	if !needs {
 		return 0
 	}
-	if opacity < 1 && n.clip < 0 && n.mask < 0 && fl == nil && n.blend == .Normal && .Isolate not_in n.flags && single_paint(d, n, fill_ov, stroke_ov) {
-		// One paint over its own pixels: multiplying alpha is exact.
+	if n.mask < 0 && fl == nil && n.blend == .Normal && .Isolate not_in n.flags && (n.clip < 0 || doc.clips[n.clip].simple >= 0) && one_paint(d, n, fill_ov, stroke_ov) {
+		// One paint over its own pixels: its opacity as alpha and its clip
+		// taken per draw are exact, with no layer (the node's save holds
+		// both).
 		vg.set_global_alpha(c, vg.state(c).alpha * opacity)
+		if n.clip >= 0 {
+			vg.clip_path(c, &d.r.clip, clip_path(d, n.clip, n.bbox))
+		}
 		return 0
 	}
 	params := vg.Layer_Params {
@@ -559,6 +564,32 @@ push_effects :: proc(d: ^Draw, n: ^Node, opacity: f32, fl: ^vg.Filter, clip_mode
 	draw_clip_content(d, n.clip, n.bbox)
 	vg.layer_mask_end(ls, c)
 	return count + 1
+}
+
+// Whether the node draws one paint onto its target: one fill or stroke, an
+// image, or a group of one child or a use of one such, through nodes with
+// no effect that takes a layer (where opacity as alpha wouldn't commute).
+@(private)
+one_paint :: proc(d: ^Draw, n: ^Node, fill_ov, stroke_ov: Maybe(vg.Color)) -> bool {
+	doc := d.doc
+	k, f, s := n, fill_ov, stroke_ov
+	for k.kind == .Group || k.kind == .Use {
+		next := k.data if k.kind == .Use else k.first_child
+		if next < 0 || k.kind == .Group && doc.nodes[next].next >= 0 {
+			return false
+		}
+		k = &doc.nodes[next]
+		if k.filter >= 0 || k.mask >= 0 || k.clip >= 0 && doc.clips[k.clip].simple < 0 || k.blend != .Normal || .Isolate in k.flags {
+			return false
+		}
+		if k.id >= 0 && len(d.overrides) > 0 && d.r.override_of[k.id] >= 0 {
+			// Animated: its paints may change.
+			return false
+		}
+		f = f if .Fill_Inherited in k.flags else nil
+		s = s if .Stroke_Inherited in k.flags else nil
+	}
+	return single_paint(d, k, f, s)
 }
 
 // Whether the node paints one fill or one stroke only (and nothing under
