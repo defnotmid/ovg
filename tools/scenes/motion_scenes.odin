@@ -61,11 +61,14 @@ scene_motion :: proc(c: ^vg.Canvas, r: ^Resources) {
 	vg.layer_pop(ls, c)
 	vg.path_reset(&r.scratch)
 	vg.path_rect(&r.scratch, 150, 44, 90, 22)
-	vg.layer_push(ls, c, {opacity = 0.9, clip_path = &r.scratch})
+	vg.save(c)
+	vg.clip_path(c, &r.scratch)
+	vg.layer_push(ls, c, {opacity = 0.9})
 	vg.set_motion(c, vg.transform_multiply(vg.transform_multiply(vg.transform_translation(-195, -60), vg.transform_scaling(0.8, 0.8)), vg.transform_translation(195, 60)))
 	f, g, em = lay(r, "Growing", 150, 64, 24)
 	vg.fill_glyph_outlines(c, f, g, em, vg.paint_color(vg.rgb(40, 220, 160)), &r.scratch)
 	vg.layer_pop(ls, c)
+	vg.restore(c)
 
 	// A blurred circle rising, a masked bar sliding left, a blended disc
 	// turning.

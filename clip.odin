@@ -25,6 +25,12 @@ Clip_Record :: struct {
 	// Its path in drawing coordinates: contours [start, end) of the
 	// canvas's clip_contours (none for a clip carried from a frame before).
 	contours: [2]u32,
+	// Its coverage is the axis-aligned rectangle `box` (x0, y0, x1, y1), a
+	// pixel or more across, under none or another such: draws take it as
+	// their scissor (clip_scissor), whose coverage is a rectangle's exactly,
+	// and it has no parent, `box` holding theirs.
+	rect:     bool,
+	box:      [4]f32,
 }
 
 // A clip image kept from frame to frame, by size: `free_at`, the frame
@@ -76,15 +82,6 @@ pixels_of :: proc "contextless" (b: Bounds) -> [4]i32 {
 // clip cuts, so a group is clipped once, as a whole.
 clip_path :: proc(c: ^Canvas, p: ^Path, rule := Fill_Rule.Non_Zero) {
 	st := state(c)
-	if r, ok := clip_whole_pixels(p, st.transform); ok {
-		// A rectangle on whole pixels covers each pixel whole or not at
-		// all: the scissor, exactly, with no image.
-		t := st.transform
-		reset_transform(c)
-		intersect_scissor(c, r[0], r[1], r[2] - r[0], r[3] - r[1])
-		set_transform(c, t)
-		return
-	}
 	b := &c.scratch.builder
 	shape_builder_reset(b)
 	// As fill_path's: an edge pixel's coverage within an 8-bit level.
@@ -93,8 +90,9 @@ clip_path :: proc(c: ^Canvas, p: ^Path, rule := Fill_Rule.Non_Zero) {
 	w, h := render_target_size(c)
 	o := c.current_render_origin
 	cell := [4]i32{o.x, o.y, o.x + i32(w), o.y + i32(h)}
-	if st.clip != 0 {
-		cell = pixels_intersect(cell, c.clips[st.clip - 1].cell)
+	parent := st.clip
+	if parent != 0 {
+		cell = pixels_intersect(cell, c.clips[parent - 1].cell)
 	}
 	inst := Shape_Instance{rule = rule}
 	contours := [2]u32{u32(len(c.clip_contours.contours)), 0}
@@ -110,16 +108,69 @@ clip_path :: proc(c: ^Canvas, p: ^Path, rule := Fill_Rule.Non_Zero) {
 		// Nothing to cover: everything is cut away.
 		cell = NO_PIXELS
 	}
-	append(&c.clips, Clip_Record{inst, st.clip, cell, NO_PIXELS, contours})
+	rect := false
+	box: [4]f32
+	if r, ok := clip_axis_rect(p, st.transform); ok && (parent == 0 || c.clips[parent - 1].rect) {
+		box = r
+		if parent != 0 {
+			q := c.clips[parent - 1].box
+			box = {max(box[0], q[0]), max(box[1], q[1]), min(box[2], q[2]), min(box[3], q[3])}
+		}
+		rect = box[2] - box[0] >= 1 && box[3] - box[1] >= 1
+	}
+	if rect {
+		cell = pixels_intersect(cell, pixels_of({box[0], box[1], box[2], box[3]}))
+		parent = 0
+	} else if parent != 0 && c.clips[parent - 1].rect && clip_whole(c.clips[parent - 1].box) {
+		// The cell holds the parent's coverage, whole pixels.
+		parent = 0
+	}
+	append(&c.clips, Clip_Record{inst, parent, cell, NO_PIXELS, contours, rect, box})
 	st.clip = u32(len(c.clips))
 	paint_rows_stale(c)
 }
 
-// `p` under `t` as an axis-aligned rectangle on whole pixels (x0, y0, x1,
-// y1), when it is one: a single contour of four line segments, each along
-// an axis, every corner within a thousandth of a pixel of a whole one.
+// The scissor and clip a draw under the current state takes: a clip that
+// is a rectangle (Clip_Record.rect) narrows the scissor instead, where the
+// two make one rectangle, and needs no image. `exact`: the scissor ramps
+// over one pixel, its coverage the rectangle's.
 @(private)
-clip_whole_pixels :: proc(p: ^Path, t: Transform2D) -> (r: [4]f32, ok: bool) {
+clip_scissor :: proc(c: ^Canvas) -> (sc: Scissor, clip: u32, exact: bool) {
+	st := state(c)
+	sc, clip = st.scissor, st.clip
+	if clip == 0 || !c.clips[clip - 1].rect {
+		return
+	}
+	if pixels_empty(c.clips[clip - 1].cell) {
+		// Cut away: the clip says so (clip_seal).
+		return
+	}
+	r := c.clips[clip - 1].box
+	box := Rect{r[0], r[1], r[2] - r[0], r[3] - r[1]}
+	if sc.has_extent {
+		w, h := render_target_size(c)
+		s, aligned := scissor_as_rect(sc, f32(w), f32(h))
+		if !aligned {
+			return
+		}
+		box = rect_intersect(box, s)
+		if box.w <= 0 || box.h <= 0 {
+			return
+		}
+	}
+	return {transform = transform_translation(box.x + box.w * 0.5, box.y + box.h * 0.5), extent = {box.w * 0.5, box.h * 0.5}, has_extent = true}, 0, true
+}
+
+// Whether a rectangle's sides lie on whole pixels.
+@(private = "file")
+clip_whole :: proc "contextless" (r: [4]f32) -> bool {
+	return r == {math.round(r[0]), math.round(r[1]), math.round(r[2]), math.round(r[3])}
+}
+
+// `p` under `t` as an axis-aligned rectangle (x0, y0, x1, y1), when it is
+// one: a single contour of four line segments, each along an axis.
+@(private = "file")
+clip_axis_rect :: proc(p: ^Path, t: Transform2D) -> (r: [4]f32, ok: bool) {
 	if len(p.contours) != 1 {
 		return
 	}
@@ -142,16 +193,14 @@ clip_whole_pixels :: proc(p: ^Path, t: Transform2D) -> (r: [4]f32, ok: bool) {
 	if n != 4 {
 		return
 	}
-	whole :: proc "contextless" (v: f32) -> bool {return abs(v - math.round(v)) < 1e-3}
-	r = {1e30, 1e30, -1e30, -1e30}
+	r = {max(f32), max(f32), min(f32), min(f32)}
 	for i in 0 ..< 4 {
 		a, b := corners[i], corners[(i + 1) % 4]
-		if (a.x != b.x) == (a.y != b.y) || !whole(a.x) || !whole(a.y) {
+		if (a.x != b.x) == (a.y != b.y) {
 			return
 		}
 		r = {min(r[0], a.x), min(r[1], a.y), max(r[2], a.x), max(r[3], a.y)}
 	}
-	r = {math.round(r[0]), math.round(r[1]), math.round(r[2]), math.round(r[3])}
 	return r, r[0] < r[2] && r[1] < r[3]
 }
 
@@ -165,11 +214,11 @@ clip_set :: proc "contextless" (c: ^Canvas, k: u32) {
 	}
 }
 
-// Notes that `inst` is drawn under the current clip: its pixels widen what
-// the clip's cell (and each parent's) renders.
+// Notes that `inst` is drawn under its paint row's clip: its pixels widen
+// what the clip's cell (and each parent's) renders.
 @(private)
 clip_use :: proc(c: ^Canvas, inst: Shape_Instance) {
-	k := state(c).clip
+	k := c.paints[inst.paint].clip
 	if k == 0 {
 		return
 	}
@@ -340,9 +389,7 @@ clip_seal :: proc(c: ^Canvas) {
 			k := order[next]
 			next += 1
 			r := c.clips[k].used
-			info, _ := image_store_info(&c.images, image_of[k])
 			append(&c.commands, Command{type = Cmd_Set_Render_Target{image_of[k], {r[0], r[1]}, false}})
-			_ = info
 			append(&c.commands, Command{type = Cmd_Clear_Rect{u32(r[0]), u32(r[1]), u32(r[2] - r[0]), u32(r[3] - r[1]), TRANSPARENT}, composite_operation = composite_state_from_op(.Copy)})
 			inst := c.clips[k].inst
 			if inst.words.count > 0 {
@@ -366,6 +413,15 @@ clip_seal :: proc(c: ^Canvas) {
 		if d, is_draw := cmd.type.(Cmd_Draw_Shapes); is_draw && d.instances.count > 0 {
 			if k := c.paints[c.shapes[d.instances.start].paint].clip; k != 0 {
 				out.clip_image = image_of[k - 1]
+			}
+			// Draws that a clip change split (push_shape) and whose clips
+			// are now one (a covering clip dropped): one command again.
+			if len(c.commands) > 0 {
+				last := &c.commands[len(c.commands) - 1]
+				if ld, ok := &last.type.(Cmd_Draw_Shapes); ok && ld.instances.start + ld.instances.count == d.instances.start && ld.group == d.group && last.image == out.image && last.composite_operation == out.composite_operation && last.scissor_rect == out.scissor_rect && c.paints[c.shapes[ld.instances.start].paint].clip == c.paints[c.shapes[d.instances.start].paint].clip {
+					ld.instances.count += d.instances.count
+					continue
+				}
 			}
 		}
 		append(&c.commands, out)

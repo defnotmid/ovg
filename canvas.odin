@@ -372,9 +372,14 @@ reset_scissor :: proc "contextless" (c: ^Canvas) {
 
 @(private)
 current_scissor_rect :: proc(c: ^Canvas) -> Maybe(Rect) {
+	return scissor_rect_of(c, state(c).scissor)
+}
+
+@(private)
+scissor_rect_of :: proc(c: ^Canvas, s: Scissor) -> Maybe(Rect) {
 	w, h := render_target_size(c)
-	if r, ok := scissor_as_rect(state(c).scissor, f32(w), f32(h)); ok {
-		if !state(c).scissor.has_extent {
+	if r, ok := scissor_as_rect(s, f32(w), f32(h)); ok {
+		if !s.has_extent {
 			// The whole target, in drawing coordinates.
 			r.x, r.y = f32(c.current_render_origin.x), f32(c.current_render_origin.y)
 		}
@@ -777,12 +782,16 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	st := state(c)
 	flavor := paint.flavor
 	flavor_mul_alpha(&flavor, st.alpha)
+	sc, clip, exact := clip_scissor(c)
 	cmd = {
 		composite_operation = st.composite_operation,
-		scissor_rect        = current_scissor_rect(c),
+		scissor_rect        = scissor_rect_of(c, sc),
 	}
 	attach_paint_image(c, &cmd, &flavor)
-	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
+	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, sc, c.fringe_width, c.fringe_width, -1)
+	if exact {
+		params.scissor_scale = {1, 1}
+	}
 	if c.image_bounded && params.shader_type == .Fill_Image {
 		params.shader_type = .Fill_Image_Bounded
 	}
@@ -791,7 +800,7 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 		params.tex_type = 1 if l == .Pdf else 0
 	}
 	params.spread = f32(u8(paint.spread) | transmute(u8)paint.gradient_clip << 2)
-	params.clip = st.clip
+	params.clip = clip
 	return cmd, add_paint(c, params)
 }
 

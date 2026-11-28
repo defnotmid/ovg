@@ -239,7 +239,8 @@ test_clip_path_in_turn :: proc(t: ^testing.T) {
 	testing.expectf(t, worst <= 1, "clips in turn are %.2f levels from exact", worst)
 }
 
-// A clip that is a rectangle on whole pixels is the scissor: no image.
+// A clip that is a rectangle on whole pixels narrows its draws' scissor:
+// no image.
 @(test)
 test_clip_path_whole_pixels :: proc(t: ^testing.T) {
 	W, H :: 24, 24
@@ -255,13 +256,13 @@ test_clip_path_whole_pixels :: proc(t: ^testing.T) {
 	translate(c, 1, 2)
 	clip_polygon(&p, {{2, 1}, {12, 1}, {12, 9}, {2, 9}})
 	clip_path(c, &p)
-	testing.expect_value(t, len(c.clips), 0)
 	reset_transform(c)
 	path_reset(&p)
 	path_rect(&p, 0, 0, W, H)
 	fill_path(c, &p, paint_color({1, 1, 1, 1}))
 	restore(c)
 	flush(c)
+	testing.expectf(t, len(c.clip_pool) == 0, "%d clip images for a whole-pixel rectangle", len(c.clip_pool))
 	worst := clip_worst(&tg, W, H, proc(x, y: int) -> f32 {
 		return 1 if x >= 3 && x < 13 && y >= 3 && y < 11 else 0
 	})
@@ -304,6 +305,109 @@ test_clip_path_image :: proc(t: ^testing.T) {
 	testing.expectf(t, worst <= 1, "clipped image is %.2f levels from exact", worst)
 }
 
+// A clip that is an axis-aligned rectangle off whole pixels narrows its
+// draws' scissor, which covers each pixel by its overlap exactly (at any
+// pixel ratio): no image.
+@(test)
+test_clip_path_rect :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	for dpi in ([2]f32{1, 2}) {
+		tg: Clip_Target
+		clip_open(&tg, W, H)
+		defer clip_close(&tg)
+		c := &tg.canvas
+		set_size(c, W, H, dpi)
+		p: Path
+		path_init(&p)
+		defer path_destroy(&p)
+		clear_rect(c, 0, 0, W, H, {0, 0, 0, 1})
+		save(c)
+		rect := CLIP_RECT
+		clip_polygon(&p, rect[:])
+		clip_path(c, &p)
+		path_reset(&p)
+		path_rect(&p, 0, 0, W, H)
+		fill_path(c, &p, paint_color({1, 1, 1, 1}))
+		restore(c)
+		flush(c)
+		testing.expectf(t, len(c.clip_pool) == 0, "%d clip images for a rectangle", len(c.clip_pool))
+		worst := clip_worst(&tg, W, H, proc(x, y: int) -> f32 {
+			rect := CLIP_RECT
+			return pixel_area(rect[:], x, y)
+		})
+		testing.expectf(t, worst <= 1, "rectangle clip at pixel ratio %v is %.2f levels from exact", dpi, worst)
+	}
+}
+
+// An image drawn scaled and off whole pixels (not the software backend's
+// direct copy, its texels interpolated) under a clip takes the clip's
+// coverage.
+@(test)
+test_clip_path_image_scaled :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	tg: Clip_Target
+	clip_open(&tg, W, H)
+	defer clip_close(&tg)
+	c := &tg.canvas
+	px := make([]u8, 7 * 5 * 4)
+	defer delete(px)
+	for i in 0 ..< len(px) {
+		px[i] = 255
+	}
+	img, err := create_image(c, {.RGBA8, px, 7, 5, 0}, {.Premultiplied})
+	testing.expect_value(t, err, Error.None)
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	clear_rect(c, 0, 0, W, H, {0, 0, 0, 1})
+	save(c)
+	tri := CLIP_TRI
+	clip_polygon(&p, tri[:])
+	clip_path(c, &p)
+	path_reset(&p)
+	path_rect(&p, -0.5, -0.25, 25, 25)
+	fill_path(c, &p, paint_image(img, -0.5, -0.25, 25, 25, 0))
+	restore(c)
+	flush(c)
+	worst := clip_worst(&tg, W, H, proc(x, y: int) -> f32 {
+		tri := CLIP_TRI
+		return pixel_area(tri[:], x, y)
+	})
+	testing.expectf(t, worst <= 1, "clipped scaled image is %.2f levels from exact", worst)
+}
+
+// A layer is clipped as a whole: under a rectangle on whole pixels, what
+// its blur spreads into the rectangle from outside it shows, and nothing
+// outside the rectangle does.
+@(test)
+test_clip_path_layer_whole :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	tg: Clip_Target
+	clip_open(&tg, W, H)
+	defer clip_close(&tg)
+	c := &tg.canvas
+	ls: Layer_Stack
+	defer layer_stack_destroy(&ls, c)
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	clear_rect(c, 0, 0, W, H, {0, 0, 0, 1})
+	layer_stack_begin(&ls, c, W, H)
+	save(c)
+	path_rect(&p, 8, 0, 8, H)
+	clip_path(c, &p)
+	layer_push(&ls, c, {blur = 2})
+	path_reset(&p)
+	path_rect(&p, 0, 0, 8, H)
+	fill_path(c, &p, paint_color({1, 1, 1, 1}))
+	layer_pop(&ls, c)
+	restore(c)
+	layer_stack_end(&ls, c)
+	flush(c)
+	inside, outside := clip_px(&tg, 8, 12), clip_px(&tg, 6, 12)
+	testing.expectf(t, inside.r > 0.3, "the blur inside the clip is %v", inside.r)
+	testing.expectf(t, outside.r == 0, "outside the clip is %v", outside.r)
+}
 
 // A clip that covers whole everything drawn under it cuts nothing: no
 // image, its draws unclipped (and still exact); one that cuts keeps its.

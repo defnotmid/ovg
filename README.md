@@ -20,7 +20,10 @@ Added in ovg:
   and SVG geometry (`svg.element_path`) as paths to morph.
 - **Path booleans**: union, difference, intersection, xor and simplify of
   filled paths, keeping their curves (see Path booleans below).
-- **Layers**: group opacity, clip paths, alpha and luminance masks, 16 blend
+- **Clips**: `clip_path` in the save/restore state, each draw taking the
+  path's exact coverage; a layer pushed under one is clipped once, as a
+  whole. An axis-aligned rectangle is the scissor, exactly.
+- **Layers**: group opacity, alpha and luminance masks, 16 blend
   modes and patterns, each sized to its content.
 - **Bloom**: a filter primitive, `.Bloom`: the light above a threshold, a Gaussian
   over it, a share of that added, in linear light, with no pass at the layer's size
@@ -577,9 +580,10 @@ vg.layer_stack_end(&ls, &c)
   URIs and other hrefs through `svg.Parse_Options.load_file`; raster
   (oicut's image: PNG, JPEG, GIF, BMP, TGA, QOI, WebP) or SVG (its tree joins the document under a viewport group).
 - `svg.draw(c, ls, r, doc, transform, overrides)` draws in the document's
-  `width x height` space. Effects map to one layer (opacity, path clip or
-  clip-as-mask, mask, filter, blend), two when a non-path clip meets a mask;
-  a single fill or stroke folds opacity into the alpha. Pattern tiles render
+  `width x height` space. Effects map to one layer (opacity, clip-as-mask,
+  mask, filter, blend; a path clip is `clip_path` around it), two when a
+  non-path clip meets a mask; a single fill or stroke folds opacity into the
+  alpha. Pattern tiles render
   at the current scale (nearest sampling, as resvg). `svg.Override{id,
   transform, replace_transform, opacity, fill, stroke, visible}` changes
   every instance of an id per draw (the transform applies inside the
@@ -978,11 +982,11 @@ every part follows:
   lines of 14 px text (half of them translucent groups) and 3,000 small
   rects draws 1 to 3% slower (145 -> 148-150 ms a flush at p50).
 - **Layers cover what is drawn into them** (`layers.odin`, Skia's
-  saveLayer: group opacity, blur, SVG filters, clip paths, masks, blend
+  saveLayer: group opacity, blur, SVG filters, masks, blend
   modes). Drawing between `layer_push` and `layer_pop` is recorded against a
   stand-in target; the pop takes the device bounds of those commands, grows
-  them by how far the blur and filter reach, cuts them to the clip path, the
-  mask and the canvas, and points the commands at a pooled image of that
+  them by how far the blur and filter reach, cuts them to the clip they are
+  pushed under (`clip_path`), the mask and the canvas, and points the commands at a pooled image of that
   window (sizes in steps of 1/8 of the next power of two). A render target
   can sit at an origin (`set_render_target(c, img, origin)`), so the layer is
   still drawn in canvas coordinates and pixels match a full-frame layer.

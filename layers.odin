@@ -50,12 +50,10 @@ Layer_Params :: struct {
 	opacity:   f32,
 	// Gaussian blur of the layer, standard deviation in current units.
 	blur:      f32,
-	// Clip to this path (current units, current transform); nil for none.
-	clip_path: ^Path,
-	clip_rule: Fill_Rule,
 	// SVG filter effects, applied before the clip and mask (SVG order:
-	// filter, clipping, masking, opacity). Copied at the push, as the clip
-	// path is.
+	// filter, clipping, masking, opacity). Copied at the push. A layer is
+	// clipped by pushing it under `clip_path`: its composite is what the
+	// clip cuts.
 	filter:    ^Filter,
 	// The mask (`layer_mask_begin`) counts by its alpha instead of its
 	// luminance times alpha (SVG mask-type="alpha"; luminance is SVG's
@@ -124,9 +122,6 @@ Layer_Frame :: struct {
 	releases:   u32,
 	opacity:    f32,
 	blur_px:    f32,
-	has_clip:   bool,
-	clip_rule:  Fill_Rule,
-	clip_xform: Transform2D,
 	masked:     bool,
 	// A child blends with the layer, which then covers the whole canvas.
 	full:       bool,
@@ -166,8 +161,6 @@ Layer_Stack :: struct {
 	frames:    [dynamic]Layer_Frame,
 	// One pair per depth, reused across frames.
 	stand_ins: [dynamic]Layer_Stand_In,
-	// Clip path copies, one per depth, reused across frames.
-	clips:     [dynamic]Path,
 	// Filter copies, one per depth, reused across frames.
 	filters:   [dynamic]Layer_Filter,
 	// Repeating pattern tiles.
@@ -257,10 +250,6 @@ layer_stack_destroy :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 		delete_image(c, si.mask)
 	}
 	delete(ls.stand_ins)
-	for &p in ls.clips {
-		path_destroy(&p)
-	}
-	delete(ls.clips)
 	for &lf in ls.filters {
 		delete(lf.primitives)
 		delete(lf.merge_refs)
@@ -447,17 +436,6 @@ layer_push :: proc(ls: ^Layer_Stack, c: ^Canvas, params: Layer_Params) {
 		// Blending reads the layer under it as an image of the canvas size.
 		ls.frames[depth - 1].full = true
 	}
-	if params.clip_path != nil {
-		for len(ls.clips) <= depth {
-			append(&ls.clips, Path{})
-		}
-		clip := &ls.clips[depth]
-		path_reset(clip)
-		path_append(clip, params.clip_path)
-		f.has_clip = true
-		f.clip_rule = params.clip_rule
-		f.clip_xform = t
-	}
 	if params.filter != nil {
 		for len(ls.filters) <= depth {
 			append(&ls.filters, Layer_Filter{})
@@ -553,26 +531,10 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	if f.masked && !f.mask_alpha {
 		mask_read = f.mask_luminance
 	}
-	// The layer's clip (SVG's order: filter, clip, mask, opacity) is the
-	// composite's clip_path, on top of any it was pushed under: the
-	// content, masked or not, is drawn onto the target cut by both.
+	// The clip it was pushed under (SVG's order: filter, clip, mask,
+	// opacity) cuts the composite: the content, masked or not, is drawn
+	// onto the target under it.
 	scissor := f.scissor
-	if f.has_clip {
-		if r, whole := clip_whole_pixels(&ls.clips[depth], f.clip_xform); whole {
-			// A rectangle on whole pixels: the composite's scissor (the
-			// composites set theirs, so the state's wouldn't hold).
-			rect := Rect{r[0], r[1], r[2] - r[0], r[3] - r[1]}
-			if sr, ok := scissor.?; ok {
-				x0, y0 := max(rect.x, sr.x), max(rect.y, sr.y)
-				x1, y1 := min(rect.x + rect.w, sr.x + sr.w), min(rect.y + rect.h, sr.y + sr.h)
-				rect = {x0, y0, max(x1 - x0, 0), max(y1 - y0, 0)}
-			}
-			scissor = rect
-		} else {
-			set_transform(c, f.clip_xform)
-			clip_path(c, &ls.clips[depth], f.clip_rule)
-		}
-	}
 	if f.masked {
 		keep := layer_acquire(ls, c, w, h)
 		layer_target_begin(ls, c, keep, origin = {i32(win.x), i32(win.y)})
@@ -610,7 +572,7 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	// The motion composites cut to the coverage the content composited
 	// with: under a clip (or a clip's scissor), the content drawn under it.
 	cut := content
-	if f.velocity && c.motion_blur && (state(c).clip != 0 || f.has_clip) {
+	if f.velocity && c.motion_blur && state(c).clip != 0 {
 		under := state(c).clip
 		cut = layer_acquire(ls, c, w, h)
 		layer_target_begin(ls, c, cut, origin = {i32(win.x), i32(win.y)})
@@ -658,7 +620,7 @@ layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32,
 @(private = "file")
 layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bounds) -> bool {
 	// Under a clip its draw, recorded unclipped, can't go onto the target.
-	if f.has_filter || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 || state(c).clip != 0 {
+	if f.has_filter || f.blur_px > 0 || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 || state(c).clip != 0 {
 		return false
 	}
 	if r, ok := f.scissor.?; ok && (bounds.minx < r.x || bounds.miny < r.y || bounds.maxx > r.x + r.w || bounds.maxy > r.y + r.h) {
@@ -729,10 +691,11 @@ layer_window :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, si: Layer_St
 	if bounded {
 		area = bounds_intersect(area, bounds_grow(drawn, reach))
 	}
-	if f.has_clip {
-		// Plus the clip's antialiased edge.
-		clip := path_contours_bounds(&ls.clips[depth], 0, len(ls.clips[depth].contours), f.clip_xform)
-		area = bounds_intersect(area, bounds_grow(clip, reach + 2))
+	if k := state(c).clip; k != 0 {
+		// What it is pushed under cuts the composite: its cell (antialiased
+		// edge included), and what the effects move into it.
+		r := c.clips[k - 1].cell
+		area = bounds_intersect(area, bounds_grow({f32(r[0]), f32(r[1]), f32(r[2]), f32(r[3])}, reach))
 	}
 	if f.masked && !f.mask_invert {
 		area = bounds_intersect(area, bounds_grow(mask, reach))

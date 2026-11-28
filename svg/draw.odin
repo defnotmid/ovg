@@ -520,8 +520,9 @@ push_effects :: proc(d: ^Draw, n: ^Node, opacity: f32, fl: ^vg.Filter, clip_mode
 	if n.clip >= 0 {
 		cl := &doc.clips[n.clip]
 		if cl.simple >= 0 {
-			params.clip_rule = clip_path(d, n.clip, n.bbox)
-			params.clip_path = &d.r.clip
+			// The layer's composite is what the clip cuts (the node's
+			// save holds it).
+			vg.clip_path(c, &d.r.clip, clip_path(d, n.clip, n.bbox))
 		} else {
 			complex = true
 		}
@@ -576,15 +577,15 @@ single_paint :: proc(d: ^Draw, n: ^Node, fill_ov, stroke_ov: Maybe(vg.Color)) ->
 	return false
 }
 
-// A layer clipped by clip `idx` (a path, or its content as a mask).
+// A layer clipped by clip `idx` (a path, or its content as a mask); a
+// path clip is set in the current state, which the caller restores after
+// the pop.
 @(private)
 push_clip :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) -> int {
 	cl := &d.doc.clips[idx]
 	if cl.simple >= 0 {
-		params: vg.Layer_Params
-		params.clip_rule = clip_path(d, idx, bbox)
-		params.clip_path = &d.r.clip
-		vg.layer_push(d.ls, d.c, params)
+		vg.clip_path(d.c, &d.r.clip, clip_path(d, idx, bbox))
+		vg.layer_push(d.ls, d.c, {})
 		return 1
 	}
 	vg.layer_push(d.ls, d.c, {mask_alpha = true})
@@ -625,6 +626,8 @@ draw_clip_content :: proc(d: ^Draw, idx: i32, bbox: vg.Rect) {
 	}
 	doc, c := d.doc, d.c
 	cl := &doc.clips[idx]
+	vg.save(c)
+	defer vg.restore(c)
 	nested := 0
 	if cl.clip >= 0 {
 		nested = push_clip(d, cl.clip, bbox)

@@ -289,19 +289,23 @@ Structure is nesting in the draw list, not render targets:
   multiply theirs by it. It cuts what the draws paint and nothing else: a
   clip doesn't make a layer, so clipped draws stay separate draws with their
   own opacity and blend, as PDF and SVG define them. On the canvas this is
-  `clip_path` (in the save/restore state); a layer pushed under a clip
-  starts unclipped and its composite is what the clip cuts, so a group is
-  clipped once, as a whole. `Layer_Params.clip_path` (SVG's clip-path) is
-  that: the layer's composite drawn under the clip. Both backends render
+  `clip_path` (in the save/restore state), the one way to clip by path; a
+  layer pushed under a clip starts unclipped and its composite is what the
+  clip cuts, so a group is clipped once, as a whole (SVG's clip-path on a
+  group: `clip_path`, then the layer). Both backends render
   each clip's coverage, times its parent's, into an image (RGBA8 for now,
   coverage in every channel) just before its first draw, bounded to the
   clip, its parent, the target and what is drawn under it, and a clipped
   draw reads one texel of it at its pixel. Images live from that render
   to their last reader: the CPU lends their memory by lifetime, the GPU
   reuses one whose last reader has passed, so only the clips open at once
-  hold memory. A clip that is a rectangle on whole pixels is the scissor,
-  and one that covers whole everything drawn under it (exact containment
-  by ocurves) is dropped, its draws reading its parent.
+  hold memory. A clip that is an axis-aligned rectangle a pixel or more
+  across (under none or another such) needs no image: it narrows its
+  draws' scissor, which ramps over one pixel there, so each pixel's
+  coverage is its overlap with the rectangle, exactly; inside a layer the
+  scissor is the draws' own, so the layer still starts unclipped. One that
+  covers whole everything drawn under it (exact containment by ocurves) is
+  dropped, its draws reading its parent (and draws it split joined again).
 - **Layers** are a range of draws composited as one: opacity, a blend as a
   draw's, isolated or not, knockout or not (PDF transparency groups and
   SVG's group opacity, mix-blend-mode and filters), and an optional mask.

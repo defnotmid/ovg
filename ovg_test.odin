@@ -1211,7 +1211,8 @@ test_layer_scissor :: proc(t: ^testing.T) {
 		save(c)
 		intersect_scissor(c, 0, 0, 50.5, 100)
 		if layered {
-			layer_push(&ls, c, {clip_path = &all})
+			clip_path(c, &all)
+			layer_push(&ls, c, {})
 		}
 		fill_path(c, &p, paint_color(WHITE))
 		if layered {
@@ -1248,11 +1249,14 @@ test_layer_image_rgba16f :: proc(t: ^testing.T) {
 		clear_rect(c, 0, 0, 16, 16, TRANSPARENT)
 		layer_stack_begin(&ls, c, 16, 16)
 		faint := layer_image_begin(&ls, c, 16, 16, format)
-		layer_push(&ls, c, {opacity = 0.5, clip_path = &p})
+		save(c)
+		clip_path(c, &p)
+		layer_push(&ls, c, {opacity = 0.5})
 		path_reset(&q)
 		path_rect(&q, 0, 0, 8, 16)
 		fill_path(c, &q, paint_color({1, 1, 1, 0.4 / 255}))
 		layer_pop(&ls, c)
+		restore(c)
 		tile := layer_pattern_begin(&ls, c, 4, 4)
 		path_reset(&q)
 		path_rect(&q, 0, 0, 4, 4)
@@ -2188,18 +2192,25 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 		path_init(&clip)
 		defer path_destroy(&clip)
 		path_circle(&clip, 48, 48, 12)
-		layer_push(&ls, c, {opacity = 0.65, clip_path = &clip})
+		save(c)
+		clip_path(c, &clip)
+		layer_push(&ls, c, {opacity = 0.65})
 		path_reset(&p)
 		path_rect(&p, 38, 38, 20, 20)
 		fill_path(c, &p, paint_color(rgb(255, 220, 40)))
 		layer_pop(&ls, c)
+		restore(c)
 		// Luminance masks (read by Fill_Image_Luminance): alone (the mask
 		// blit Source_Over), in a clip (Source_In) and inverted
 		// (Destination_Out), over a translucent image and colour.
 		path_reset(&clip)
 		path_circle(&clip, 20, 48, 11)
-		for params, k in ([3]Layer_Params{{mask_luminance = .Pdf}, {clip_path = &clip}, {mask_invert = true}}) {
+		for params, k in ([3]Layer_Params{{mask_luminance = .Pdf}, {}, {mask_invert = true}}) {
 			ox := f32(k * 20 + 2)
+			save(c)
+			if k == 1 {
+				clip_path(c, &clip)
+			}
 			layer_push(&ls, c, params)
 			path_reset(&p)
 			path_rect(&p, ox, 36, 18, 22)
@@ -2215,6 +2226,7 @@ test_sw_fast_paths_match_shader :: proc(t: ^testing.T) {
 			fill_path(c, &p, paint_color(rgba(90, 200, 30, 120)))
 			layer_mask_end(&ls, c)
 			layer_pop(&ls, c)
+			restore(c)
 		}
 		layer_stack_end(&ls, c)
 
