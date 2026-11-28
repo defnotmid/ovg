@@ -374,6 +374,16 @@ layer_image_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	layer_offscreen_end(ls, c)
 }
 
+// Hands an image from `layer_image_begin` back before the frame ends, once
+// every command that reads it is recorded: a later image may then reuse it.
+layer_image_release :: proc(ls: ^Layer_Stack, id: Image_Id) {
+	for &t in ls.images {
+		if t.id == id {
+			t.in_use = false
+		}
+	}
+}
+
 // An image of `pool` free this frame (exact size and format), else a new
 // one, made the render target. Layers pushed until `layer_offscreen_end`
 // work in it: a blend reads it as the backdrop, so its layers must be its
@@ -381,8 +391,11 @@ layer_image_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 @(private = "file")
 layer_offscreen_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, pool: ^[dynamic]Pooled_Layer, w, h: u32, format: Pixel_Format, flags: Image_Flags) -> Image_Id {
 	id := Image_Id{}
+	// Reused within the frame only once released, and then only where that
+	// is how images share memory (Backend.transient_by_lifetime).
+	again := !c.backend.transient_by_lifetime
 	for &t in pool {
-		if !t.in_use && t.w == w && t.h == h && t.format == format {
+		if !t.in_use && t.w == w && t.h == h && t.format == format && (again || t.last_used != ls.frame) {
 			t.in_use = true
 			t.last_used = ls.frame
 			id = t.id

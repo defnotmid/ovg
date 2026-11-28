@@ -524,9 +524,13 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	s: Scene
 	scene_init(&s)
 	defer scene_destroy(&s)
+	// A clip directly inside a knockout group (its elements are draws and
+	// layers).
 	scene_draw(&s, Layer_Push{opacity = 1, isolated = true, knockout = true})
+	scene_draw(&s, Clip_Push{Clip_Rect{0, 0, 4, 4}})
+	scene_draw(&s, Clip_Pop{})
 	scene_draw(&s, Layer_Pop{})
-	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 1})
 
 	// A Porter-Duff operation on a draw that goes through a layer (its
 	// mask's or blend mode's).
@@ -746,6 +750,81 @@ test_scene_truth_groups :: proc(t: ^testing.T) {
 			}
 		}
 		testing.expectf(t, worst * 255 <= 1, "non-isolated group (screen %v) is %.1f levels off", screen, worst * 255)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}
+
+// The four (isolated, knockout) groups of PDF 11.4 over an opaque backdrop
+// B, and a non-isolated knockout group with an opaque first element,
+// screened (a Normal group's result doesn't depend on its alpha): red at
+// opacity q1 over (2, 2)..(14, 14), then green at 0.5 Multiply over
+// (8.5, 8)..(20, 20), shape 0.5 in its left column. The truth follows
+// 11.4's compositing per pixel (tools/scene_truth has the same cases).
+@(test)
+test_scene_truth_knockout :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	back := [3]f32{0.2, 0.4, 0.8}
+	over :: proc(pb: [3]f32, ab: f32, cs: [3]f32, as: f32, multiply: bool) -> ([3]f32, f32) {
+		cb := pb / ab if ab > 0 else 0
+		mixed := (1 - ab) * cs + ab * (cb * cs if multiply else cs)
+		return as * mixed + (1 - as) * pb, ab + as - ab * as
+	}
+	Combo :: struct {
+		isolated, knockout, screen: bool,
+		q1:                         f32,
+	}
+	for combo in ([5]Combo{{false, false, false, 0.5}, {true, false, false, 0.5}, {false, true, false, 0.5}, {true, true, false, 0.5}, {false, true, true, 1}}) {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {back.r, back.g, back.b, 1}})
+		red := scene_look(scene_add_paint(&s, Scene_Solid{{1, 0, 0, 1}}))
+		red.opacity = combo.q1
+		green := scene_look(scene_add_paint(&s, Scene_Solid{{0, 1, 0, 1}}))
+		green.opacity = 0.5
+		green.blend.mode = .Multiply
+		rect2 := [4]Vec2{{8.5, 8}, {20, 8}, {20, 20}, {8.5, 20}}
+		scene_draw(&s, Layer_Push{opacity = 1, isolated = combo.isolated, knockout = combo.knockout, blend = {mode = .Screen if combo.screen else .Normal}})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{2, 2}, {14, 2}, {14, 14}, {2, 14}}), transform = id, look = red})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, rect2[:]), transform = id, look = green})
+		scene_draw(&s, Layer_Pop{})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		worst: f32
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				pz := [3]f32{} if combo.isolated else back
+				az: f32 = 0 if combo.isolated else 1
+				p, a := pz, az
+				ag: f32
+				f1: f32 = 1 if x >= 2 && x < 14 && y >= 2 && y < 14 else 0
+				fs := [2]f32{f1, pixel_area(rect2[:], x, y)}
+				qs := [2]f32{combo.q1, 0.5}
+				cs := [2][3]f32{{1, 0, 0}, {0, 1, 0}}
+				for i in 0 ..< 2 {
+					f, q := fs[i], qs[i]
+					if combo.knockout {
+						pt, at := over(pz, az, cs[i], q, i == 1)
+						p, a = (1 - f) * p + f * pt, (1 - f) * a + f * at
+						ag = (1 - f) * ag + f * q
+					} else {
+						p, a = over(p, a, cs[i], f * q, i == 1)
+						ag = ag + f * q - ag * f * q
+					}
+				}
+				own := p if combo.isolated else p - (1 - ag) * pz
+				want := own + (1 - ag) * back
+				if combo.screen {
+					c := own / ag if ag > 0 else 0
+					want = (1 - ag) * back + ag * (back + c - back * c)
+				}
+				got := target_px(&tg, x, y)
+				worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+			}
+		}
+		testing.expectf(t, worst * 255 <= 1, "group %v is %.1f levels off", combo, worst * 255)
 		scene_destroy(&s)
 		target_close(&tg)
 	}

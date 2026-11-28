@@ -35,6 +35,11 @@ CASES := [?]Case {
 	{"group_non_isolated", build_group_half, worst_group_half},
 	{"group_non_isolated_screen", build_group_screen, worst_group_screen},
 	{"group_non_isolated_nested", build_group_nested, worst_group_half},
+	{"group_iso_0_ko_0", build_knock_00, worst_knock_00},
+	{"group_iso_1_ko_0", build_knock_10, worst_knock_10},
+	{"group_iso_0_ko_1", build_knock_01, worst_knock_01},
+	{"group_iso_1_ko_1", build_knock_11, worst_knock_11},
+	{"group_iso_0_ko_1_opaque_screen", build_knock_01_opaque, worst_knock_01_opaque},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -507,3 +512,104 @@ worst_group_screen :: proc(px: []u8, w: int) -> f32 {
 }
 @(private = "file")
 build_group_nested :: proc(s: ^vg.Scene) {build_group(s, 0.5, .Normal, nested = true)}
+
+// The four (isolated, knockout) groups of PDF 11.4 over an opaque backdrop
+// B: red at opacity q1 over (2, 2)..(14, 14), then green at 0.5 Multiply
+// over (8.5, 8)..(20, 20), whose left column is half covered (shape 0.5).
+// knock_truth follows 11.4's compositing per pixel: shape f, opacity q,
+// the group's initial backdrop (transparent if isolated, B if not), each
+// element against the result so far (or against the initial backdrop,
+// replacing by its shape, if knockout), and the group's alpha apart.
+@(private = "file")
+build_knock :: proc(s: ^vg.Scene, isolated, knockout: bool, q1: f32, screen := false) {
+	id := ground(s, GROUP_BACK)
+	red := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 0, 0, 1}}))
+	red.opacity = q1
+	green := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{0, 1, 0, 1}}))
+	green.opacity = 0.5
+	green.blend.mode = .Multiply
+	vg.scene_draw(s, vg.Layer_Push{opacity = 1, isolated = isolated, knockout = knockout, blend = {mode = .Screen if screen else .Normal}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{2, 2}, {14, 2}, {14, 14}, {2, 14}}), transform = id, look = red})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{8.5, 8}, {20, 8}, {20, 20}, {8.5, 20}}), transform = id, look = green})
+	vg.scene_draw(s, vg.Layer_Pop{})
+}
+
+// Premultiplied result of source (straight cs, alpha as) over backdrop
+// (premultiplied pb, alpha ab), blended by Multiply or not.
+@(private = "file")
+pdf_over :: proc(pb: [3]f32, ab: f32, cs: [3]f32, as: f32, multiply: bool) -> (p: [3]f32, a: f32) {
+	cb := pb / ab if ab > 0 else 0
+	blended := cb * cs if multiply else cs
+	mixed := (1 - ab) * cs + ab * blended
+	return as * mixed + (1 - as) * pb, ab + as - ab * as
+}
+
+@(private = "file")
+knock_truth :: proc(x, y: int, isolated, knockout: bool, q1: f32, screen: bool) -> [3]f32 {
+	back := GROUP_BACK.rgb
+	pz := [3]f32{} if isolated else back
+	az: f32 = 0 if isolated else 1
+	p, a := pz, az
+	ag: f32 // the group's own alpha
+	f1: f32 = 1 if x >= 2 && x < 14 && y >= 2 && y < 14 else 0
+	f2 := pixel_area({{8.5, 8}, {20, 8}, {20, 20}, {8.5, 20}}, x, y)
+	elems := [2]struct {
+		f, q:     f32,
+		c:        [3]f32,
+		multiply: bool,
+	}{{f1, q1, {1, 0, 0}, false}, {f2, 0.5, {0, 1, 0}, true}}
+	for e in elems {
+		if knockout {
+			pt, at := pdf_over(pz, az, e.c, e.q, e.multiply)
+			p = (1 - e.f) * p + e.f * pt
+			a = (1 - e.f) * a + e.f * at
+			ag = (1 - e.f) * ag + e.f * e.q
+		} else {
+			p, a = pdf_over(p, a, e.c, e.f * e.q, e.multiply)
+			ag = ag + e.f * e.q - ag * e.f * e.q
+		}
+	}
+	own := p - (1 - ag) * pz if !isolated else p
+	if screen {
+		// Screened onto B by its own alpha, which then counts: a Normal
+		// group's result doesn't depend on a_g, so knocking it out shows.
+		cs := own / ag if ag > 0 else 0
+		return (1 - ag) * back + ag * (back + cs - back * cs)
+	}
+	// The group (Normal, opacity 1) onto B.
+	return own + (1 - ag) * back
+}
+
+@(private = "file")
+worst_knock :: proc(px: []u8, w: int, isolated, knockout: bool, q1: f32, screen := false) -> f32 {
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			want := knock_truth(x, y, isolated, knockout, q1, screen)
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+		}
+	}
+	return worst * 255
+}
+
+@(private = "file")
+build_knock_00 :: proc(s: ^vg.Scene) {build_knock(s, false, false, 0.5)}
+@(private = "file")
+worst_knock_00 :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, false, false, 0.5)}
+@(private = "file")
+build_knock_10 :: proc(s: ^vg.Scene) {build_knock(s, true, false, 0.5)}
+@(private = "file")
+worst_knock_10 :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, true, false, 0.5)}
+@(private = "file")
+build_knock_01 :: proc(s: ^vg.Scene) {build_knock(s, false, true, 0.5)}
+@(private = "file")
+worst_knock_01 :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, false, true, 0.5)}
+@(private = "file")
+build_knock_11 :: proc(s: ^vg.Scene) {build_knock(s, true, true, 0.5)}
+@(private = "file")
+worst_knock_11 :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, true, true, 0.5)}
+@(private = "file")
+build_knock_01_opaque :: proc(s: ^vg.Scene) {build_knock(s, false, true, 1, screen = true)}
+@(private = "file")
+worst_knock_01_opaque :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, false, true, 1, screen = true)}

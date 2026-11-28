@@ -489,7 +489,16 @@ belongs to step 4; the rest to step 5:
   for (1 - a_g) B (T), and one arithmetic composite G - T for the group's
   own colour, all RGBA16F; no new shader;
 - knockout groups, which track each element's shape apart from the group's
-  opacity.
+  opacity. Built from the same pieces (scene_knockout): per element (a draw,
+  or a layer and its range), its shape S (drawn white, opaque, unmasked) and
+  X, the element drawn onto the group's starting backdrop C0 with its own
+  opacity, blend mode and mask. As f C_t = X - (1 - f) C0, the result R
+  (starting as C0) becomes R (1 - f) + X - (1 - f) C0: S drawn
+  Destination_Out, then the difference added (an isolated group's C0 is
+  transparent, leaving X). A non-isolated knockout group's alpha knocks out
+  alike and its backdrop is removed as above. Each element's images go back
+  to the pool once read (`layer_image_release`). Clips directly inside a
+  knockout group wait for clips as coverage.
 
 Parity holds the CPU backend to the result.
 

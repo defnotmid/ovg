@@ -7,11 +7,11 @@ import "core:slice"
 // A Scene recorded onto a canvas, through its layer stack, so that either
 // backend draws it with today's machinery (docs/scene.md, staging step 4).
 // What this path can't yet draw exactly is rejected whole, before anything
-// is recorded, rather than drawn approximately: knockout groups, layer
-// filters, motion, a Porter-Duff operation with a mask, what reads its
-// backdrop through a path clip, and the pattern cases listed at
-// scene_record_supported. A non-isolated group is drawn as scene_group
-// says. A layer or a run
+// is recorded, rather than drawn approximately: layer filters, motion, a
+// Porter-Duff operation with a mask, what reads its backdrop through a path
+// clip, clips directly inside a knockout group, and the pattern cases
+// listed at scene_record_supported. Non-isolated and knockout groups are
+// drawn as scene_group and scene_knockout say. A layer or a run
 // under a Porter-Duff operation is drawn into an image first, which then
 // composites with the operation where it isn't transparent (bounded).
 //
@@ -59,6 +59,9 @@ Scene_Renderer :: struct {
 	// Drawing a non-isolated group's alpha: blend modes are off and groups
 	// inside are isolated (scene_group).
 	alpha_pass:  bool,
+	// Drawing a knockout element's shape: white, opaque, unmasked, blend
+	// modes off, groups plain (scene_knockout).
+	shape_pass:  bool,
 	// Per open Layer_Push, its Porter-Duff operation: anything but
 	// source-over draws the layer into an image first (scene_bounded_end).
 	layer_ops:   [dynamic]Composite_Operation,
@@ -184,7 +187,7 @@ scene_record :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene
 	clear(&r.pushed_layer)
 	clear(&r.layer_ops)
 	clear(&r.bounded)
-	r.alpha_pass = false
+	r.alpha_pass, r.shape_pass = false, false
 	scene_render_masks(r, c, ls, s)
 	scene_record_range(r, c, ls, s, s.main)
 	restore(c)
@@ -213,7 +216,9 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 	// its backdrop (a blend mode, a Porter-Duff operation, a non-isolated
 	// group) must not have one as its nearest group, or it would read the
 	// clip's transparency instead of what is under it.
-	Open :: enum u8 {Rect, Path_Clip, Isolated, Group}
+	// A knockout group's elements are its draws and layers: no clips
+	// directly inside one yet.
+	Open :: enum u8 {Rect, Path_Clip, Isolated, Group, Knockout}
 	opens := make([dynamic]Open, 0, 16, context.temp_allocator)
 	inside := 0
 	for d, k in s.draws {
@@ -229,6 +234,10 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		case Layer_Push:
 			l.blend = v.blend
 			reads = !v.isolated
+		case Clip_Push:
+			if len(opens) > 0 && opens[len(opens) - 1] == .Knockout {
+				return {.Unsupported, .Draws, k}
+			}
 		case Scene_Clear:
 			if inside > 0 {
 				return {.Unsupported, .Draws, k}
@@ -250,14 +259,15 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		}
 		#partial switch v in d {
 		case Layer_Push:
-			append(&opens, Open.Isolated if v.isolated else .Group)
-			inside += int(!v.isolated)
+			o := Open.Knockout if v.knockout else .Isolated if v.isolated else .Group
+			append(&opens, o)
+			inside += int(o >= .Group)
 		case Clip_Push:
 			_, rect := v.shape.(Clip_Rect)
 			append(&opens, Open.Rect if rect else .Path_Clip)
 		case Layer_Pop, Clip_Pop:
 			if len(opens) > 0 {
-				inside -= int(pop(&opens) == .Group)
+				inside -= int(pop(&opens) >= .Group)
 			}
 		}
 		ok := true
@@ -289,7 +299,7 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 				}
 			}
 		case Layer_Push:
-			ok = !v.knockout && v.filters.count == 0 && (v.blend.op == .Source_Over || v.mask == 0 && v.blend.mode == .Normal && v.isolated)
+			ok = v.filters.count == 0 && (v.blend.op == .Source_Over || v.mask == 0 && v.blend.mode == .Normal && v.isolated && !v.knockout)
 		}
 		if !ok {
 			return {.Unsupported, .Draws, k}
@@ -475,6 +485,9 @@ scene_canvas_paint :: proc(r: ^Scene_Renderer, s: ^Scene, id: Paint_Id, draw: Tr
 		return transform_multiply(transform_multiply(s.transforms[t - 1], r.base), transform_inverse(draw))
 	}
 	p: Paint
+	if r.shape_pass {
+		return paint_color({1, 1, 1, 1})
+	}
 	if r.white {
 		// Inside an uncoloured cell: coverage only, in white; a stencil
 		// image (Alpha8) keeps its alpha.
@@ -625,8 +638,21 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 				restore(c)
 			}
 		case Layer_Push:
+			if r.shape_pass {
+				// A group's shape is its elements' union, whatever it is.
+				layer_push(ls, c, {opacity = 1})
+				append(&r.layer_masks, 0)
+				append(&r.layer_ops, Composite_Operation.Source_Over)
+				continue
+			}
 			if v.opacity <= 0 {
 				culled = 1
+				continue
+			}
+			if v.knockout {
+				pop_at := scene_matching_pop(s, k)
+				scene_knockout(r, c, ls, s, v, {k + 1, pop_at - k - 1})
+				k = pop_at
 				continue
 			}
 			if !v.isolated && !r.alpha_pass {
@@ -749,6 +775,20 @@ scene_group :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene,
 	scene_record_range(r, c, ls, s, inner)
 	r.alpha_pass = alpha_pass
 	layer_image_end(ls, c)
+	own := scene_remove(ls, c, g, a, b)
+	layer_release(ls, b)
+	layer_image_release(ls, g)
+	layer_image_release(ls, a)
+	scene_group_composite(r, c, ls, s, v, own)
+	layer_release(ls, own)
+}
+
+// `g` less (1 - m) `b`, where `m` is `a`'s alpha: B with A drawn over it
+// Destination_Out, then one arithmetic composite. A pooled RGBA16F image
+// the stack's size, for `layer_release`.
+@(private = "file")
+scene_remove :: proc(ls: ^Layer_Stack, c: ^Canvas, g, a, b: Image_Id) -> Image_Id {
+	w, h := ls.width, ls.height
 	t := layer_acquire(ls, c, w, h, format = .RGBA16F)
 	layer_target_begin(ls, c, t, keep = true)
 	save(c)
@@ -759,11 +799,17 @@ scene_group :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene,
 	layer_blit(ls, c, a, 0, 0, w, h, 1, keep_motion = true)
 	restore(c)
 	layer_target_end(ls, c)
-	layer_release(ls, b)
-	own := layer_acquire(ls, c, w, h, format = .RGBA16F)
-	filter_image(c, own, Composite{op = .Arithmetic, k = {0, 1, -1, 0}, backdrop = t}, g)
+	out := layer_acquire(ls, c, w, h, format = .RGBA16F)
+	filter_image(c, out, Composite{op = .Arithmetic, k = {0, 1, -1, 0}, backdrop = t}, g)
 	layer_release(ls, t)
-	params := Layer_Params{opacity = v.opacity, blend = v.blend.mode}
+	return out
+}
+
+// A group's own colour `own` onto its backdrop, with the group's opacity,
+// blend mode and mask.
+@(private = "file")
+scene_group_composite :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, v: Layer_Push, own: Image_Id) {
+	params := Layer_Params{opacity = v.opacity, blend = scene_mode(r, v.blend.mode)}
 	scene_mask_params(s, v.mask, &params)
 	layer_push(ls, c, params)
 	scene_copy(ls, c, own)
@@ -771,6 +817,101 @@ scene_group :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene,
 		scene_record_mask(r, c, ls, s, v.mask)
 	}
 	layer_pop(ls, c)
+}
+
+// `into` (a pooled image) with `shape`'s alpha f knocked out of it, then
+// `add` added: into (1 - f) + add.
+@(private = "file")
+scene_knock :: proc(ls: ^Layer_Stack, c: ^Canvas, into, shape, add: Image_Id) {
+	w, h := ls.width, ls.height
+	layer_target_begin(ls, c, into, keep = true)
+	save(c)
+	set_global_alpha(c, 1)
+	set_composite_operation(c, .Destination_Out)
+	layer_blit(ls, c, shape, 0, 0, w, h, 1, keep_motion = true)
+	set_composite_operation(c, .Lighter)
+	layer_blit(ls, c, add, 0, 0, w, h, 1, keep_motion = true)
+	restore(c)
+	layer_target_end(ls, c)
+}
+
+// A knockout group (PDF 11.4.6) of the draws `inner`. Each element (a draw,
+// or a layer and its range) composites with the group's starting backdrop
+// C0 rather than with the elements before it, and replaces them by its
+// shape f. With X the element drawn onto C0 (its own opacity, blend mode
+// and mask; f in it once), f C_t = X - (1 - f) C0, so the result R,
+// starting as C0, becomes R (1 - f) + X - (1 - f) C0: R with the element's
+// shape S drawn Destination_Out, then X - (1 - f) C0 added. An isolated
+// group's C0 is transparent, which leaves X. A non-isolated group's alpha
+// knocks out alike, A (1 - f) plus the element's alpha alone, and its
+// colour is then R - (1 - a_g) C0, as in scene_group. Images are RGBA16F
+// and handed back per element.
+@(private = "file")
+scene_knockout :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, v: Layer_Push, inner: Range) {
+	w, h := ls.width, ls.height
+	isolated := v.isolated || r.alpha_pass
+	b, a: Image_Id
+	if !isolated {
+		b = layer_backdrop(ls, c, .RGBA16F)
+		a = layer_acquire(ls, c, w, h, format = .RGBA16F)
+		layer_target_begin(ls, c, a)
+		layer_target_end(ls, c)
+	}
+	res := layer_acquire(ls, c, w, h, format = .RGBA16F)
+	layer_target_begin(ls, c, res, keep = !isolated)
+	if !isolated {
+		save(c)
+		set_global_alpha(c, 1)
+		set_composite_operation(c, .Copy)
+		layer_blit(ls, c, b, 0, 0, w, h, 1, keep_motion = true)
+		restore(c)
+	}
+	layer_target_end(ls, c)
+	for k := inner.start; k < inner.start + inner.count; k += 1 {
+		el := Range{k, 1}
+		if _, push := s.draws[k].(Layer_Push); push {
+			pop_at := scene_matching_pop(s, k)
+			el = {k, pop_at - k + 1}
+			k = pop_at
+		}
+		shape := layer_image_begin(ls, c, w, h, .RGBA16F)
+		shape_pass := r.shape_pass
+		r.shape_pass = true
+		scene_record_range(r, c, ls, s, el)
+		r.shape_pass = shape_pass
+		layer_image_end(ls, c)
+		x := layer_image_begin(ls, c, w, h, .RGBA16F)
+		if !isolated {
+			scene_copy(ls, c, b)
+		}
+		scene_record_range(r, c, ls, s, el)
+		layer_image_end(ls, c)
+		if isolated {
+			scene_knock(ls, c, res, shape, x)
+		} else {
+			add := scene_remove(ls, c, x, shape, b)
+			scene_knock(ls, c, res, shape, add)
+			layer_release(ls, add)
+			alone := layer_image_begin(ls, c, w, h, .RGBA16F)
+			alpha_pass := r.alpha_pass
+			r.alpha_pass = true
+			scene_record_range(r, c, ls, s, el)
+			r.alpha_pass = alpha_pass
+			layer_image_end(ls, c)
+			scene_knock(ls, c, a, shape, alone)
+			layer_image_release(ls, alone)
+		}
+		layer_image_release(ls, x)
+		layer_image_release(ls, shape)
+	}
+	own := res
+	if !isolated {
+		own = scene_remove(ls, c, res, a, b)
+		layer_release(ls, res)
+		layer_release(ls, a)
+		layer_release(ls, b)
+	}
+	scene_group_composite(r, c, ls, s, v, own)
 	layer_release(ls, own)
 }
 
@@ -957,6 +1098,11 @@ scene_mask_image :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^S
 // alone); its opacity and Porter-Duff operation are the canvas's.
 @(private = "file")
 scene_record_look :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, l: Scene_Look, draw: proc(r: ^Scene_Renderer, c: ^Canvas, s: ^Scene, d: Scene_Draw), d: Scene_Draw) {
+	l := l
+	if r.shape_pass {
+		// The shape alone: an element at opacity 0 still has one.
+		l.opacity, l.mask, l.blend = 1, 0, {}
+	}
 	if l.opacity <= 0 {
 		return
 	}
@@ -986,6 +1132,10 @@ scene_record_look :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^
 // glyphs, so it paints once wherever glyphs overlap.
 @(private = "file")
 scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, g: Scene_Glyphs) {
+	g := g
+	if r.shape_pass {
+		g.opacity, g.mask, g.blend = 1, 0, {}
+	}
 	if g.opacity <= 0 {
 		return
 	}
@@ -1005,7 +1155,7 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 	}
 	rt := scene_xf(r, s, run.transform)
 	solid, is_solid := s.paints[g.paint - 1].(Scene_Solid)
-	direct := g.stroke == 0 && is_solid && solid.color[3] >= 1 && g.opacity >= 1 && g.mask == 0 && scene_mode(r, g.blend.mode) == .Normal
+	direct := g.stroke == 0 && (r.shape_pass || is_solid && solid.color[3] >= 1) && g.opacity >= 1 && g.mask == 0 && scene_mode(r, g.blend.mode) == .Normal
 	if direct {
 		p := scene_canvas_paint(r, s, g.paint, rt)
 		save(c)
