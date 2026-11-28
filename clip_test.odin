@@ -187,6 +187,58 @@ test_clip_path_lifetimes :: proc(t: ^testing.T) {
 	testing.expectf(t, worst <= 1, "clips sharing images are %.2f levels from exact", worst)
 }
 
+// Draws one after another, each under its own clip (a stroke, then a
+// fill, then a kept shape), each take theirs.
+@(test)
+test_clip_path_in_turn :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	tg: Clip_Target
+	clip_open(&tg, W, H)
+	defer clip_close(&tg)
+	c := &tg.canvas
+	p: Path
+	path_init(&p)
+	defer path_destroy(&p)
+	clear_rect(c, 0, 0, W, H, {0, 0, 0, 1})
+	q: Path
+	path_init(&q)
+	defer path_destroy(&q)
+	path_rect(&q, 0, 18, W, 6)
+	kept, built := shape_from_path(&q)
+	testing.expect(t, built)
+	defer shape_destroy(&kept)
+	rect := CLIP_RECT
+	for k in 0 ..< 3 {
+		save(c)
+		clip_polygon(&p, rect[:])
+		clip_path(c, &p)
+		path_reset(&p)
+		switch k {
+		case 0:
+			path_move_to(&p, 0, 8)
+			path_line_to(&p, W, 8)
+			sp := paint_color({1, 1, 1, 1})
+			sp.stroke.line_width = 2
+			stroke_path(c, &p, sp)
+		case 1:
+			path_rect(&p, 0, 11, W, 5)
+			fill_path(c, &p, paint_color({1, 1, 1, 1}))
+		case 2:
+			fill_shape(c, &kept, paint_color({1, 1, 1, 1}))
+		}
+		restore(c)
+	}
+	flush(c)
+	worst := clip_worst(&tg, W, H, proc(x, y: int) -> f32 {
+		rect := CLIP_RECT
+		a := [4]Vec2{{0, 7}, {24, 7}, {24, 9}, {0, 9}}
+		b := [4]Vec2{{0, 11}, {24, 11}, {24, 16}, {0, 16}}
+		d := [4]Vec2{{0, 18}, {24, 18}, {24, 24}, {0, 24}}
+		return (pixel_area(a[:], x, y) + pixel_area(b[:], x, y) + pixel_area(d[:], x, y)) * pixel_area(rect[:], x, y)
+	})
+	testing.expectf(t, worst <= 1, "clips in turn are %.2f levels from exact", worst)
+}
+
 // A clip that is a rectangle on whole pixels is the scissor: no image.
 @(test)
 test_clip_path_whole_pixels :: proc(t: ^testing.T) {

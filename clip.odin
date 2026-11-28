@@ -173,18 +173,17 @@ clip_use :: proc(c: ^Canvas, inst: Shape_Instance) {
 	if k == 0 {
 		return
 	}
-	b: Bounds
-	switch {
-	case inst.shape != nil:
-		b = device_bounds(inst.shape.bounds, transform_multiply(shape_local(inst.shape), inst.transform), 1 + instance_reach(inst))
-	case inst.marker == .None && inst.words.count > 0:
-		b = device_bounds(words_bounds(c.shape_words[inst.words.start:][:inst.words.count]), inst.transform, 1 + instance_reach(inst))
-	case:
+	r := &c.clips[k - 1]
+	if inst.marker != .None {
 		// A marker: the whole cell.
-		c.clips[k - 1].used = c.clips[k - 1].cell
+		r.used = r.cell
 		return
 	}
-	r := &c.clips[k - 1]
+	if inst.shape == nil && inst.words.count == 0 {
+		return
+	}
+	// The instance's transform takes shape units to the drawing's.
+	b := device_bounds(instance_shape_bounds(inst, c.shape_words[:]), inst.transform, 1 + instance_reach(inst))
 	r.used = pixels_union(r.used, pixels_intersect(r.cell, pixels_of(b)))
 }
 
