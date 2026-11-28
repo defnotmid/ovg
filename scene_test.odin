@@ -368,6 +368,69 @@ test_scene_truth_masks :: proc(t: ^testing.T) {
 	}
 }
 
+// A luminance mask over its backdrop colour (PDF's /BC): where its group
+// draws, the group over the backdrop; elsewhere the backdrop's luminance.
+// Two readers of one mask see the same mask, rendered once.
+@(test)
+test_scene_truth_mask_backdrop :: proc(t: ^testing.T) {
+	W, H :: 8, 8
+	tg: Scene_Target
+	target_open(&tg, W, H)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	at := u32(len(s.draws))
+	append(&s.draws, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {4, 0}, {4, H}, {0, H}}), transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{1, 0, 0, 1}}))})
+	append(&s.masks, Scene_Mask{draws = {at, 1}, read = .Luminance, backdrop = {0.5, 0.5, 0.5, 1}})
+	look := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
+	look.mask = Mask_Id(len(s.masks))
+	scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+	scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {W, 0}, {W, 4}, {0, 4}}), transform = id, look = look})
+	scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{0, 4}, {W, 4}, {W, H}, {0, H}}), transform = id, look = look})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+	for y in ([2]int{1, 6}) {
+		red, back := target_px(&tg, 1, y)[0], target_px(&tg, 6, y)[0]
+		testing.expectf(t, abs(red - 0.2125) * 255 <= 1 && abs(back - 0.5) * 255 <= 1, "row %d: %v under the group, %v under the backdrop", y, red, back)
+	}
+	testing.expect(t, image_id_valid(tg.render.mask_images[0]), "the mask was rendered")
+}
+
+// A transfer table (PDF's /TR) maps the mask's 8-bit value: the inverting
+// table on a luminance mask lets through one minus it.
+@(test)
+test_scene_truth_mask_transfer :: proc(t: ^testing.T) {
+	W, H :: 8, 8
+	straight := [3]f32{0.2, 0.7, 0.4}
+	a: f32 = 0.6
+	tg: Scene_Target
+	target_open(&tg, W, H)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	square := scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}})
+	at := u32(len(s.draws))
+	append(&s.draws, Scene_Fill{path = square, transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{straight.r * a, straight.g * a, straight.b * a, a}}))})
+	table: [256]u8
+	for i in 0 ..< 256 {
+		table[i] = u8(255 - i)
+	}
+	append(&s.luts, table)
+	append(&s.masks, Scene_Mask{draws = {at, 1}, read = .Luminance_Pdf, lut = Lut_Id(len(s.luts))})
+	look := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
+	look.mask = Mask_Id(len(s.masks))
+	scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+	scene_draw(&s, Scene_Fill{path = square, transform = id, look = look})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+	v := (0.3 * straight.r + 0.59 * straight.g + 0.11 * straight.b) * a
+	want := f32(255 - int(v * 255 + 0.5)) / 255
+	got := target_px(&tg, 3, 3)[0]
+	testing.expectf(t, abs(got - want) * 255 <= 1, "through the inverting table: %v, wanted %v", got, want)
+}
+
 // Nested clips: a whole-pixel rectangle and a path, white over black, each
 // pixel the product of their exact coverages.
 @(test)

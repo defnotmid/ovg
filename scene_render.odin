@@ -7,12 +7,14 @@ import "core:math"
 // backend draws it with today's machinery (docs/scene.md, staging step 4).
 // What this path can't yet draw exactly is rejected whole, before anything
 // is recorded, rather than drawn approximately: groups that are knockout or
-// not isolated, layer filters, transfer tables, a mask backdrop other than
-// black, pattern paints, motion, and a Porter-Duff operation on a layer.
+// not isolated, layer filters, pattern paints, motion, and a Porter-Duff
+// operation on a layer.
 //
-// Masks are drawn again for each reader here, and clips by path are layers;
-// rendering each mask once and clipping by coverage are the compile steps
-// that come next. The result is the same.
+// Each mask is rendered once, into an image of the canvas's size, the first
+// time a draw reads it: a luminance mask over its backdrop colour (PDF's
+// /BC), its transfer table (/TR) applied once to its value. Every reader
+// copies that image into its own mask, 1:1. Clips by path are layers;
+// clipping by coverage is the compile step that comes next.
 
 // What recording a scene works in, kept by the caller across scenes, and
 // the per-render images and shapes it made, released by
@@ -32,6 +34,10 @@ Scene_Renderer :: struct {
 	layer_masks: [dynamic]Mask_Id,
 	// Per open push, whether it pushed a layer (true) or saved a scissor.
 	pushed_layer: [dynamic]bool,
+	// Per mask, its image once rendered (none until a draw reads it) and
+	// how its readers take it: as alpha once a transfer table made it one.
+	mask_images: [dynamic]Image_Id,
+	mask_reads:  [dynamic]Scene_Mask_Read,
 }
 
 scene_renderer_init :: proc(r: ^Scene_Renderer, allocator := context.allocator) {
@@ -46,6 +52,8 @@ scene_renderer_init :: proc(r: ^Scene_Renderer, allocator := context.allocator) 
 	r.rgba = make([dynamic]u8, allocator)
 	r.layer_masks = make([dynamic]Mask_Id, allocator)
 	r.pushed_layer = make([dynamic]bool, allocator)
+	r.mask_images = make([dynamic]Image_Id, allocator)
+	r.mask_reads = make([dynamic]Scene_Mask_Read, allocator)
 }
 
 scene_renderer_destroy :: proc(r: ^Scene_Renderer, c: ^Canvas) {
@@ -65,6 +73,8 @@ scene_renderer_destroy :: proc(r: ^Scene_Renderer, c: ^Canvas) {
 	delete(r.rgba)
 	delete(r.layer_masks)
 	delete(r.pushed_layer)
+	delete(r.mask_images)
+	delete(r.mask_reads)
 }
 
 // Frees what recording a scene made for one render (images for borrowed
@@ -132,6 +142,11 @@ scene_record :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene
 	save(c)
 	clear(&r.layer_masks)
 	clear(&r.pushed_layer)
+	resize(&r.mask_images, len(s.masks))
+	resize(&r.mask_reads, len(s.masks))
+	for &m in r.mask_images {
+		m = {}
+	}
 	scene_record_range(r, c, ls, s, s.main)
 	restore(c)
 	layer_stack_end(ls, c)
@@ -189,12 +204,6 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		}
 		if !ok {
 			return {.Unsupported, .Draws, k}
-		}
-	}
-	for m, i in s.masks {
-		black := m.backdrop == {} || m.backdrop == {0, 0, 0, 1}
-		if m.lut != 0 || (m.read != .Alpha && !black) {
-			return {.Unsupported, .Masks, i}
 		}
 	}
 	// Sampling is an image's here: every paint of an image must ask for the
@@ -472,12 +481,18 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 	}
 }
 
+// The layer params that read mask `m` as its readers take it (as alpha
+// once its transfer table has run).
 @(private = "file")
 scene_mask_params :: proc "contextless" (s: ^Scene, m: Mask_Id, params: ^Layer_Params) {
 	if m == 0 {
 		return
 	}
-	switch s.masks[m - 1].read {
+	read := s.masks[m - 1].read
+	if s.masks[m - 1].lut != 0 {
+		read = .Alpha
+	}
+	switch read {
 	case .Alpha:
 		params.mask_alpha = true
 	case .Luminance:
@@ -487,15 +502,85 @@ scene_mask_params :: proc "contextless" (s: ^Scene, m: Mask_Id, params: ^Layer_P
 	}
 }
 
-// A mask's draws into the open layer's mask.
+// Mask `m` into the open layer's mask: its image, rendered the first time,
+// copied 1:1.
 @(private = "file")
 scene_record_mask :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, m: Mask_Id) {
+	img := scene_mask_image(r, c, ls, s, m)
 	layer_mask_begin(ls, c)
+	scene_copy(ls, c, img)
+	layer_mask_end(ls, c)
+}
+
+// `img` (the canvas's size) drawn over the current target 1:1, unclipped.
+@(private = "file")
+scene_copy :: proc(ls: ^Layer_Stack, c: ^Canvas, img: Image_Id) {
+	save(c)
+	reset_transform(c)
+	reset_scissor(c)
+	set_global_alpha(c, 1)
+	set_composite_operation(c, .Source_Over)
+	path_reset(&ls.scratch)
+	path_rect(&ls.scratch, 0, 0, f32(c.width), f32(c.height))
+	p := paint_image(img, 0, 0, f32(c.width), f32(c.height), 0)
+	p.anti_alias = false
+	fill_path(c, &ls.scratch, p)
+	restore(c)
+}
+
+// Mask `m` rendered once, in device space and the canvas's size: its
+// group drawn over its backdrop colour when read as luminance (PDF's /BC;
+// where the group draws nothing the mask is the backdrop's), then, with a
+// transfer table, its value (luminance or alpha) as white of that alpha
+// put through the table (PDF's /TR), so readers take it as alpha.
+@(private = "file")
+scene_mask_image :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, m: Mask_Id) -> Image_Id {
+	if id := r.mask_images[m - 1]; image_id_valid(id) {
+		return id
+	}
+	mk := s.masks[m - 1]
+	w, h := c.width, c.height
+	img := layer_image_begin(ls, c, w, h)
 	save(c)
 	reset_scissor(c)
-	scene_record_range(r, c, ls, s, s.masks[m - 1].draws)
+	set_global_alpha(c, 1)
+	set_composite_operation(c, .Source_Over)
+	if mk.read != .Alpha && mk.backdrop != {} {
+		clear_rect(c, 0, 0, w, h, scene_color(mk.backdrop))
+	}
+	// A mask is drawn whatever the clips of its readers.
+	pushed := len(r.pushed_layer)
+	scene_record_range(r, c, ls, s, mk.draws)
+	assert(len(r.pushed_layer) == pushed)
 	restore(c)
-	layer_mask_end(ls, c)
+	layer_image_end(ls, c)
+	if mk.lut != 0 {
+		// The value as white of that alpha: a luminance read takes the
+		// premultiplied colour's luminance (v0.1.13), an alpha read the
+		// alpha as it is.
+		value := layer_image_begin(ls, c, w, h)
+		if mk.read != .Alpha {
+			c.image_luminance = .Pdf if mk.read == .Luminance_Pdf else .Rec709
+		}
+		scene_copy(ls, c, img)
+		c.image_luminance = nil
+		layer_image_end(ls, c)
+		// RGB stays white; alpha goes through the table.
+		table := s.luts[mk.lut - 1]
+		lut: [256 * 4]u8
+		for v, i in table {
+			lut[i * 4], lut[i * 4 + 1], lut[i * 4 + 2], lut[i * 4 + 3] = 255, 255, 255, v
+		}
+		lut_id, err := create_image(c, image_source_rgba(lut[:], 256, 1), {})
+		if err == nil {
+			append(&r.made, lut_id)
+			img = layer_image_begin(ls, c, w, h)
+			layer_image_end(ls, c)
+			filter_image(c, img, Component_Transfer{lut_id}, value)
+		}
+	}
+	r.mask_images[m - 1] = img
+	return img
 }
 
 // A painting draw under its look: skipped at opacity 0; a blend mode, or a

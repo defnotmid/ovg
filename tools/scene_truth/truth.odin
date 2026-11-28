@@ -25,6 +25,8 @@ CASES := [?]Case {
 	{"mask_luminance", build_mask_709, worst_mask_709},
 	{"mask_luminance_pdf", build_mask_pdf, worst_mask_pdf},
 	{"mask_alpha", build_mask_alpha, worst_mask_alpha},
+	{"mask_backdrop", build_mask_backdrop, worst_mask_backdrop},
+	{"mask_transfer", build_mask_transfer, worst_mask_transfer},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -256,3 +258,49 @@ worst_run :: proc(px: []u8, w: int) -> f32 {
 	return worst * 255
 }
 
+
+// A luminance mask over a grey backdrop (PDF's /BC): its group fills the
+// left half with opaque red; the right half is the backdrop's luminance.
+@(private = "file")
+build_mask_backdrop :: proc(s: ^vg.Scene) {
+	id := vg.scene_add_transform(s, vg.TRANSFORM_IDENTITY)
+	at := u32(len(s.draws))
+	append(&s.draws, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE / 2, 0}, {SIZE / 2, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 0, 0, 1}}))})
+	append(&s.masks, vg.Scene_Mask{draws = {at, 1}, read = .Luminance, backdrop = {0.5, 0.5, 0.5, 1}})
+	look := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 1, 1, 1}}))
+	look.mask = vg.Mask_Id(len(s.masks))
+	vg.scene_draw(s, vg.Scene_Clear{{0, 0, 4096, 4096}, {0, 0, 0, 1}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = look})
+}
+
+@(private = "file")
+worst_mask_backdrop :: proc(px: []u8, w: int) -> f32 {
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			want: f32 = 0.2125 if x < SIZE / 2 else 0.5
+			worst = max(worst, abs(px_at(px, w, x, y)[0] - want))
+		}
+	}
+	return worst * 255
+}
+
+// A transfer table (PDF's /TR) on a luminance mask: the inverting table
+// (255 - v) on the translucent colour's PDF luminance.
+@(private = "file")
+build_mask_transfer :: proc(s: ^vg.Scene) {
+	build_mask(s, .Luminance_Pdf)
+	table: [256]u8
+	for i in 0 ..< 256 {
+		table[i] = u8(255 - i)
+	}
+	append(&s.luts, table)
+	s.masks[len(s.masks) - 1].lut = vg.Lut_Id(len(s.luts))
+}
+
+@(private = "file")
+worst_mask_transfer :: proc(px: []u8, w: int) -> f32 {
+	v := (0.3 * MASK_STRAIGHT.r + 0.59 * MASK_STRAIGHT.g + 0.11 * MASK_STRAIGHT.b) * MASK_ALPHA
+	// The table is indexed by the 8-bit value.
+	return worst_grey(px, w, f32(255 - int(v * 255 + 0.5)) / 255)
+}
