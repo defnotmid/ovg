@@ -101,6 +101,10 @@ Layer_Target :: struct {
 	outer_format: Pixel_Format,
 	// It keeps a velocity twin (render_target_set).
 	velocity: bool,
+	// The clip (clip_path) held when it began: what is drawn into a target
+	// starts unclipped, and its composite after `layer_target_end` is what
+	// the clip cuts, so a layer is clipped once, as a whole.
+	clip:     u32,
 }
 
 // Stand-in render targets of one depth (`image_store_alloc_virtual`).
@@ -660,7 +664,8 @@ layer_pop :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 // the common case.
 @(private = "file")
 layer_unclipped :: proc(ls: ^Layer_Stack, c: ^Canvas, f: ^Layer_Frame, depth, drawn: int, bounds: Bounds) -> bool {
-	if !f.has_clip || f.masked || f.has_filter || f.blur_px > 0 || f.full || f.blend != .Normal || f.opacity != 1 {
+	// Under a clip its draws, recorded unclipped, can't go onto the target.
+	if !f.has_clip || f.masked || f.has_filter || f.blur_px > 0 || f.full || f.blend != .Normal || f.opacity != 1 || state(c).clip != 0 {
 		return false
 	}
 	for cmd in c.commands[f.content:drawn] {
@@ -781,7 +786,8 @@ layer_composite_velocity :: proc(c: ^Canvas, source, alpha: Image_Id, x, y: f32,
 // are few enough (LAYER_GROUP_MAX_WORDS).
 @(private = "file")
 layer_group :: proc(c: ^Canvas, f: ^Layer_Frame, drawn: []Command, bounds: Bounds) -> bool {
-	if f.has_filter || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 {
+	// Under a clip its draw, recorded unclipped, can't go onto the target.
+	if f.has_filter || f.blur_px > 0 || f.has_clip || f.masked || f.full || f.blend != .Normal || len(drawn) != 1 || state(c).clip != 0 {
 		return false
 	}
 	if r, ok := f.scissor.?; ok && (bounds.minx < r.x || bounds.miny < r.y || bounds.maxx > r.x + r.w || bounds.maxy > r.y + r.h) {
@@ -994,7 +1000,12 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, x, 
 		layer_blit(ls, c, src, x, y, w, h, opacity, clip)
 		return
 	}
-	backdrop := layer_acquire(ls, c, w, h)
+	// Under a path clip the source is first multiplied by its coverage
+	// (below): then the blend works in half floats, so the result rounds
+	// once, as an unclipped blend's does.
+	under := state(c).clip
+	format := Pixel_Format.RGBA16F if under != 0 else ls.format
+	backdrop := layer_acquire(ls, c, w, h, format = format)
 	layer_target_begin(ls, c, backdrop, keep = true, origin = {i32(x), i32(y)})
 	save(c)
 	set_composite_operation(c, .Copy)
@@ -1005,16 +1016,31 @@ layer_blend_onto_target :: proc(ls: ^Layer_Stack, c: ^Canvas, src: Image_Id, x, 
 	layer_target_end(ls, c)
 	source := src
 	faded := Image_Id{}
-	if opacity < 1 {
+	if under != 0 {
+		// Under a path clip of coverage k: the blend is linear in the
+		// source's alpha, so blending the source times k (and the opacity)
+		// gives the backdrop replaced by k, exactly; the copy back is then
+		// unclipped.
+		faded = layer_acquire(ls, c, w, h, format = format)
+		layer_target_begin(ls, c, faded, origin = {i32(x), i32(y)})
+		clip_set(c, under)
+		save(c)
+		set_composite_operation(c, .Source_Over)
+		layer_blit(ls, c, src, x, y, w, h, opacity)
+		restore(c)
+		layer_target_end(ls, c)
+		source = faded
+	} else if opacity < 1 {
 		faded = layer_acquire(ls, c, w, h)
 		m := COLOR_MATRIX_IDENTITY
 		m.m[18] = opacity
 		filter_image(c, faded, m, src)
 		source = faded
 	}
-	blended := layer_acquire(ls, c, w, h)
+	blended := layer_acquire(ls, c, w, h, format = format)
 	filter_image(c, blended, Blend{mode, backdrop}, source)
 	save(c)
+	clip_set(c, 0)
 	set_composite_operation(c, .Copy)
 	layer_blit(ls, c, blended, x, y, w, h, 1, clip)
 	restore(c)
@@ -1340,7 +1366,8 @@ layer_draw_image :: proc(ls: ^Layer_Stack, c: ^Canvas, dst: Image_Id, dw, dh: u3
 // unless `keep`), with a velocity twin if `velocity`.
 @(private)
 layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep := false, origin := [2]i32{}, velocity := false) {
-	append(&ls.targets, Layer_Target{target = layer, origin = origin, velocity = velocity})
+	append(&ls.targets, Layer_Target{target = layer, origin = origin, velocity = velocity, clip = state(c).clip})
+	clip_set(c, 0)
 	render_target_set(c, layer, origin, velocity)
 	if !keep {
 		info, _ := image_info(c, layer)
@@ -1353,7 +1380,8 @@ layer_target_begin :: proc(ls: ^Layer_Stack, c: ^Canvas, layer: Image_Id, keep :
 
 @(private)
 layer_target_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
-	pop(&ls.targets)
+	ended := pop(&ls.targets)
+	clip_set(c, ended.clip)
 	t := ls.targets[len(ls.targets) - 1]
 	render_target_set(c, t.target, t.origin, t.velocity)
 }

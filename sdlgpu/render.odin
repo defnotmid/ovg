@@ -520,9 +520,19 @@ draw_row :: proc(p: ^Planner, cmd: vg.Command) -> Row {
 		second = p.twin,
 		origin = p.origin,
 		key = {blend = cmd.composite_operation, format = p.target.format, second = TWIN_FORMAT if p.twin.texture != nil else .INVALID},
-		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, nil)},
+		textures = {texture_binding(p.b, lookup(p, cmd.image)), texture_binding(p.b, clip_page(p, cmd))},
 		scissor = scissor,
 	}
+}
+
+// A shape draw's clip image (`glyphtex`, clip_coverage), nil (white) for
+// others and unclipped draws.
+@(private = "file")
+clip_page :: proc(p: ^Planner, cmd: vg.Command) -> ^Image {
+	if _, shapes := cmd.type.(vg.Cmd_Draw_Shapes); !shapes {
+		return nil
+	}
+	return lookup(p, cmd.clip_image)
 }
 
 // Two triangles over (0, 0)..(w, h), texture coordinates 0..1.

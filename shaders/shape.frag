@@ -18,6 +18,11 @@ bool shape_is_hairline(uint z) {
 void main() {
     shape_clip();
     paint_index = data.y;
+    // The clip first: a pixel it cuts away takes no curve work.
+    float clipped = clip_coverage();
+    if (clipped < 1.0 / 510.0) {
+        discard;
+    }
     float coverage;
     uint flags = data.z;
 #ifdef SHAPE_INSIDE
@@ -43,6 +48,8 @@ void main() {
 #endif
     }
 #endif
+    // A clip narrows the shape: its coverage is part of the draw's.
+    coverage *= clipped;
     // Below half an 8-bit step the pixel is left alone: rounding leaves such
     // slivers where the shape is absent, and a blend like Copy would clear
     // them.

@@ -94,6 +94,24 @@ void shape_clip() {
     }
 }
 
+// The coverage of the paint row's clip at the pixel (ovg clip_path): 1
+// without one (P(0).w 0), 0 for one cut away whole (-1); else its image
+// (`glyphtex`, its clip's coverage times each parent's) read exactly, by
+// texelFetch at the pixel's drawing coordinates (which stay right on a
+// layer's window too) less its cell's corner (P(1).w, P(2).w), 0 outside
+// the cell (to P(3).w, P(4).w).
+float clip_coverage() {
+    float state = P(0).w;
+    if (state == 0.0) {
+        return 1.0;
+    }
+    vec2 p = floor(fpos);
+    if (state < 0.0 || p.x < P(1).w || p.y < P(2).w || p.x >= P(3).w || p.y >= P(4).w) {
+        return 0.0;
+    }
+    return texelFetch(glyphtex, ivec2(p - vec2(P(1).w, P(2).w)), 0).a;
+}
+
 // A fill's coverage, eased across its edge (smoothstep) when its flags
 // have 4: a feathered fill's (ovg Shape_Edge.Smooth), whose wide edge then
 // has no visible shoulder.

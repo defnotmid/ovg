@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 import "core:mem"
 import "core:sync"
@@ -51,6 +52,13 @@ Canvas :: struct {
 	limited:               bit_set[Limit],
 	// Programs registered on a recording canvas, for the player to create.
 	program_ops:           [dynamic]Program_Op,
+	// Clips by path (clip.odin): the frame's clips, clip_seal's command
+	// scratch, and the clip images kept from frame to frame.
+	clips:                 [dynamic]Clip_Record,
+	clip_contours:         Path,
+	clip_body:             [dynamic]Command,
+	clip_pool:             [dynamic]Clip_Image,
+	clip_frame:            u32,
 	// Motion blur (canvas_motion_blur): each shape instance's motion, row
 	// for row with `shapes`, and the nearness of the frame's last surface.
 	motion_blur:           bool,
@@ -77,6 +85,9 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		filters         = make([dynamic]Image_Filter, allocator),
 		runs            = make([dynamic]Program_Run, allocator),
 		frame_glyphs    = make([dynamic]Frame_Glyph, allocator),
+		clips           = make([dynamic]Clip_Record, allocator),
+		clip_body       = make([dynamic]Command, allocator),
+		clip_pool       = make([dynamic]Clip_Image, allocator),
 		limits          = DEFAULT_LIMITS,
 		fringe_width    = 1,
 		device_px_ratio = 1,
@@ -84,6 +95,7 @@ canvas_init :: proc(c: ^Canvas, backend: Backend, allocator := context.allocator
 		paint_gen       = (sync.atomic_add(&paint_epochs, 1) + 1) << 40,
 	}
 	shape_scratch_init(&c.scratch, allocator)
+	path_init(&c.clip_contours, allocator)
 	image_store_init(&c.images, backend, allocator)
 	gradient_store_init(&c.gradients, allocator)
 	slot_map_init(&c.programs, allocator)
@@ -112,6 +124,10 @@ canvas_destroy :: proc(c: ^Canvas) {
 	delete(c.shape_words)
 	delete(c.motions)
 	delete(c.frame_glyphs)
+	delete(c.clips)
+	path_destroy(&c.clip_contours)
+	delete(c.clip_body)
+	delete(c.clip_pool)
 	shape_scratch_destroy(&c.scratch)
 	programs_destroy(c)
 	image_store_destroy(&c.images)
@@ -775,6 +791,7 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 		params.tex_type = 1 if l == .Pdf else 0
 	}
 	params.spread = f32(u8(paint.spread) | transmute(u8)paint.gradient_clip << 2)
+	params.clip = st.clip
 	return cmd, add_paint(c, params)
 }
 
@@ -848,15 +865,17 @@ device_bounds :: proc "contextless" (sb: Bounds, t: Transform2D, grow: f32) -> B
 }
 
 // Appends a shape instance, extending the frame's last command when it is
-// a shape draw with the same image, blend, scissor and group.
+// a shape draw with the same image, blend, scissor, group and clip (a
+// command's clip image is one, and its lifetime is by command).
 @(private)
 push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 = 0) {
+	clip_use(c, inst)
 	append(&c.shapes, inst)
 	push_motions(c, 1)
 	at := u32(len(c.shapes) - 1)
 	if n := len(c.commands); n > 0 {
 		last := &c.commands[n - 1]
-		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect && c.paints[c.shapes[at - 1].paint].clip == c.paints[inst.paint].clip {
 			d.instances.count += 1
 			return
 		}
@@ -869,11 +888,14 @@ push_shape :: proc(c: ^Canvas, base: Command, inst: Shape_Instance, group: u32 =
 // `push_shape` for the last `n` instances appended at once.
 @(private)
 push_instances :: proc(c: ^Canvas, base: Command, n: int, group: u32 = 0) {
+	for inst in c.shapes[len(c.shapes) - n:] {
+		clip_use(c, inst)
+	}
 	push_motions(c, n)
 	at := u32(len(c.shapes) - n)
 	if k := len(c.commands); k > 0 {
 		last := &c.commands[k - 1]
-		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect {
+		if d, ok := &last.type.(Cmd_Draw_Shapes); ok && d.instances.start + d.instances.count == at && d.group == group && last.image == base.image && last.composite_operation == base.composite_operation && last.scissor_rect == base.scissor_rect && c.paints[c.shapes[at - 1].paint].clip == c.paints[c.shapes[at].paint].clip {
 			d.instances.count += u32(n)
 			return
 		}
@@ -954,10 +976,11 @@ Canvas_Mark :: struct {
 	runs:     int,
 	shapes:   int,
 	words:    int,
+	clips:    int,
 }
 
 canvas_mark :: proc "contextless" (c: ^Canvas) -> Canvas_Mark {
-	return {len(c.commands), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes), len(c.shape_words)}
+	return {len(c.commands), len(c.paints), len(c.bytes), len(c.filters), len(c.runs), len(c.shapes), len(c.shape_words), len(c.clips)}
 }
 
 // Drops everything recorded since `m`. The render target must be the one
@@ -977,6 +1000,13 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 	resize(&c.runs, m.runs)
 	resize(&c.shapes, m.shapes)
 	resize(&c.shape_words, m.words)
+	resize(&c.clips, m.clips)
+	for &s in c.states {
+		if int(s.clip) > m.clips {
+			// A clip dropped with what was drawn under it: none of it stays.
+			s.clip = 0
+		}
+	}
 	if c.motion_blur {
 		resize(&c.motions, m.shapes)
 	}
@@ -988,7 +1018,10 @@ canvas_truncate :: proc(c: ^Canvas, m: Canvas_Mark) {
 // (for SDL_GPU, an `Output` texture; 0 renders offscreen).
 flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	assert(!c.images.recording, "a recording canvas hands frames over with canvas_take")
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	clip_seal(c)
 	c.backend.render(c.backend.data, output, &c.images, canvas_frame(c))
+	carried := clip_carry(c)
 	clear(&c.commands)
 	clear(&c.bytes)
 	clear(&c.filters)
@@ -996,6 +1029,8 @@ flush :: proc(c: ^Canvas, output: Render_Output = 0) {
 	clear(&c.paints)
 	clear(&c.shapes)
 	clear(&c.shape_words)
+	append(&c.shape_words, ..carried)
+	path_reset(&c.clip_contours)
 	clear(&c.motions)
 	frame_end(c)
 }
@@ -1072,6 +1107,9 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 		a^, b^ = b^, a^
 		clear(a)
 	}
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+	clip_seal(c)
+	carried := clip_carry(c)
 	swap_clear(&c.paints, &out.paints)
 	swap_clear(&c.commands, &out.commands)
 	swap_clear(&c.bytes, &out.bytes)
@@ -1079,6 +1117,8 @@ canvas_take :: proc(c: ^Canvas, out: ^Recorded_Frame) {
 	swap_clear(&c.runs, &out.runs)
 	swap_clear(&c.shapes, &out.shapes)
 	swap_clear(&c.shape_words, &out.shape_words)
+	append(&c.shape_words, ..carried)
+	path_reset(&c.clip_contours)
 	swap_clear(&c.motions, &out.motions)
 	out.motion = c.motion_blur
 	frame_end(c)

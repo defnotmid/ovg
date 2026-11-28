@@ -32,10 +32,11 @@ void main() {
         } else {
             coverage = curves_coverage_affine(s.data.x, r, s.uv.xy, s.uv.zw, rule);
         }
+        paint_index = s.data.y;
+        coverage *= clip_coverage();
         if (coverage < 1.0 / 510.0) {
             continue;
         }
-        paint_index = s.data.y;
         vec4 c = fill_color(shader_type(), fpos) * (stroke_mask(vec2(0.5, shape_ease(s.data.z, coverage))) * scissor_mask(fpos));
         acc = c + acc * (1.0 - c.a);
 #ifdef MOTION

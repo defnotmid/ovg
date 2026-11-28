@@ -238,7 +238,14 @@ paint:
   uncovered pixels; a `Scene_Clear` or a mask does that. A layer or a run
   has no shape apart from its content, so its content's alpha is its
   coverage: an edge pixel half covered takes the content's half-covered
-  value, as a source image does under Copy;
+  value, as a source image does under Copy. A clip narrows the shape, so
+  its coverage c joins the draw's own f: the operation takes the source
+  times f c, op(src f c, dst), as it takes a draw's anti-aliased edge.
+  That equals dst (1 - c) + op(src f, dst) c for source-over, every blend
+  mode (the blend is linear in the source's alpha), Destination_Over,
+  Destination_Out, Lighter, Source_Atop and Xor; for Copy, Source_In,
+  Source_Out, Destination_In and Destination_Atop (no PDF operation) a
+  half-covered clip edge acts as a half-covered draw edge does;
 - an optional mask (`Mask_Id`), read by that draw alone.
 
 That's PDF's graphics state, where a soft mask, a blend mode and an opacity
@@ -281,13 +288,20 @@ Structure is nesting in the draw list, not render targets:
   coverage. A text clip is a `Clip_Run`; a `Glyphs` draw only paints. A clip by path or run has exact coverage like a fill's, and draws
   multiply theirs by it. It cuts what the draws paint and nothing else: a
   clip doesn't make a layer, so clipped draws stay separate draws with their
-  own opacity and blend, as PDF and SVG define them. v0.1.15's clip
-  shortcuts (dropping a clip layer its clip covers, compositing the others
-  in one pass) are interim, on today's layers; the Scene's clips replace
-  them. Until then a path or run clip is drawn as a layer, which starts
-  transparent, so scene_record rejects what would read its backdrop
-  through one (a blend mode, a Porter-Duff operation, a non-isolated
-  group whose nearest group is the clip): PDF's clipping is not a group.
+  own opacity and blend, as PDF and SVG define them. On the canvas this is
+  `clip_path` (in the save/restore state); a layer pushed under a clip
+  starts unclipped and its composite is what the clip cuts, so a group is
+  clipped once, as a whole. `Layer_Params.clip_path` (SVG's clip-path) is
+  that: the layer's composite drawn under the clip. Both backends render
+  each clip's coverage, times its parent's, into an image (RGBA8 for now,
+  coverage in every channel) just before its first draw, bounded to the
+  clip, its parent, the target and what is drawn under it, and a clipped
+  draw reads one texel of it at its pixel. Images live from that render
+  to their last reader: the CPU lends their memory by lifetime, the GPU
+  reuses one whose last reader has passed, so only the clips open at once
+  hold memory. A clip that is a rectangle on whole pixels is the scissor,
+  and one that covers whole everything drawn under it (exact containment
+  by ocurves) is dropped, its draws reading its parent.
 - **Layers** are a range of draws composited as one: opacity, a blend as a
   draw's, isolated or not, knockout or not (PDF transparency groups and
   SVG's group opacity, mix-blend-mode and filters), and an optional mask.
@@ -513,10 +527,9 @@ today, per band of rows on the work pool:
 - every other paint and blend through the GPU's shaders on oksl's JIT;
 - a glyph run as a group, so a translucent run paints once, each glyph's
   coverage worked out once a frame per phase (v0.1.15's glyph table);
-- clips as a stack of coverage per band: a push works out its coverage over
-  the band's rows, times the clip under it, and every draw's coverage is
-  multiplied by the top one, in the direct fills and in the shaders' output
-  alike, with no layer and no change to the shaders;
+- clips as coverage images, read by the shaders' clip_coverage and by the
+  direct fills and 1:1 copies per pixel (a full span's clip texels, mostly
+  whole or none, are written or skipped as the span would be);
 - each mask rendered once per mask index, and read per draw by the shared
   shaders, as on the GPU.
 
@@ -661,8 +674,10 @@ and parity. Each is released on its own.
 1. **The `Player` replacement.** onimite records on one thread and plays on
    another today. A Scene handed across threads covers it, but its images
    created on the recording side need the same ordering rule players use.
-2. **Clips by path on the GPU.** Leaning to a coverage texture per clip,
-   bounded to the draws it clips and read by the same fetch as a mask in
-   `shape.frag`: it matches the CPU's exact coverage within parity. A
+2. **Clips by path on the GPU.** Decided: a coverage image per clip,
+   bounded to the draws it clips, read by texelFetch in the shape units (a
    one-bit stencil is aliased without multisampling, and would fail both
-   the exact-coverage clip tests and parity.
+   the exact-coverage clip tests and parity). One atlas for every clip of
+   a frame was built first and measured: 381 clips on a topographic map
+   held 190 Mpx (1.9 GB) at once, so images go by lifetime instead. R8
+   images, a quarter of the memory, wait for Gray8 render targets.

@@ -38,6 +38,11 @@ void main() {
         }
     }
     vec4 result = vec4(0.0);
+    // The members' clip (one draw_markers call's) narrows fills and outlines.
+    paint_index = fill_row;
+    float clipped = clip_coverage();
+    cf *= clipped;
+    co *= clipped;
     if (cf >= 1.0 / 510.0) {
         paint_index = fill_row;
         result = fill_color(shader_type(), fpos) * (stroke_mask(vec2(0.5, cf)) * scissor_mask(fpos));

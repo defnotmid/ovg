@@ -40,6 +40,9 @@ CASES := [?]Case {
 	{"group_iso_0_ko_1", build_knock_01, worst_knock_01},
 	{"group_iso_1_ko_1", build_knock_11, worst_knock_11},
 	{"group_iso_0_ko_1_opaque_screen", build_knock_01_opaque, worst_knock_01_opaque},
+	{"clip_multiply", build_clip_multiply, worst_clip_multiply},
+	{"clip_group_screen", build_clip_group, worst_clip_group},
+	{"clip_image", build_clip_image, worst_clip_image},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -613,3 +616,106 @@ worst_knock_11 :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, true,
 build_knock_01_opaque :: proc(s: ^vg.Scene) {build_knock(s, false, true, 1, screen = true)}
 @(private = "file")
 worst_knock_01_opaque :: proc(px: []u8, w: int) -> f32 {return worst_knock(px, w, false, true, 1, screen = true)}
+
+// Inside a path clip (the triangle CLIP_PATH_TRI), what reads its backdrop
+// reads the page under the clip: a Multiply fill, and the screened
+// non-isolated group of group_non_isolated_screen, each taking the clip's
+// exact coverage k as a source-over draw does: (1 - k) B + k result.
+@(private = "file")
+CLIP_PATH_TRI :: [3]vg.Vec2{{1.5, 2}, {21, 4.5}, {6, 20.5}}
+
+@(private = "file")
+clip_push_tri :: proc(s: ^vg.Scene, id: vg.Transform_Id) {
+	tri := CLIP_PATH_TRI
+	vg.scene_draw(s, vg.Clip_Push{vg.Clip_Path{polygon(s, tri[:]), id, .Non_Zero}})
+}
+
+@(private = "file")
+build_clip_multiply :: proc(s: ^vg.Scene) {
+	id := ground(s, GROUP_BACK)
+	clip_push_tri(s, id)
+	look := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{0.5, 1, 0.25, 1}}))
+	look.blend.mode = .Multiply
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = look})
+	vg.scene_draw(s, vg.Clip_Pop{})
+}
+
+@(private = "file")
+worst_clip_multiply :: proc(px: []u8, w: int) -> f32 {
+	tri := CLIP_PATH_TRI
+	back := GROUP_BACK.rgb
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			k := pixel_area(tri[:], x, y)
+			want := (1 - k) * back + k * (back * [3]f32{0.5, 1, 0.25})
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+		}
+	}
+	return worst * 255
+}
+
+@(private = "file")
+build_clip_group :: proc(s: ^vg.Scene) {
+	// group_non_isolated_screen's group, under the clip.
+	id := ground(s, GROUP_BACK)
+	clip_push_tri(s, id)
+	red := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 0, 0, 1}}))
+	red.opacity = 0.5
+	green := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{0, 1, 0, 1}}))
+	green.opacity = 0.5
+	green.blend.mode = .Multiply
+	vg.scene_draw(s, vg.Layer_Push{opacity = 1, blend = {mode = .Screen}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{2, 2}, {14, 2}, {14, 14}, {2, 14}}), transform = id, look = red})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{8, 8}, {20, 8}, {20, 20}, {8, 20}}), transform = id, look = green})
+	vg.scene_draw(s, vg.Layer_Pop{})
+	vg.scene_draw(s, vg.Clip_Pop{})
+}
+
+@(private = "file")
+worst_clip_group :: proc(px: []u8, w: int) -> f32 {
+	tri := CLIP_PATH_TRI
+	back := GROUP_BACK.rgb
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			_, own, a := group_truth(x, y)
+			group := (1 - a) * back + a * (back + own - back * own)
+			k := pixel_area(tri[:], x, y)
+			want := (1 - k) * back + k * group
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+		}
+	}
+	return worst * 255
+}
+
+// A 1:1 image (white) under the clip, over black: the clip's coverage.
+@(private = "file")
+build_clip_image :: proc(s: ^vg.Scene) {
+	id := ground(s, {0, 0, 0, 1})
+	@(static) white: [SIZE * SIZE * 4]u8
+	for &b in white {
+		b = 255
+	}
+	img := vg.scene_add_image(s, vg.Pixel_View{.RGBA8_Premul, white[:], SIZE, SIZE, SIZE * 4})
+	clip_push_tri(s, id)
+	paint := vg.scene_add_paint(s, vg.Scene_Image_Paint{image = img, transform = id, sampling = .Nearest, tint = {1, 1, 1, 1}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(paint)})
+	vg.scene_draw(s, vg.Clip_Pop{})
+}
+
+@(private = "file")
+worst_clip_image :: proc(px: []u8, w: int) -> f32 {
+	tri := CLIP_PATH_TRI
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			k := pixel_area(tri[:], x, y)
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - k), abs(got.g - k), abs(got.b - k), abs(got.a - 1))
+		}
+	}
+	return worst * 255
+}

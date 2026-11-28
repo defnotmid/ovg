@@ -30,6 +30,9 @@ State :: struct {
 	alpha:               f32,
 	// Motion blur: how what is drawn moves (set_motion).
 	motion:              Shape_Motion,
+	// The clip draws are cut to (clip_path): one-based in the frame's clips,
+	// 0 for none.
+	clip:                u32,
 }
 
 default_state :: proc "contextless" () -> State {

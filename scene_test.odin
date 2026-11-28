@@ -220,7 +220,7 @@ target_px :: proc(t: ^Scene_Target, x, y: int) -> [4]f32 {
 
 // The area of convex polygon `poly` inside pixel (x, y): the polygon clipped
 // to the pixel's square (Sutherland-Hodgman), then its shoelace area.
-@(private = "file")
+@(private)
 pixel_area :: proc(poly: []Vec2, x, y: int) -> f32 {
 	buf_a, buf_b: [32]Vec2
 	n := len(poly)
@@ -563,16 +563,16 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	s.main = {}
 	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Patterns, 0})
 
-	// Inside a path clip (a layer, until clips are coverage), what reads
-	// its backdrop: a blend mode, a Porter-Duff operation, a non-isolated
-	// group; and a clear inside a non-isolated group. A rectangle clip, or
-	// an isolated layer between, is fine.
+	// Inside a path clip (coverage each draw takes), what reads its
+	// backdrop is accepted: a blend mode, a Porter-Duff operation, a
+	// non-isolated group, or with an isolated layer between. A clear inside
+	// a non-isolated group is not.
 	for reader in 0 ..< 5 {
 		scene_clear(&s)
 		id = scene_add_transform(&s, TRANSFORM_IDENTITY)
 		tri := scene_polygon(&s, {{0, 0}, {4, 0}, {4, 4}})
 		rlook := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
-		want := Scene_Problem{.Unsupported, .Draws, 1}
+		want := Scene_Problem{}
 		switch reader {
 		case 0:
 			rlook.blend.mode = .Multiply
@@ -593,6 +593,7 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 			scene_draw(&s, Layer_Push{opacity = 1})
 			scene_draw(&s, Scene_Clear{{0, 0, 4, 4}, {1, 1, 1, 1}})
 			scene_draw(&s, Layer_Pop{})
+			want = {.Unsupported, .Draws, 1}
 		case 4:
 			// Accepted: an isolated layer between the clip and the blend.
 			rlook.blend.mode = .Multiply
@@ -601,7 +602,6 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 			scene_draw(&s, Scene_Fill{path = tri, transform = id, look = rlook})
 			scene_draw(&s, Layer_Pop{})
 			scene_draw(&s, Clip_Pop{})
-			want = {}
 		}
 		got := target_draw(&tg, &s)
 		testing.expectf(t, got == want, "reader %d: %v", reader, got)

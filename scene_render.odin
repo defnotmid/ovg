@@ -211,19 +211,13 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 	}
 	// What each open push is. Inside a non-isolated group: no clears and
 	// no Porter-Duff operations, which PDF's groups don't have and the
-	// group's alpha (scene_group) can't follow. A path clip is drawn as a
-	// layer, which starts transparent, until clips are coverage: what reads
-	// its backdrop (a blend mode, a Porter-Duff operation, a non-isolated
-	// group) must not have one as its nearest group, or it would read the
-	// clip's transparency instead of what is under it.
-	// A knockout group's elements are its draws and layers: no clips
-	// directly inside one yet.
+	// group's alpha (scene_group) can't follow. A knockout group's elements
+	// are its draws and layers: no clips directly inside one yet.
 	Open :: enum u8 {Rect, Path_Clip, Isolated, Group, Knockout}
 	opens := make([dynamic]Open, 0, 16, context.temp_allocator)
 	inside := 0
 	for d, k in s.draws {
 		l: Scene_Look
-		reads := false
 		#partial switch v in d {
 		case Scene_Fill:
 			l = v.look
@@ -233,7 +227,6 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 			l = v.look
 		case Layer_Push:
 			l.blend = v.blend
-			reads = !v.isolated
 		case Clip_Push:
 			if len(opens) > 0 && opens[len(opens) - 1] == .Knockout {
 				return {.Unsupported, .Draws, k}
@@ -243,19 +236,8 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 				return {.Unsupported, .Draws, k}
 			}
 		}
-		reads ||= l.blend.mode != .Normal || l.blend.op != .Source_Over
 		if inside > 0 && l.blend.op != .Source_Over {
 			return {.Unsupported, .Draws, k}
-		}
-		if reads {
-			#reverse for o in opens {
-				if o == .Path_Clip {
-					return {.Unsupported, .Draws, k}
-				}
-				if o != .Rect {
-					break
-				}
-			}
 		}
 		#partial switch v in d {
 		case Layer_Push:
@@ -617,19 +599,18 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 				intersect_scissor(c, f32(cl[0]), f32(cl[1]), f32(cl[2] - cl[0]), f32(cl[3] - cl[1]))
 				append(&r.pushed_layer, false)
 			case Clip_Path:
+				// A clip is coverage each draw takes (clip_path), no layer.
 				scene_path_into(s, cl.path, &r.clip, scene_xf(r, s, cl.transform))
 				save(c)
 				reset_transform(c)
-				layer_push(ls, c, {opacity = 1, clip_path = &r.clip, clip_rule = cl.rule})
-				restore(c)
-				append(&r.pushed_layer, true)
+				clip_path(c, &r.clip, cl.rule)
+				append(&r.pushed_layer, false)
 			case Clip_Run:
 				scene_run_union(r, s, cl.run, &r.clip)
 				save(c)
 				reset_transform(c)
-				layer_push(ls, c, {opacity = 1, clip_path = &r.clip, clip_rule = .Non_Zero})
-				restore(c)
-				append(&r.pushed_layer, true)
+				clip_path(c, &r.clip, .Non_Zero)
+				append(&r.pushed_layer, false)
 			}
 		case Clip_Pop:
 			if pop(&r.pushed_layer) {

@@ -672,6 +672,7 @@ sw_lend :: proc(b: ^Software_Backend, images: ^Image_Store, frame: Frame) {
 	externals := false
 	for cmd, k in frame.commands {
 		use(b, slots, cmd.image, k)
+		use(b, slots, cmd.clip_image, k)
 		switch c in cmd.type {
 		case Cmd_Set_Render_Target:
 			if id, ok := c.target.(Image_Id); ok {
@@ -1092,10 +1093,14 @@ sw_band_command :: proc(run: ^Sw_Run, k: u32, items: []Sw_Binned, band: int, top
 	case Cmd_Draw_Shapes:
 		b := run.b
 		// The draw's image as `tex`; white without one, as the GPU binds then.
+		// Its clip's image as `glyphtex` (clip_coverage).
 		textures := [2]oksl.Channel_Image{sw_white(), sw_white()}
 		if tex, ok := lookup_texture(run.images, cmd.image); ok {
 			textures[0] = sw_channel(tex)
 			textures[0].levels = sw_levels(tex, &lanes.levels)
+		}
+		if clip, ok := lookup_texture(run.images, cmd.clip_image); ok {
+			textures[1] = sw_channel(clip)
 		}
 		// With a twin, the units' motion variants, whose motion goes over it.
 		motion := int(r.twin.pixels != nil)
@@ -2449,6 +2454,30 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 	if !alive {
 		return true
 	}
+	// A clip (clip_path): each pixel's coverage its clip image's, through
+	// the per-pixel loops; one cut away whole draws nothing.
+	clipped := pr[0][3] != 0
+	if pr[0][3] < 0 {
+		return true
+	}
+	clip_px: []u32
+	clip_x0, clip_y0, clip_x1, clip_y1, clip_w: int
+	if clipped {
+		ct, found := lookup_texture(images, cmd.clip_image)
+		if !found || ct.format != .RGBA8 {
+			return false
+		}
+		clip_px = slice.reinterpret([]u32, ct.pixels)
+		clip_w = int(ct.width)
+		clip_x0, clip_y0, clip_x1, clip_y1 = int(pr[1][3]), int(pr[2][3]), int(pr[3][3]), int(pr[4][3])
+	}
+	// The clip's coverage at drawing x on a row of clip texels `crow`.
+	clip_k :: #force_inline proc "contextless" (crow: []u32, x, x0, x1: int) -> f32 {
+		if x < x0 || x >= x1 {
+			return 0
+		}
+		return f32(crow[x - x0] >> 24) * (1.0 / 255)
+	}
 	// A bounded image leaves the pixels under its transparent texels as
 	// they were, whatever the operation (Shader_Type.Fill_Image_Bounded).
 	bounded := pr[10][3] == f32(Shader_Type.Fill_Image_Bounded)
@@ -2517,6 +2546,13 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 			if has_scissor {
 				my = clamp(0.5 - (abs(ay * (f32(y) + 0.5) + by) - ey) * sy, 0, 1)
 			}
+			crow: []u32
+			if clipped {
+				if int(y) < clip_y0 || int(y) >= clip_y1 {
+					continue
+				}
+				crow = clip_px[(int(y) - clip_y0) * clip_w:]
+			}
 			srow := src_px[int(oy - 1 - y if flip else y - oy) * src_stride + sx0 :][:w]
 			drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
 			for su, cx in srow {
@@ -2526,6 +2562,14 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				mx := my
 				if has_scissor {
 					mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+				}
+				if clipped {
+					// Cut below half a step, as the shaders discard.
+					k := clip_k(crow, int(x0) + cx, clip_x0, clip_x1)
+					if k < 1.0 / 510 {
+						continue
+					}
+					mx *= k
 				}
 				sb := transmute([4]u8)su
 				l := clamp(simd.reduce_add_ordered(#simd[4]f32{f32(sb[0]), f32(sb[1]), f32(sb[2]), 0} * lw), 0, 255)
@@ -2545,17 +2589,39 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				continue
 			}
 		}
+		crow: []u32
+		if clipped {
+			if int(y) < clip_y0 || int(y) >= clip_y1 {
+				continue
+			}
+			crow = clip_px[(int(y) - clip_y0) * clip_w:]
+		}
 		srow := src_px[int(oy - 1 - y if flip else y - oy) * src_stride + sx0 :][:w]
 		drow := dst_px[int(y - r.oy) * dst_stride + dx0 :][:w]
 		row_full := my >= 1
 		i0 := in_x0 if row_full else 0
 		i1 := in_x1 if row_full else 0
+		if clipped {
+			// Every pixel through the per-pixel loop.
+			i0, i1 = w, w
+		}
 
 		for cx in 0 ..< i0 {
 			if bounded && srow[cx] >> 24 == 0 {
 				continue
 			}
-			mx := my * clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+			mx := my
+			if has_scissor {
+				mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
+			}
+			if clipped {
+				// Cut below half a step, as the shaders discard.
+				k := clip_k(crow, int(x0) + cx, clip_x0, clip_x1)
+				if k < 1.0 / 510 {
+					continue
+				}
+				mx *= k
+			}
 			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255, straight)
 		}
 
@@ -2700,6 +2766,31 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 		return false
 	}
 	pr := &b.paint_rows[inst.paint]
+	// A clip (clip_path): each pixel's coverage times its clip image's, the
+	// shaders' clip_coverage; one cut away whole draws nothing.
+	clipped := pr[0][3] != 0
+	if pr[0][3] < 0 {
+		return true
+	}
+	clip_px: []u32
+	clip_x0, clip_y0, clip_x1, clip_y1, clip_w: int
+	if clipped {
+		ct, ok := lookup_texture(images, cmd.clip_image)
+		if !ok || ct.format != .RGBA8 {
+			return false
+		}
+		clip_px = slice.reinterpret([]u32, ct.pixels)
+		clip_w = int(ct.width)
+		clip_x0, clip_y0, clip_x1, clip_y1 = int(pr[1][3]), int(pr[2][3]), int(pr[3][3]), int(pr[4][3])
+	}
+	// The clip's coverage at pixel x of a row whose clip texels are `crow`
+	// (none outside the cell).
+	clip_at :: #force_inline proc "contextless" (crow: []u32, x, x0, x1: int) -> f32 {
+		if x < x0 || x >= x1 {
+			return 0
+		}
+		return f32(crow[x - x0] >> 24) * (1.0 / 255)
+	}
 	tex: Sw_Texture
 	tox, toy: i32
 	tflip, tstraight, texels: bool
@@ -2775,6 +2866,13 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 					continue
 				}
 			}
+			crow: []u32
+			if clipped {
+				if py < clip_y0 || py >= clip_y1 {
+					continue
+				}
+				crow = clip_px[(py - clip_y0) * clip_w:]
+			}
 			acc := L.cov[row * stride:][:stride]
 			ty := int(i32(py) - r.oy)
 			drow := dst_px[ty * dst_stride + dst_x0 :][:w]
@@ -2799,6 +2897,12 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 					px_x := int(x0) + cx
 					if has_scissor && (cx < in_x0 || cx >= in_x1) {
 						k *= clamp(0.5 - (abs(ax * (f32(px_x) + 0.5) + bx) - ex) * sx, 0, 1)
+					}
+					if clipped {
+						k *= clip_at(crow, px_x, clip_x0, clip_x1)
+						if k < EMPTY {
+							continue
+						}
 					}
 					su := srow[clamp(px_x - int(tox), 0, tw - 1)]
 					if k <= 0 || su == 0 {
@@ -2863,6 +2967,14 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 				continue
 			}
 		}
+		crow: []u32
+		if clipped {
+			py := int(y0) + row
+			if py < clip_y0 || py >= clip_y1 {
+				continue
+			}
+			crow = clip_px[(py - clip_y0) * clip_w:]
+		}
 		acc := L.cov[row * stride:][:stride]
 		ty := int(y0 + i32(row) - r.oy)
 		drow := dst_px[ty * dst_stride + dst_x0 :][:w]
@@ -2880,6 +2992,33 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 			if cov >= FULL && full_scissor && x >= in_x0 && x < in_x1 {
 				start := x
 				x = sw_skip_zeros(acc, x + 1, in_x1)
+				if clipped {
+					// The span's coverage is its clip's: mostly whole or
+					// none, written or skipped as the span would be.
+					for cx in start ..< x {
+						px_x := int(x0) + cx
+						ck := u32(0) if px_x < clip_x0 || px_x >= clip_x1 else crow[px_x - clip_x0] >> 24
+						ca: f32
+						switch {
+						case ck == 0:
+							continue
+						case ck == 255 && opaque_src:
+							drow[cx] = packed_src
+							ca = base[3]
+						case ck == 255:
+							d := transmute([4]u8)drow[cx]
+							df := #simd[4]f32{f32(d[0]), f32(d[1]), f32(d[2]), f32(d[3])}
+							drow[cx] = transmute(u32)cast(#simd[4]u8)simd.clamp(simd.fma(df, inv_a, base255), 0, 255)
+							ca = base[3]
+						case:
+							ca = blend_partial(&drow[cx], base255_s, base_a, f32(ck) * (1.0 / 255), is_copy)
+						}
+						if moves {
+							write_motion(r.twin, dst_x0 + cx, ty, m, f32(px_x) + 0.5, py_c, ca)
+						}
+					}
+					continue
+				}
 				if opaque_src {
 					for &px_out in drow[start:x] {
 						px_out = packed_src
@@ -2903,6 +3042,14 @@ sw_fill_solid :: proc(L: ^Sw_Lanes, r: ^Raster, b: ^Software_Backend, images: ^I
 			px_c := f32(x0 + i32(x)) + 0.5
 			if has_scissor && (x < in_x0 || x >= in_x1) {
 				mx *= clamp(0.5 - (abs(ax * px_c + bx) - ex) * sx, 0, 1)
+			}
+			if clipped {
+				// Cut below half a step, as the shaders discard.
+				mx *= clip_at(crow, int(x0) + x, clip_x0, clip_x1)
+				if v * mx < EMPTY {
+					x += 1
+					continue
+				}
 			}
 			if mx > 0 || is_copy {
 				ca := blend_partial(&drow[x], base255_s, base_a, v * mx, is_copy)

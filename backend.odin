@@ -100,6 +100,12 @@ Params :: struct {
 	// longer step in level 0's texels from one pixel to the next, at least
 	// 0. The paint is affine, so it holds at every pixel.
 	image_lod:                   f32,
+	// The draw's clip (clip_path): one-based in the canvas's frame clips, 0
+	// for none, and the drawing-coordinate pixels its image covers (x0, y0,
+	// x1, y1; empty when it has none, cutting the draw away), set when the
+	// frame is sealed.
+	clip:                        u32,
+	clip_cell:                   [4]f32,
 }
 
 default_params :: proc "contextless" () -> Params {
@@ -108,11 +114,17 @@ default_params :: proc "contextless" () -> Params {
 
 // The 14 x vec4 uniform array the fragment shader reads as `frag[]`.
 pack_frag_uniforms :: proc "contextless" (p: Params) -> (out: [14][4]f32) {
-	out[0] = {p.scissor_mat[0], p.scissor_mat[1], p.scissor_mat[2], 0}
-	out[1] = {p.scissor_mat[4], p.scissor_mat[5], p.scissor_mat[6], 0}
-	out[2] = {p.scissor_mat[8], p.scissor_mat[9], p.scissor_mat[10], 0}
-	out[3] = {p.paint_mat[0], p.paint_mat[1], p.paint_mat[2], 0}
-	out[4] = {p.paint_mat[4], p.paint_mat[5], p.paint_mat[6], 0}
+	// The clip (shapes.glsl clip_coverage) in the rows' spare lanes: 0 none,
+	// 1 its image's cell in the next four, -1 cut away whole.
+	clipped: f32 = 0
+	if p.clip != 0 {
+		clipped = 1 if p.clip_cell[0] < p.clip_cell[2] && p.clip_cell[1] < p.clip_cell[3] else -1
+	}
+	out[0] = {p.scissor_mat[0], p.scissor_mat[1], p.scissor_mat[2], clipped}
+	out[1] = {p.scissor_mat[4], p.scissor_mat[5], p.scissor_mat[6], p.clip_cell[0]}
+	out[2] = {p.scissor_mat[8], p.scissor_mat[9], p.scissor_mat[10], p.clip_cell[1]}
+	out[3] = {p.paint_mat[0], p.paint_mat[1], p.paint_mat[2], p.clip_cell[2]}
+	out[4] = {p.paint_mat[4], p.paint_mat[5], p.paint_mat[6], p.clip_cell[3]}
 	out[5] = {p.paint_mat[8], p.paint_mat[9], p.paint_mat[10], 0}
 	out[6] = p.inner_col
 	out[7] = p.outer_col
@@ -367,6 +379,9 @@ Command :: struct {
 	// clipping or a rotated scissor that only the shader's `scissor_mat`
 	// test handles.
 	scissor_rect:        Maybe(Rect),
+	// A shape draw's clip image (clip_path): its draws' coverage times the
+	// image's at the pixel, inside the cell their paint rows give.
+	clip_image:          Image_Id,
 }
 
 // Everything one `flush` hands to the backend.
