@@ -230,7 +230,12 @@ paint:
   today's `Layer_Params` rule that an opacity of 0 means 1;
 - a blend: one of the 11 Porter-Duff composite operations the canvas has
   today (Copy, Source_In, Destination_Out, Xor, Lighter...), or source-over
-  with one of the 16 blend modes, so the canvas maps onto it without loss;
+  with one of the 16 blend modes, so the canvas maps onto it without loss.
+  A Porter-Duff operation is bounded: it acts where the draw (or a layer's
+  or a run's content) covers, at least 1/510, and leaves every pixel it
+  doesn't cover as it was, whatever size a backend makes the layer. Unlike
+  HTML canvas's unbounded operations, Copy or Source_In don't clear
+  uncovered pixels; a `Scene_Clear` or a mask does that;
 - an optional mask (`Mask_Id`), read by that draw alone.
 
 That's PDF's graphics state, where a soft mask, a blend mode and an opacity
@@ -292,6 +297,13 @@ Structure is nesting in the draw list, not render targets:
   its luminance there, which is the straight colour's times alpha: no pass
   of its own (v0.1.13). Only a transfer table needs one, once.
 - **Patterns** are draw ranges a paint refers to, drawn per lattice cell.
+  A cell's draws are in cell space (their transforms map into it); the
+  cell's transform maps cell space to the device, and its clip rectangle
+  (PDF's BBox) and steps are in cell space, the rectangle at any origin.
+- **Building order.** Dependencies come first: a scene's mask and pattern
+  draw ranges are appended before its `main` draws, and `main` stays the
+  last range of `draws` (the builder asserts it, so a range can't fall
+  inside `main` by accident).
 - **Dependency order.** Masks and pattern cells may refer to each other
   (PDF nests soft masks, and a pattern may paint with a pattern or under a
   mask), so their order is kept in the one table they share, `draws`: a

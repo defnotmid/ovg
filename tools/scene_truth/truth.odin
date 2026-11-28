@@ -28,6 +28,8 @@ CASES := [?]Case {
 	{"mask_backdrop", build_mask_backdrop, worst_mask_backdrop},
 	{"mask_transfer", build_mask_transfer, worst_mask_transfer},
 	{"mask_isolated", build_mask_isolated, worst_mask_isolated},
+	{"pattern_coloured", build_pattern_coloured, worst_pattern_coloured},
+	{"pattern_uncoloured", build_pattern_uncoloured, worst_pattern_uncoloured},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -326,3 +328,42 @@ build_mask_isolated :: proc(s: ^vg.Scene) {
 
 @(private = "file")
 worst_mask_isolated :: proc(px: []u8, w: int) -> f32 {return worst_grey(px, w, 0.2125)}
+
+// A pattern cell clipped to (1, 1)..(5, 5) in cell space, stepping 4, put
+// at (2, 3) on the device: its 2 x 2 square at the cell's (1, 1) lands on
+// device (3 + 4i, 4 + 4j). Uncoloured, the cell's blue is ignored and the
+// use site's red tints its coverage.
+@(private = "file")
+build_pattern :: proc(s: ^vg.Scene, uncoloured: bool) {
+	// The cell first: a scene is built dependencies first.
+	cell_space := vg.scene_add_transform(s, vg.TRANSFORM_IDENTITY)
+	cell_t := vg.scene_add_transform(s, vg.transform_translation(2, 3))
+	draws := vg.scene_add_draws(s, {vg.Scene_Fill{path = polygon(s, {{1, 1}, {3, 1}, {3, 3}, {1, 3}}), transform = cell_space, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{0, 0, 1, 1}}))}})
+	append(&s.patterns, vg.Pattern_Cell{draws = draws, transform = cell_t, step = {4, 4}, clip = {1, 1, 5, 5}, uncoloured = uncoloured})
+	id := ground(s, {0, 0, 0, 1})
+	paint := vg.scene_add_paint(s, vg.Scene_Pattern_Paint{pattern = vg.Pattern_Id(len(s.patterns)), color = {1, 0, 0, 1}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(paint)})
+}
+
+@(private = "file")
+worst_pattern :: proc(px: []u8, w: int, color: [3]f32) -> f32 {
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			on := (x - 3 + 400) % 4 < 2 && (y - 4 + 400) % 4 < 2
+			want := color if on else {0, 0, 0}
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b))
+		}
+	}
+	return worst * 255
+}
+
+@(private = "file")
+build_pattern_coloured :: proc(s: ^vg.Scene) {build_pattern(s, false)}
+@(private = "file")
+worst_pattern_coloured :: proc(px: []u8, w: int) -> f32 {return worst_pattern(px, w, {0, 0, 1})}
+@(private = "file")
+build_pattern_uncoloured :: proc(s: ^vg.Scene) {build_pattern(s, true)}
+@(private = "file")
+worst_pattern_uncoloured :: proc(px: []u8, w: int) -> f32 {return worst_pattern(px, w, {1, 0, 0})}

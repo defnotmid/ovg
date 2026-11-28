@@ -549,6 +549,16 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	scene_draw(&s, Scene_Stroke{path = square, transform = id, style = scene_add_stroke(&s, {width = 1, miter_limit = 4}), look = scene_look(paint)})
 	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
 
+	// Overlapping pattern cells (a step under the clip's size) aren't cut
+	// silently.
+	scene_clear(&s)
+	id = scene_add_transform(&s, TRANSFORM_IDENTITY)
+	cell_at := u32(len(s.draws))
+	append(&s.draws, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {4, 0}, {4, 4}}), transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))})
+	append(&s.patterns, Pattern_Cell{draws = {cell_at, 1}, transform = id, step = {3, 4}, clip = {0, 0, 4, 4}})
+	s.main = {}
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Patterns, 0})
+
 	// One image asked to sample two ways.
 	scene_clear(&s)
 	id = scene_add_transform(&s, TRANSFORM_IDENTITY)
@@ -557,4 +567,41 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	scene_add_paint(&s, Scene_Image_Paint{image = img, transform = id, sampling = .Linear})
 	scene_add_paint(&s, Scene_Image_Paint{image = img, transform = id, sampling = .Nearest})
 	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Paints, 1})
+}
+
+
+// A pattern cell clipped to (1, 1)..(5, 5) in cell space, stepping 4, put
+// at (2, 3): its 2 x 2 square lands on device (3 + 4i, 4 + 4j), exactly.
+// Uncoloured, the cell's blue is ignored and the use site's red tints its
+// coverage.
+@(test)
+test_scene_truth_patterns :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	for uncoloured in ([2]bool{false, true}) {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		cell_space := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		cell_t := scene_add_transform(&s, transform_translation(2, 3))
+		draws := scene_add_draws(&s, {Scene_Fill{path = scene_polygon(&s, {{1, 1}, {3, 1}, {3, 3}, {1, 3}}), transform = cell_space, look = scene_look(scene_add_paint(&s, Scene_Solid{{0, 0, 1, 1}}))}})
+		append(&s.patterns, Pattern_Cell{draws = draws, transform = cell_t, step = {4, 4}, clip = {1, 1, 5, 5}, uncoloured = uncoloured})
+		paint := scene_add_paint(&s, Scene_Pattern_Paint{pattern = Pattern_Id(len(s.patterns)), color = {1, 0, 0, 1}})
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}}), transform = cell_space, look = scene_look(paint)})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		color := [3]f32{1, 0, 0} if uncoloured else {0, 0, 1}
+		worst: f32
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				on := (x - 3 + 400) % 4 < 2 && (y - 4 + 400) % 4 < 2
+				want := color if on else {0, 0, 0}
+				got := target_px(&tg, x, y)
+				worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b))
+			}
+		}
+		testing.expectf(t, worst * 255 <= 1, "pattern (uncoloured %v) is %.1f levels off", uncoloured, worst * 255)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
 }

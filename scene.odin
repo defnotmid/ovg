@@ -443,14 +443,26 @@ scene_add_image :: proc(s: ^Scene, image: Scene_Image) -> Scene_Image_Id {
 	return Scene_Image_Id(len(s.images))
 }
 
-// Appends a draw to `main`, which must be the draws' last range: a scene
-// is built with `main` drawn last, or set by the caller.
+// Appends a draw to `main`. A scene is built dependencies first: the
+// draws of its masks and pattern cells (scene_add_draws), then main, which
+// stays the draws' last range. A range appended after main has begun would
+// fall inside it, so that is an error here, not a silent change to main.
 scene_draw :: proc(s: ^Scene, d: Scene_Draw) {
 	if s.main.count == 0 {
 		s.main.start = u32(len(s.draws))
 	}
+	assert(int(s.main.start + s.main.count) == len(s.draws), "a scene's masks and pattern cells are built before its main draws")
 	append(&s.draws, d)
-	s.main.count = u32(len(s.draws)) - s.main.start
+	s.main.count += 1
+}
+
+// Appends `draws` as a range of their own, outside main (a mask's or a
+// pattern cell's), and returns it; called before main is begun.
+scene_add_draws :: proc(s: ^Scene, draws: []Scene_Draw) -> Range {
+	assert(s.main.count == 0, "a scene's masks and pattern cells are built before its main draws")
+	at := u32(len(s.draws))
+	append(&s.draws, ..draws)
+	return {at, u32(len(draws))}
 }
 
 // A painting draw's look: `paint`, opaque, source-over, no mask, still.

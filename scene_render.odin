@@ -8,8 +8,14 @@ import "core:slice"
 // backend draws it with today's machinery (docs/scene.md, staging step 4).
 // What this path can't yet draw exactly is rejected whole, before anything
 // is recorded, rather than drawn approximately: groups that are knockout or
-// not isolated, layer filters, pattern paints, motion, and a Porter-Duff
-// operation on a layer.
+// not isolated, layer filters, motion, a Porter-Duff operation on a layer,
+// and the pattern cases listed at scene_record_supported.
+//
+// A pattern cell is rendered once into a tile, before anything else: its
+// draws in cell space, mapped onto a tile of whole pixels spanning one
+// lattice step, cut to the cell's clip rectangle. A pattern paint draws the
+// tile repeating, through the cell's transform. That is exact when the
+// lattice lands on whole device pixels, and resampled otherwise.
 //
 // Each mask a draw or layer names is rendered once, before anything else
 // and outside every layer, into an image of the canvas's size: a luminance
@@ -38,6 +44,22 @@ Scene_Renderer :: struct {
 	pushed_layer: [dynamic]bool,
 	// Per mask, its image (none when nothing names it).
 	mask_images: [dynamic]Image_Id,
+	// Per pattern, its tile (none when nothing paints with it).
+	tiles:       [dynamic]Scene_Tile,
+	// What every transform read composes onto: the device for main and
+	// masks, a tile's pixels inside a pattern cell.
+	base:        Transform2D,
+	// Inside an uncoloured cell: every paint is white, so only coverage
+	// reaches the tile.
+	white:       bool,
+}
+
+// A pattern cell's tile: its image and size in pixels, and the map from
+// tile pixels to device space.
+Scene_Tile :: struct {
+	image:   Image_Id,
+	size:    [2]u32,
+	to_device: Transform2D,
 }
 
 scene_renderer_init :: proc(r: ^Scene_Renderer, allocator := context.allocator) {
@@ -53,6 +75,8 @@ scene_renderer_init :: proc(r: ^Scene_Renderer, allocator := context.allocator) 
 	r.layer_masks = make([dynamic]Mask_Id, allocator)
 	r.pushed_layer = make([dynamic]bool, allocator)
 	r.mask_images = make([dynamic]Image_Id, allocator)
+	r.tiles = make([dynamic]Scene_Tile, allocator)
+	r.base = TRANSFORM_IDENTITY
 }
 
 scene_renderer_destroy :: proc(r: ^Scene_Renderer, c: ^Canvas) {
@@ -73,6 +97,7 @@ scene_renderer_destroy :: proc(r: ^Scene_Renderer, c: ^Canvas) {
 	delete(r.layer_masks)
 	delete(r.pushed_layer)
 	delete(r.mask_images)
+	delete(r.tiles)
 }
 
 // Frees what recording a scene made for one render (images for borrowed
@@ -154,9 +179,6 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		if l.motion != 0 {
 			return false
 		}
-		if _, pattern := s.paints[l.paint - 1].(Scene_Pattern_Paint); pattern {
-			return false
-		}
 		// A mask or blend mode draws through a layer, which composites
 		// source-over: a Porter-Duff operation would apply inside it.
 		return l.blend.op == .Source_Over || l.mask == 0 && l.blend.mode == .Normal
@@ -198,6 +220,57 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		}
 		if !ok {
 			return {.Unsupported, .Draws, k}
+		}
+	}
+	// Pattern cells: cells that don't overlap (a step at least the clip's
+	// size), a tile of at most 4096 pixels a side, and draws made in cell
+	// space: no whole-pixel clips or clears, masks or patterns inside; an
+	// uncoloured cell paints coverage, so its images must be stencils.
+	for cell, i in s.patterns {
+		w, h := cell.clip.maxx - cell.clip.minx, cell.clip.maxy - cell.clip.miny
+		if abs(cell.step.x) < w || abs(cell.step.y) < h || cell.step.x == 0 || cell.step.y == 0 {
+			return {.Unsupported, .Patterns, i}
+		}
+		size := scene_tile_size(s, cell)
+		if size.x > 4096 || size.y > 4096 {
+			return {.Unsupported, .Patterns, i}
+		}
+		for k in cell.draws.start ..< cell.draws.start + cell.draws.count {
+			l: Scene_Look
+			has_look := false
+			switch d in s.draws[k] {
+			case Scene_Fill:
+				l, has_look = d.look, true
+			case Scene_Stroke:
+				l, has_look = d.look, true
+			case Scene_Glyphs:
+				l, has_look = d.look, true
+			case Clip_Push:
+				if _, rect := d.shape.(Clip_Rect); rect {
+					return {.Unsupported, .Draws, int(k)}
+				}
+			case Layer_Push:
+				if d.mask != 0 {
+					return {.Unsupported, .Draws, int(k)}
+				}
+			case Scene_Clear:
+				return {.Unsupported, .Draws, int(k)}
+			case Clip_Pop, Layer_Pop:
+			}
+			if !has_look {
+				continue
+			}
+			if l.mask != 0 {
+				return {.Unsupported, .Draws, int(k)}
+			}
+			#partial switch pv in s.paints[l.paint - 1] {
+			case Scene_Pattern_Paint:
+				return {.Unsupported, .Draws, int(k)}
+			case Scene_Image_Paint:
+				if view, is_view := s.images[pv.image - 1].(Pixel_View); cell.uncoloured && (!is_view || view.format != .Alpha8) {
+					return {.Unsupported, .Draws, int(k)}
+				}
+			}
 		}
 	}
 	// Sampling is an image's here: every paint of an image must ask for the
@@ -283,6 +356,12 @@ scene_color :: proc "contextless" (premul: [4]f32) -> Color {
 	return {premul[0] / a, premul[1] / a, premul[2] / a, a}
 }
 
+// Transform `id` on to the device (or, inside a pattern cell, the tile).
+@(private = "file")
+scene_xf :: proc "contextless" (r: ^Scene_Renderer, s: ^Scene, id: Transform_Id) -> Transform2D {
+	return transform_multiply(s.transforms[id - 1], r.base)
+}
+
 // Scene path `id` into `out`, its points mapped by `t`.
 @(private = "file")
 scene_path_into :: proc(s: ^Scene, id: Path_Id, out: ^Path, t := TRANSFORM_IDENTITY) {
@@ -319,10 +398,20 @@ scene_path_into :: proc(s: ^Scene, id: Path_Id, out: ^Path, t := TRANSFORM_IDENT
 // draw's space.
 @(private = "file")
 scene_canvas_paint :: proc(r: ^Scene_Renderer, s: ^Scene, id: Paint_Id, draw: Transform2D) -> Paint {
-	into :: proc(s: ^Scene, t: Transform_Id, draw: Transform2D) -> Transform2D {
-		return transform_multiply(s.transforms[t - 1], transform_inverse(draw))
+	into :: proc(r: ^Scene_Renderer, s: ^Scene, t: Transform_Id, draw: Transform2D) -> Transform2D {
+		return transform_multiply(transform_multiply(s.transforms[t - 1], r.base), transform_inverse(draw))
 	}
 	p: Paint
+	if r.white {
+		// Inside an uncoloured cell: coverage only, in white; a stencil
+		// image (Alpha8) keeps its alpha.
+		if ip, is_image := s.paints[id - 1].(Scene_Image_Paint); is_image {
+			p = paint_image_tint(r.images[ip.image - 1], 0, 0, 1, 1, 0, {1, 1, 1, 1})
+			p.transform = into(r, s, ip.transform, draw)
+			return p
+		}
+		return paint_color({1, 1, 1, 1})
+	}
 	switch v in s.paints[id - 1] {
 	case Scene_Solid:
 		p = paint_color(scene_color(v.color))
@@ -330,22 +419,27 @@ scene_canvas_paint :: proc(r: ^Scene_Renderer, s: ^Scene, id: Paint_Id, draw: Tr
 		p = paint_linear_gradient_stops(v.start.x, v.start.y, v.end.x, v.end.y, s.stops[v.stops.start:][:v.stops.count])
 		p.spread = v.spread
 		p.gradient_clip = v.clip
-		p.transform = into(s, v.transform, draw)
+		p.transform = into(r, s, v.transform, draw)
 	case Scene_Radial:
 		p = paint_radial_gradient_focal_stops(v.center.x, v.center.y, v.radius, v.focal.x, v.focal.y, v.focal_r, s.stops[v.stops.start:][:v.stops.count])
 		p.spread = v.spread
 		p.gradient_clip = v.clip
-		p.transform = into(s, v.transform, draw)
+		p.transform = into(r, s, v.transform, draw)
 	case Scene_Conic:
 		p = paint_conic_gradient_stops(v.center.x, v.center.y, s.stops[v.stops.start:][:v.stops.count])
 		// The start angle: turned about the centre in paint space.
 		turn := transform_multiply(transform_multiply(transform_translation(-v.center.x, -v.center.y), transform_rotation(v.angle)), transform_translation(v.center.x, v.center.y))
-		p.transform = transform_multiply(turn, into(s, v.transform, draw))
+		p.transform = transform_multiply(turn, into(r, s, v.transform, draw))
 	case Scene_Image_Paint:
 		p = paint_image_tint(r.images[v.image - 1], 0, 0, 1, 1, 0, scene_color(v.tint))
-		p.transform = into(s, v.transform, draw)
+		p.transform = into(r, s, v.transform, draw)
 	case Scene_Pattern_Paint:
-		// Rejected by scene_record_supported.
+		// The tile repeating, from its pixels to the device, then into the
+		// draw's space; an uncoloured cell's coverage tinted.
+		t := r.tiles[v.pattern - 1]
+		tint := scene_color(v.color) if s.patterns[v.pattern - 1].uncoloured else Color{1, 1, 1, 1}
+		p = paint_image_tint(t.image, 0, 0, f32(t.size.x), f32(t.size.y), 0, tint)
+		p.transform = transform_multiply(t.to_device, transform_inverse(draw))
 	}
 	if p.transform == TRANSFORM_IDENTITY {
 		p.transform = {}
@@ -373,7 +467,7 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 		case Scene_Fill:
 			scene_record_look(r, c, ls, s, v.look, proc(r: ^Scene_Renderer, c: ^Canvas, s: ^Scene, d: Scene_Draw) {
 				f := d.(Scene_Fill)
-				t := s.transforms[f.transform - 1]
+				t := scene_xf(r, s, f.transform)
 				p := scene_canvas_paint(r, s, f.paint, t)
 				p.fill_rule = f.rule
 				p.anti_alias = f.edge.kind != .Aliased
@@ -389,7 +483,7 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 		case Scene_Stroke:
 			scene_record_look(r, c, ls, s, v.look, proc(r: ^Scene_Renderer, c: ^Canvas, s: ^Scene, d: Scene_Draw) {
 				st := d.(Scene_Stroke)
-				t := s.transforms[st.transform - 1]
+				t := scene_xf(r, s, st.transform)
 				style := s.strokes[st.style - 1]
 				p := scene_canvas_paint(r, s, st.paint, t)
 				scene_path_into(s, st.path, &r.path)
@@ -437,7 +531,7 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 				intersect_scissor(c, f32(cl[0]), f32(cl[1]), f32(cl[2] - cl[0]), f32(cl[3] - cl[1]))
 				append(&r.pushed_layer, false)
 			case Clip_Path:
-				scene_path_into(s, cl.path, &r.clip, s.transforms[cl.transform - 1])
+				scene_path_into(s, cl.path, &r.clip, scene_xf(r, s, cl.transform))
 				save(c)
 				reset_transform(c)
 				layer_push(ls, c, {opacity = 1, clip_path = &r.clip, clip_rule = cl.rule})
@@ -521,41 +615,95 @@ scene_copy :: proc(ls: ^Layer_Stack, c: ^Canvas, img: Image_Id) {
 	restore(c)
 }
 
-// Every mask a draw or layer names, rendered before main and outside every
-// layer (a layer that turns out to draw nothing drops what was recorded in
-// it), in the order their draws come in `draws`: a mask's draws name only
-// masks whose draws come before, so those are ready first.
+// Every mask a draw or layer names and every pattern a paint uses,
+// rendered before main and outside every layer (a layer that turns out to
+// draw nothing drops what was recorded in it), in the order their draws
+// come in `draws`: their draws name only masks and patterns whose draws
+// come before, so those are ready first.
 @(private = "file")
 scene_render_masks :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene) {
 	resize(&r.mask_images, len(s.masks))
+	resize(&r.tiles, len(s.patterns))
 	named := make([]bool, len(s.masks), context.temp_allocator)
+	painted := make([]bool, len(s.patterns), context.temp_allocator)
 	for d in s.draws {
-		m: Mask_Id
+		l: Scene_Look
 		#partial switch v in d {
 		case Scene_Fill:
-			m = v.mask
+			l = v.look
 		case Scene_Stroke:
-			m = v.mask
+			l = v.look
 		case Scene_Glyphs:
-			m = v.mask
+			l = v.look
 		case Layer_Push:
-			m = v.mask
+			l.mask = v.mask
 		}
-		if m != 0 {
-			named[m - 1] = true
+		if l.mask != 0 {
+			named[l.mask - 1] = true
+		}
+		if l.paint != 0 {
+			if pp, ok := s.paints[l.paint - 1].(Scene_Pattern_Paint); ok {
+				painted[pp.pattern - 1] = true
+			}
 		}
 	}
-	order := make([dynamic][2]u32, 0, len(s.masks), context.temp_allocator)
+	// (draw start, 0 mask or 1 pattern, index)
+	order := make([dynamic][3]u32, 0, len(s.masks) + len(s.patterns), context.temp_allocator)
 	for mk, i in s.masks {
 		r.mask_images[i] = {}
 		if named[i] {
-			append(&order, [2]u32{mk.draws.start, u32(i)})
+			append(&order, [3]u32{mk.draws.start, 0, u32(i)})
 		}
 	}
-	slice.sort_by(order[:], proc(a, b: [2]u32) -> bool {return a[0] < b[0] || a[0] == b[0] && a[1] < b[1]})
-	for o in order {
-		r.mask_images[o[1]] = scene_mask_image(r, c, ls, s, Mask_Id(o[1] + 1))
+	for cell, i in s.patterns {
+		r.tiles[i] = {}
+		if painted[i] {
+			append(&order, [3]u32{cell.draws.start, 1, u32(i)})
+		}
 	}
+	slice.sort_by(order[:], proc(a, b: [3]u32) -> bool {
+		return a[0] < b[0] || a[0] == b[0] && (a[1] < b[1] || a[1] == b[1] && a[2] < b[2])
+	})
+	for o in order {
+		if o[1] == 0 {
+			r.mask_images[o[2]] = scene_mask_image(r, c, ls, s, Mask_Id(o[2] + 1))
+		} else {
+			r.tiles[o[2]] = scene_tile(r, c, ls, s, Pattern_Id(o[2] + 1))
+		}
+	}
+}
+
+// A cell's tile size: one lattice step, in the device pixels the cell's
+// transform stretches each axis to.
+@(private = "file")
+scene_tile_size :: proc(s: ^Scene, cell: Pattern_Cell) -> [2]u32 {
+	t := s.transforms[cell.transform - 1]
+	sx, sy := math.hypot(t[0], t[1]), math.hypot(t[2], t[3])
+	return {u32(max(math.ceil(abs(cell.step.x) * sx - 1e-3), 1)), u32(max(math.ceil(abs(cell.step.y) * sy - 1e-3), 1))}
+}
+
+// Pattern `id`'s tile: its cell's draws mapped from cell space onto the
+// tile (the clip rectangle's corner at its origin, one step across it),
+// cut to the clip rectangle.
+@(private = "file")
+scene_tile :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, id: Pattern_Id) -> Scene_Tile {
+	cell := s.patterns[id - 1]
+	size := scene_tile_size(s, cell)
+	k := Vec2{f32(size.x) / abs(cell.step.x), f32(size.y) / abs(cell.step.y)}
+	to_tile := transform_multiply(transform_translation(-cell.clip.minx, -cell.clip.miny), transform_scaling(k.x, k.y))
+	to_cell := transform_inverse(to_tile)
+	tile := layer_pattern_begin(ls, c, size.x, size.y)
+	save(c)
+	reset_transform(c)
+	reset_scissor(c)
+	scissor(c, 0, 0, (cell.clip.maxx - cell.clip.minx) * k.x, (cell.clip.maxy - cell.clip.miny) * k.y)
+	base, white := r.base, r.white
+	r.base, r.white = to_tile, cell.uncoloured
+	scene_record_range(r, c, ls, s, cell.draws)
+	r.base, r.white = base, white
+	restore(c)
+	layer_pattern_end(ls, c)
+	return {tile, size, transform_multiply(to_cell, s.transforms[cell.transform - 1])}
 }
 
 // Mask `m` rendered, in device space and the canvas's size. Read as
@@ -657,7 +805,7 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 	if run.glyphs.count == 0 {
 		return
 	}
-	rt := s.transforms[run.transform - 1]
+	rt := scene_xf(r, s, run.transform)
 	solid, is_solid := s.paints[g.paint - 1].(Scene_Solid)
 	direct := g.stroke == 0 && is_solid && solid.color[3] >= 1 && g.opacity >= 1 && g.mask == 0 && g.blend == {}
 	if direct {
@@ -742,7 +890,7 @@ bounds_grow_f :: proc "contextless" (b: Bounds, d: f32) -> Bounds {
 @(private = "file")
 scene_run_union :: proc(r: ^Scene_Renderer, s: ^Scene, id: Run_Id, out: ^Path) {
 	run := s.runs[id - 1]
-	rt := s.transforms[run.transform - 1]
+	rt := scene_xf(r, s, run.transform)
 	n := int(run.glyphs.count)
 	for len(r.paths) < n {
 		p: Path
