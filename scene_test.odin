@@ -559,6 +559,50 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	s.main = {}
 	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Patterns, 0})
 
+	// Inside a path clip (a layer, until clips are coverage), what reads
+	// its backdrop: a blend mode, a Porter-Duff operation, a non-isolated
+	// group; and a clear inside a non-isolated group. A rectangle clip, or
+	// an isolated layer between, is fine.
+	for reader in 0 ..< 5 {
+		scene_clear(&s)
+		id = scene_add_transform(&s, TRANSFORM_IDENTITY)
+		tri := scene_polygon(&s, {{0, 0}, {4, 0}, {4, 4}})
+		rlook := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
+		want := Scene_Problem{.Unsupported, .Draws, 1}
+		switch reader {
+		case 0:
+			rlook.blend.mode = .Multiply
+			scene_draw(&s, Clip_Push{Clip_Path{tri, id, .Non_Zero}})
+			scene_draw(&s, Scene_Fill{path = tri, transform = id, look = rlook})
+			scene_draw(&s, Clip_Pop{})
+		case 1:
+			rlook.blend.op = .Copy
+			scene_draw(&s, Clip_Push{Clip_Path{tri, id, .Non_Zero}})
+			scene_draw(&s, Scene_Fill{path = tri, transform = id, look = rlook})
+			scene_draw(&s, Clip_Pop{})
+		case 2:
+			scene_draw(&s, Clip_Push{Clip_Path{tri, id, .Non_Zero}})
+			scene_draw(&s, Layer_Push{opacity = 1})
+			scene_draw(&s, Layer_Pop{})
+			scene_draw(&s, Clip_Pop{})
+		case 3:
+			scene_draw(&s, Layer_Push{opacity = 1})
+			scene_draw(&s, Scene_Clear{{0, 0, 4, 4}, {1, 1, 1, 1}})
+			scene_draw(&s, Layer_Pop{})
+		case 4:
+			// Accepted: an isolated layer between the clip and the blend.
+			rlook.blend.mode = .Multiply
+			scene_draw(&s, Clip_Push{Clip_Path{tri, id, .Non_Zero}})
+			scene_draw(&s, Layer_Push{opacity = 1, isolated = true})
+			scene_draw(&s, Scene_Fill{path = tri, transform = id, look = rlook})
+			scene_draw(&s, Layer_Pop{})
+			scene_draw(&s, Clip_Pop{})
+			want = {}
+		}
+		got := target_draw(&tg, &s)
+		testing.expectf(t, got == want, "reader %d: %v", reader, got)
+	}
+
 	// One image asked to sample two ways.
 	scene_clear(&s)
 	id = scene_add_transform(&s, TRANSFORM_IDENTITY)
@@ -647,6 +691,61 @@ test_scene_truth_bounded_ops :: proc(t: ^testing.T) {
 			}
 		}
 		testing.expectf(t, worst * 255 <= 1, "bounded Copy (run %v) is %.1f levels off", as_run, worst * 255)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}
+
+// A non-isolated group over an opaque backdrop B (PDF 11.4.4): red at 0.5
+// over (2, 2)..(14, 14), green at 0.5 Multiply over (8, 8)..(20, 20), which
+// blends with B. G is the two drawn straight onto B, a_g their alphas'
+// union, the group's colour G - (1 - a_g) B. At opacity 0.5 the result is
+// (G + B) / 2; screened, (1 - a_g) B + a_g Screen(B, colour), which only
+// a_g tracked apart from G (always 1 over B) gets right.
+@(test)
+test_scene_truth_groups :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	back := [3]f32{0.2, 0.4, 0.8}
+	for screen in ([2]bool{false, true}) {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {back.r, back.g, back.b, 1}})
+		red := scene_look(scene_add_paint(&s, Scene_Solid{{1, 0, 0, 1}}))
+		red.opacity = 0.5
+		green := scene_look(scene_add_paint(&s, Scene_Solid{{0, 1, 0, 1}}))
+		green.opacity = 0.5
+		green.blend.mode = .Multiply
+		scene_draw(&s, Layer_Push{opacity = 1 if screen else 0.5, blend = {mode = .Screen if screen else .Normal}})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{2, 2}, {14, 2}, {14, 14}, {2, 14}}), transform = id, look = red})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{8, 8}, {20, 8}, {20, 20}, {8, 20}}), transform = id, look = green})
+		scene_draw(&s, Layer_Pop{})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		worst: f32
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				g := back
+				a: f32
+				if x >= 2 && x < 14 && y >= 2 && y < 14 {
+					g = 0.5 * g + 0.5 * [3]f32{1, 0, 0}
+					a = 0.5
+				}
+				if x >= 8 && x < 20 && y >= 8 && y < 20 {
+					g = 0.5 * g + 0.5 * ([3]f32{0, 1, 0} * g)
+					a = a + 0.5 - a * 0.5
+				}
+				want := (g + back) * 0.5
+				if screen {
+					own := (g - (1 - a) * back) / a if a > 0 else 0
+					want = (1 - a) * back + a * (back + own - back * own)
+				}
+				got := target_px(&tg, x, y)
+				worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+			}
+		}
+		testing.expectf(t, worst * 255 <= 1, "non-isolated group (screen %v) is %.1f levels off", screen, worst * 255)
 		scene_destroy(&s)
 		target_close(&tg)
 	}

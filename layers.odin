@@ -320,6 +320,29 @@ layer_stack_end :: proc(ls: ^Layer_Stack, c: ^Canvas) {
 	ls.root = {}
 }
 
+// A copy of the current target's pixels, an image of its size in `format`:
+// what the frame has drawn into it by here (the backdrop a non-isolated
+// group starts from, PDF 11.4.4). The target must be an image, so begin the
+// stack with `root_layer` when it is the screen; the layer under, if any,
+// then covers the whole canvas, as for a blending child. Release it with
+// `layer_release`.
+layer_backdrop :: proc(ls: ^Layer_Stack, c: ^Canvas, format: Pixel_Format) -> Image_Id {
+	if len(ls.frames) > 0 {
+		ls.frames[len(ls.frames) - 1].full = true
+	}
+	target, is_image := ls.targets[len(ls.targets) - 1].target.(Image_Id)
+	assert(is_image, "a backdrop is read from an image target: begin the stack with a root layer")
+	img := layer_acquire(ls, c, ls.width, ls.height, format = format)
+	layer_target_begin(ls, c, img, keep = true)
+	save(c)
+	set_global_alpha(c, 1)
+	set_composite_operation(c, .Copy)
+	layer_blit(ls, c, target, 0, 0, ls.width, ls.height, 1, keep_motion = true)
+	restore(c)
+	layer_target_end(ls, c)
+	return img
+}
+
 // A repeating tile image (`w x h` pixels) to draw a pattern into: drawing
 // goes to it until `layer_pattern_end`, which returns it for an image paint.
 // Tiles sample nearest-neighbour (as resvg's pattern shader), so tile edges

@@ -284,7 +284,10 @@ Structure is nesting in the draw list, not render targets:
   own opacity and blend, as PDF and SVG define them. v0.1.15's clip
   shortcuts (dropping a clip layer its clip covers, compositing the others
   in one pass) are interim, on today's layers; the Scene's clips replace
-  them.
+  them. Until then a path or run clip is drawn as a layer, which starts
+  transparent, so scene_record rejects what would read its backdrop
+  through one (a blend mode, a Porter-Duff operation, a non-isolated
+  group whose nearest group is the clip): PDF's clipping is not a group.
 - **Layers** are a range of draws composited as one: opacity, a blend as a
   draw's, isolated or not, knockout or not (PDF transparency groups and
   SVG's group opacity, mix-blend-mode and filters), and an optional mask.
@@ -479,7 +482,12 @@ belongs to step 4; the rest to step 5:
   backdrop: a draw with one becomes a small layer, copying the backdrop under
   its bounds, as layers with a blend mode do today;
 - non-isolated groups, which start from the backdrop and remove it when
-  compositing;
+  compositing. Built today from what both backends have (scene_group): the
+  group drawn onto a copy of its backdrop B (G), drawn again into a
+  transparent image with blend modes off for its alpha a_g (A, which G
+  can't give back over an opaque backdrop), B with A drawn Destination_Out
+  for (1 - a_g) B (T), and one arithmetic composite G - T for the group's
+  own colour, all RGBA16F; no new shader;
 - knockout groups, which track each element's shape apart from the group's
   opacity.
 

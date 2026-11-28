@@ -32,6 +32,9 @@ CASES := [?]Case {
 	{"pattern_uncoloured", build_pattern_uncoloured, worst_pattern_uncoloured},
 	{"op_copy_layer", build_copy_layer, worst_copy},
 	{"op_copy_run", build_copy_run, worst_copy},
+	{"group_non_isolated", build_group_half, worst_group_half},
+	{"group_non_isolated_screen", build_group_screen, worst_group_screen},
+	{"group_non_isolated_nested", build_group_nested, worst_group_half},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -418,3 +421,89 @@ worst_copy :: proc(px: []u8, w: int) -> f32 {
 	}
 	return worst * 255
 }
+
+// A non-isolated group over an opaque backdrop B: red at opacity 0.5 over
+// (2, 2)..(14, 14), then green at 0.5 Multiply over (8, 8)..(20, 20), which
+// blends with B inside the group (PDF 11.4.4). G is the two drawn straight
+// onto B, a_g their alpha's union; the group's colour is G - (1 - a_g) B.
+@(private = "file")
+GROUP_BACK :: [4]f32{0.2, 0.4, 0.8, 1}
+
+@(private = "file")
+build_group :: proc(s: ^vg.Scene, opacity: f32, mode: vg.Blend_Mode, nested := false) {
+	id := ground(s, GROUP_BACK)
+	if nested {
+		// Inside an isolated layer (on another ground) that the group reads
+		// its backdrop from: B is the layer's content, drawn first.
+		vg.scene_draw(s, vg.Scene_Clear{{0, 0, 4096, 4096}, {0.9, 0.1, 0.3, 1}})
+		vg.scene_draw(s, vg.Layer_Push{opacity = 1, isolated = true})
+		vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{GROUP_BACK}))})
+	}
+	red := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 0, 0, 1}}))
+	red.opacity = 0.5
+	green := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{0, 1, 0, 1}}))
+	green.opacity = 0.5
+	green.blend.mode = .Multiply
+	vg.scene_draw(s, vg.Layer_Push{opacity = opacity, blend = {mode = mode}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{2, 2}, {14, 2}, {14, 14}, {2, 14}}), transform = id, look = red})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{8, 8}, {20, 8}, {20, 20}, {8, 20}}), transform = id, look = green})
+	vg.scene_draw(s, vg.Layer_Pop{})
+	if nested {
+		vg.scene_draw(s, vg.Layer_Pop{})
+	}
+}
+
+// The group's straight colour and alpha at (x, y).
+@(private = "file")
+group_truth :: proc(x, y: int) -> (g: [3]f32, own: [3]f32, a: f32) {
+	back := GROUP_BACK.rgb
+	g = back
+	in1 := x >= 2 && x < 14 && y >= 2 && y < 14
+	in2 := x >= 8 && x < 20 && y >= 8 && y < 20
+	if in1 {
+		g = 0.5 * g + 0.5 * [3]f32{1, 0, 0}
+		a = 0.5
+	}
+	if in2 {
+		g = 0.5 * g + 0.5 * ([3]f32{0, 1, 0} * g)
+		a = a + 0.5 - a * 0.5
+	}
+	if a > 0 {
+		own = (g - (1 - a) * back) / a
+	}
+	return
+}
+
+@(private = "file")
+worst_group :: proc(px: []u8, w: int, final: proc(g, own: [3]f32, a: f32) -> [3]f32) -> f32 {
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			g, own, a := group_truth(x, y)
+			want := final(g, own, a)
+			got := px_at(px, w, x, y)
+			worst = max(worst, abs(got.r - want.r), abs(got.g - want.g), abs(got.b - want.b), abs(got.a - 1))
+		}
+	}
+	return worst * 255
+}
+
+@(private = "file")
+build_group_half :: proc(s: ^vg.Scene) {build_group(s, 0.5, .Normal)}
+// At group opacity 0.5, Normal: (G + B) / 2.
+@(private = "file")
+worst_group_half :: proc(px: []u8, w: int) -> f32 {
+	return worst_group(px, w, proc(g, own: [3]f32, a: f32) -> [3]f32 {return (g + GROUP_BACK.rgb) * 0.5})
+}
+@(private = "file")
+build_group_screen :: proc(s: ^vg.Scene) {build_group(s, 1, .Screen)}
+// Screened onto B by its own alpha a_g: (1 - a_g) B + a_g Screen(B, own).
+@(private = "file")
+worst_group_screen :: proc(px: []u8, w: int) -> f32 {
+	return worst_group(px, w, proc(g, own: [3]f32, a: f32) -> [3]f32 {
+		back := GROUP_BACK.rgb
+		return (1 - a) * back + a * (back + own - back * own)
+	})
+}
+@(private = "file")
+build_group_nested :: proc(s: ^vg.Scene) {build_group(s, 0.5, .Normal, nested = true)}
