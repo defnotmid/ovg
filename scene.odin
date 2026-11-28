@@ -495,6 +495,7 @@ Scene_Table :: enum u8 {
 	Glyphs,
 	Masks,
 	Patterns,
+	Images,
 }
 
 // Checks a whole scene once: every handle set where required and inside

@@ -19,6 +19,7 @@ import image "deps:oicut/image"
 
 import vg "../.."
 import vgsdl "../../sdlgpu"
+import "../scene_truth"
 import "../scenes"
 
 main :: proc() {
@@ -48,7 +49,7 @@ main :: proc() {
 	defer scenes.resources_destroy(&sw_canvas, &sw_res)
 	defer scenes.resources_destroy(&gpu_canvas, &gpu_res)
 
-	failed := 0
+	failed := truth_check(&sw_canvas, &gpu_canvas)
 	for scene in scenes.ALL {
 		a := draw(&sw_canvas, scene, &sw_res, false)
 		b := draw(&gpu_canvas, scene, &gpu_res, false)
@@ -201,6 +202,50 @@ retired_check :: proc(gpu: ^vgsdl.SDL_Backend, c: ^vg.Canvas, res: ^scenes.Resou
 }
 
 // The scene's pixels, drawn with or without motion blur.
+// Scenes with known answers (tools/scene_truth), drawn through
+// vg.scene_record on both backends, each held to its exact truth within
+// TRUTH_LEVELS: coverage as exact areas, composites and masks as their
+// formulas. Returns the cases a backend failed.
+truth_check :: proc(sw_canvas, gpu_canvas: ^vg.Canvas) -> int {
+	TRUTH_LEVELS :: 1
+	failed := 0
+	canvases := [2]^vg.Canvas{sw_canvas, gpu_canvas}
+	names := [2]string{"sw", "gpu"}
+	for cs in scene_truth.CASES {
+		worst: [2]f32
+		for c, k in canvases {
+			vg.set_size(c, scenes.W, scenes.H)
+			s: vg.Scene
+			vg.scene_init(&s)
+			cs.build(&s)
+			r: vg.Scene_Renderer
+			vg.scene_renderer_init(&r)
+			ls: vg.Layer_Stack
+			if p := vg.scene_record(&r, c, &ls, &s); p.error != .None {
+				fmt.printf("truth %-20s %s: not recorded: %v\n", cs.name, names[k], p)
+				failed += 1
+			}
+			vg.flush(c)
+			shot, err := vg.screenshot(c)
+			if err != nil {
+				fmt.eprintln("screenshot failed:", err)
+				os.exit(2)
+			}
+			worst[k] = cs.worst(shot.pixels, int(shot.width))
+			delete(shot.pixels)
+			vg.layer_stack_destroy(&ls, c)
+			vg.scene_renderer_destroy(&r, c)
+			vg.scene_destroy(&s)
+		}
+		ok := worst[0] <= TRUTH_LEVELS && worst[1] <= TRUTH_LEVELS
+		fmt.printf("truth %-20s sw %.2f, gpu %.2f levels from exact  %s\n", cs.name, worst[0], worst[1], "ok" if ok else "MISMATCH")
+		if !ok {
+			failed += 1
+		}
+	}
+	return failed
+}
+
 draw :: proc(c: ^vg.Canvas, scene: scenes.Scene, r: ^scenes.Resources, motion: bool) -> []u8 {
 	vg.canvas_motion_blur(c, motion)
 	scenes.draw_frame(c, scene, r)

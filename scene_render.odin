@@ -1,5 +1,6 @@
 package ovg
 
+import "base:runtime"
 import "core:math"
 
 // A Scene recorded onto a canvas, through its layer stack, so that either
@@ -83,20 +84,33 @@ scene_renderer_release :: proc(r: ^Scene_Renderer, c: ^Canvas) {
 // over the canvas's size). On a problem nothing is recorded and the first
 // one is returned.
 scene_record :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene) -> Scene_Problem {
+	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 	if p := scene_check(s); p.error != .None {
 		return p
 	}
 	if p := scene_record_supported(s); p.error != .None {
 		return p
 	}
-	// Images: a store image as it is; a view uploaded for this render.
+	// Images: a store image as it is (sampling as its flags say, which
+	// must be what its paints ask); a view uploaded for this render,
+	// sampling as its paints ask.
+	sampling, _, _ := scene_sampling(s)
+	for img, i in s.images {
+		if id, stored := img.(Image_Id); stored {
+			info, _ := image_info(c, id)
+			has := Image_Sampling.Nearest if .Nearest in info.flags else .Area if .Generate_Mipmaps in info.flags else .Linear
+			if has != sampling[i] {
+				return {.Unsupported, .Images, i}
+			}
+		}
+	}
 	clear(&r.images)
-	for img in s.images {
+	for img, i in s.images {
 		switch v in img {
 		case Image_Id:
 			append(&r.images, v)
 		case Pixel_View:
-			append(&r.images, scene_upload(r, c, v))
+			append(&r.images, scene_upload(r, c, v, sampling[i]))
 		}
 	}
 	// A blend mode reads the target as an image: then the frame is drawn
@@ -131,8 +145,15 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		if l.motion != 0 {
 			return false
 		}
-		_, pattern := s.paints[l.paint - 1].(Scene_Pattern_Paint)
-		return !pattern
+		if _, pattern := s.paints[l.paint - 1].(Scene_Pattern_Paint); pattern {
+			return false
+		}
+		// A mask or blend mode draws through a layer, which composites
+		// source-over: a Porter-Duff operation would apply inside it.
+		return l.blend.op == .Source_Over || l.mask == 0 && l.blend.mode == .Normal
+	}
+	kept :: proc(s: ^Scene, p: Path_Id) -> bool {
+		return s.paths[p - 1].shape != nil
 	}
 	for d, k in s.draws {
 		ok := true
@@ -140,11 +161,29 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		case Scene_Fill:
 			ok = look(s, v.look)
 		case Scene_Stroke:
-			ok = look(s, v.look)
+			// Kept shapes are read by fills only, so far.
+			ok = look(s, v.look) && !kept(s, v.path)
 		case Scene_Glyphs:
-			// A run composites as a group: through a layer, which takes no
-			// Porter-Duff operation yet.
+			// A run composites as a group, through a layer, which takes no
+			// Porter-Duff operation yet; no hairline pen for runs yet.
 			ok = look(s, v.look) && v.blend.op == .Source_Over
+			if ok && v.stroke != 0 {
+				ok = !s.strokes[v.stroke - 1].hairline
+			}
+			run := s.runs[v.run - 1]
+			for g in s.glyphs[run.glyphs.start:][:run.glyphs.count] {
+				ok &&= !kept(s, g.path)
+			}
+		case Clip_Push:
+			#partial switch c in v.shape {
+			case Clip_Path:
+				ok = !kept(s, c.path)
+			case Clip_Run:
+				run := s.runs[c.run - 1]
+				for g in s.glyphs[run.glyphs.start:][:run.glyphs.count] {
+					ok &&= !kept(s, g.path)
+				}
+			}
 		case Layer_Push:
 			ok = v.isolated && !v.knockout && v.filters.count == 0 && v.blend.op == .Source_Over
 		}
@@ -158,12 +197,37 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 			return {.Unsupported, .Masks, i}
 		}
 	}
+	// Sampling is an image's here: every paint of an image must ask for the
+	// same, and a stored image must already sample that way.
+	if _, i, ok := scene_sampling(s); !ok {
+		return {.Unsupported, .Paints, i}
+	}
 	return {}
+}
+
+// The sampling each image is drawn with (Linear when no paint names it),
+// or false and the first paint that disagrees with another of its image.
+@(private = "file")
+scene_sampling :: proc(s: ^Scene) -> (sampling: []Image_Sampling, bad: int, ok: bool) {
+	sampling = make([]Image_Sampling, len(s.images), context.temp_allocator)
+	named := make([]bool, len(s.images), context.temp_allocator)
+	for p, i in s.paints {
+		ip, is_image := p.(Scene_Image_Paint)
+		if !is_image {
+			continue
+		}
+		k := int(ip.image) - 1
+		if named[k] && sampling[k] != ip.sampling {
+			return nil, i, false
+		}
+		named[k], sampling[k] = true, ip.sampling
+	}
+	return sampling, 0, true
 }
 
 // A borrowed view as an image of this render, in the format it says.
 @(private = "file")
-scene_upload :: proc(r: ^Scene_Renderer, c: ^Canvas, v: Pixel_View) -> Image_Id {
+scene_upload :: proc(r: ^Scene_Renderer, c: ^Canvas, v: Pixel_View, sampling: Image_Sampling) -> Image_Id {
 	src := Image_Source{width = v.width, height = v.height, data = v.data, row_stride = v.stride}
 	flags: Image_Flags
 	switch v.format {
@@ -191,6 +255,13 @@ scene_upload :: proc(r: ^Scene_Renderer, c: ^Canvas, v: Pixel_View) -> Image_Id 
 	case .RGBA16F:
 		src.format = .RGBA16F
 		flags = {.Premultiplied}
+	}
+	switch sampling {
+	case .Linear:
+	case .Nearest:
+		flags += {.Nearest}
+	case .Area:
+		flags += {.Generate_Mipmaps}
 	}
 	id, err := create_image(c, src, flags)
 	if err != nil {
@@ -324,7 +395,7 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 					// device space.
 					reset_transform(c)
 					scene_path_into(s, st.path, &r.path, t)
-					p.transform = {}
+					p = scene_canvas_paint(r, s, st.paint, TRANSFORM_IDENTITY)
 					if sh, ok := shape_from_path(&r.path, outline = true); ok {
 						append(&r.shapes, sh)
 						hairline_shape(c, &r.shapes[len(r.shapes) - 1], p, style.width)
@@ -464,6 +535,9 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 		return
 	}
 	run := s.runs[g.run - 1]
+	if run.glyphs.count == 0 {
+		return
+	}
 	rt := s.transforms[run.transform - 1]
 	solid, is_solid := s.paints[g.paint - 1].(Scene_Solid)
 	direct := g.stroke == 0 && is_solid && solid.color[3] >= 1 && g.opacity >= 1 && g.mask == 0 && g.blend == {}
@@ -493,8 +567,9 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 		// miter, in run space.
 		st := s.strokes[g.stroke - 1]
 		reach := st.width * 0.5 * max(st.miter_limit, 1)
-		scale := math.sqrt(abs(rt[0] * rt[3] - rt[1] * rt[2]))
-		b = bounds_grow_f(b, reach * max(scale, 1))
+		// The run's transform stretches the pen by at most its longer axis.
+		scale := max(math.hypot(rt[0], rt[1]), math.hypot(rt[2], rt[3]))
+		b = bounds_grow_f(b, reach * scale)
 	}
 	// Drawn as: a layer at the run's opacity whose content is the bounds
 	// filled with the paint and whose alpha mask is the glyphs. A run
@@ -555,12 +630,16 @@ scene_run_union :: proc(r: ^Scene_Renderer, s: ^Scene, id: Run_Id, out: ^Path) {
 		path_init(&p)
 		append(&r.paths, p)
 	}
+	path_reset(out)
+	if n == 0 {
+		// The union of nothing: the clip lets nothing through.
+		return
+	}
 	clear(&r.operands)
 	for gl, i in s.glyphs[run.glyphs.start:][:n] {
 		scene_path_into(s, gl.path, &r.paths[i], transform_multiply(s.transforms[gl.transform - 1], rt))
 		append(&r.operands, Bool_Operand{&r.paths[i], .Non_Zero})
 	}
-	path_reset(out)
 	if n == 1 {
 		path_append(out, &r.paths[0])
 		return

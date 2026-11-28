@@ -436,4 +436,34 @@ test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
 	scene_draw(&s, Layer_Push{opacity = 1, isolated = true, knockout = true})
 	scene_draw(&s, Layer_Pop{})
 	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
+
+	// A Porter-Duff operation on a draw that goes through a layer (its
+	// mask's or blend mode's).
+	scene_clear(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	square := scene_polygon(&s, {{0, 0}, {4, 0}, {4, 4}, {0, 4}})
+	paint := scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}})
+	look := scene_look(paint)
+	look.blend = {op = .Source_In, mode = .Multiply}
+	scene_draw(&s, Scene_Fill{path = square, transform = id, look = look})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
+
+	// A stroke of a kept shape: only fills read kept shapes so far.
+	scene_clear(&s)
+	id = scene_add_transform(&s, TRANSFORM_IDENTITY)
+	square = scene_polygon(&s, {{0, 0}, {4, 0}, {4, 4}, {0, 4}})
+	paint = scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}})
+	kept: Shape
+	s.paths[square - 1].shape = &kept
+	scene_draw(&s, Scene_Stroke{path = square, transform = id, style = scene_add_stroke(&s, {width = 1, miter_limit = 4}), look = scene_look(paint)})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
+
+	// One image asked to sample two ways.
+	scene_clear(&s)
+	id = scene_add_transform(&s, TRANSFORM_IDENTITY)
+	px := [4]u8{255, 255, 255, 255}
+	img := scene_add_image(&s, Pixel_View{format = .RGBA8_Premul, data = px[:], width = 1, height = 1})
+	scene_add_paint(&s, Scene_Image_Paint{image = img, transform = id, sampling = .Linear})
+	scene_add_paint(&s, Scene_Image_Paint{image = img, transform = id, sampling = .Nearest})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Paints, 1})
 }
