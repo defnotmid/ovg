@@ -397,6 +397,34 @@ test_scene_truth_mask_backdrop :: proc(t: ^testing.T) {
 	testing.expect(t, image_id_valid(tg.render.mask_images[0]), "the mask was rendered")
 }
 
+// A mask's first reader drawing nothing (its layer clipped off the canvas)
+// leaves the mask whole for the next.
+@(test)
+test_scene_mask_first_reader_culled :: proc(t: ^testing.T) {
+	W, H :: 8, 8
+	tg: Scene_Target
+	target_open(&tg, W, H)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	square := scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}})
+	at := u32(len(s.draws))
+	append(&s.draws, Scene_Fill{path = square, transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{0.6, 0.6, 0.6, 0.6}}))})
+	append(&s.masks, Scene_Mask{draws = {at, 1}, read = .Alpha})
+	look := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
+	look.mask = Mask_Id(len(s.masks))
+	scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+	scene_draw(&s, Clip_Push{Clip_Rect{100, 100, 104, 104}})
+	scene_draw(&s, Scene_Fill{path = square, transform = id, look = look})
+	scene_draw(&s, Clip_Pop{})
+	scene_draw(&s, Scene_Fill{path = square, transform = id, look = look})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+	got := target_px(&tg, 4, 4)[0]
+	testing.expectf(t, abs(got - 0.6) * 255 <= 1, "the second reader sees %v through the mask, wanted 0.6", got)
+}
+
 // A transfer table (PDF's /TR) maps the mask's 8-bit value: the inverting
 // table on a luminance mask lets through one minus it.
 @(test)

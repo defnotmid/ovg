@@ -27,6 +27,7 @@ CASES := [?]Case {
 	{"mask_alpha", build_mask_alpha, worst_mask_alpha},
 	{"mask_backdrop", build_mask_backdrop, worst_mask_backdrop},
 	{"mask_transfer", build_mask_transfer, worst_mask_transfer},
+	{"mask_isolated", build_mask_isolated, worst_mask_isolated},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -304,3 +305,24 @@ worst_mask_transfer :: proc(px: []u8, w: int) -> f32 {
 	// The table is indexed by the 8-bit value.
 	return worst_grey(px, w, f32(255 - int(v * 255 + 0.5)) / 255)
 }
+
+// A soft mask's group is isolated, then composited over its backdrop (PDF
+// 11.6.5.2): its opaque red drawn with Multiply stays red (Multiply over
+// the group's own transparent backdrop), not red times the grey backdrop.
+@(private = "file")
+build_mask_isolated :: proc(s: ^vg.Scene) {
+	id := vg.scene_add_transform(s, vg.TRANSFORM_IDENTITY)
+	square := polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}})
+	at := u32(len(s.draws))
+	look := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 0, 0, 1}}))
+	look.blend.mode = .Multiply
+	append(&s.draws, vg.Scene_Fill{path = square, transform = id, look = look})
+	append(&s.masks, vg.Scene_Mask{draws = {at, 1}, read = .Luminance, backdrop = {0.5, 0.5, 0.5, 1}})
+	reader := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 1, 1, 1}}))
+	reader.mask = vg.Mask_Id(len(s.masks))
+	vg.scene_draw(s, vg.Scene_Clear{{0, 0, 4096, 4096}, {0, 0, 0, 1}})
+	vg.scene_draw(s, vg.Scene_Fill{path = square, transform = id, look = reader})
+}
+
+@(private = "file")
+worst_mask_isolated :: proc(px: []u8, w: int) -> f32 {return worst_grey(px, w, 0.2125)}
