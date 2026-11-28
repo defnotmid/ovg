@@ -292,13 +292,14 @@ Structure is nesting in the draw list, not render targets:
   its luminance there, which is the straight colour's times alpha: no pass
   of its own (v0.1.13). Only a transfer table needs one, once.
 - **Patterns** are draw ranges a paint refers to, drawn per lattice cell.
-- **Dependency order.** A mask's or a pattern cell's draws may name only
-  masks and patterns before it in their tables (PDF nests soft masks, and a
-  pattern may paint with a pattern). So the order is topological by
-  construction, no cycle can be written, and a backend compiles every mask
-  and cell in one forward pass, each before the first draw that reads it. A
-  scene that breaks the order is rejected when it's compiled, not drawn
-  wrong.
+- **Dependency order.** Masks and pattern cells may refer to each other
+  (PDF nests soft masks, and a pattern may paint with a pattern or under a
+  mask), so their order is kept in the one table they share, `draws`: a
+  mask's or a cell's draws may name only masks and patterns whose draw
+  ranges end before theirs starts. Dependencies then come first, no cycle
+  (through either table) can be written, and a backend compiles every mask
+  and cell in one forward pass. `main` may name any. A scene that breaks the
+  order is rejected when it's compiled, not drawn wrong.
 
 How a layer materialises is the backend's choice. Both backends start from
 today's offscreen images: `Layer_Stack`'s planning, pooling and group fold
@@ -611,8 +612,9 @@ and parity. Each is released on its own.
   one and a missing field, rejected by the check, for a required one.
 - **Clips have a rectangle case** (`Clip_Rect`) beside paths and glyph
   runs.
-- **Masks and patterns are in dependency order**: each names only earlier
-  ones, so compiling is one forward pass and cycles can't be written.
+- **Masks and patterns are in dependency order**, by position in `draws`:
+  each names only those whose draws come before its own, so compiling is one
+  forward pass and cycles can't be written, even through both tables.
 - **Derived state stays out of the Scene**: image and target lifetimes,
   glyph-reuse keys and compiled rows are the backend's, worked out when it
   compiles a scene.
