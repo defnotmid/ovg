@@ -2387,9 +2387,11 @@ sw_match_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Com
 @(private = "file")
 sw_texel_map :: proc(images: ^Image_Store, cmd: Command, pr: ^[14][4]f32, luminance_ok: bool) -> (tex: Sw_Texture, ox, oy: i32, flip, straight, luminance, ok: bool) {
 	// A luminance read's tex_type picks its weights; an image's is 0 for
-	// premultiplied texels and 1 for straight ones.
+	// premultiplied texels and 1 for straight ones. A bounded image is an
+	// image (sw_blit_image skips its transparent texels).
 	luminance = luminance_ok && pr[10][3] == f32(Shader_Type.Fill_Image_Luminance)
-	image := pr[10][3] == f32(Shader_Type.Fill_Image) && (pr[10][2] == 0 || pr[10][2] == 1)
+	is_image := pr[10][3] == f32(Shader_Type.Fill_Image) || pr[10][3] == f32(Shader_Type.Fill_Image_Bounded)
+	image := is_image && (pr[10][2] == 0 || pr[10][2] == 1)
 	if !image && !luminance || pr[10][0] < 1 {
 		return
 	}
@@ -2447,9 +2449,13 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 	if !alive {
 		return true
 	}
+	// A bounded image leaves the pixels under its transparent texels as
+	// they were, whatever the operation (Shader_Type.Fill_Image_Bounded).
+	bounded := pr[10][3] == f32(Shader_Type.Fill_Image_Bounded)
 	// Straight texels are premultiplied in floats as each is blended, so
-	// they take blend_px rather than the unit tint's byte loops.
-	unit_tint := tint == {1, 1, 1, 1} && !straight
+	// they take blend_px rather than the unit tint's byte loops, as do a
+	// bounded image's under an operation that writes transparent texels.
+	unit_tint := tint == {1, 1, 1, 1} && !straight && !(bounded && (op == .Copy || op == .Source_In))
 	tint4 := simd.from_array(tint)
 	src_px := slice.reinterpret([]u32, src_tex.pixels)
 	dst_px := slice.reinterpret([]u32, r.target.pixels)
@@ -2546,6 +2552,9 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 		i1 := in_x1 if row_full else 0
 
 		for cx in 0 ..< i0 {
+			if bounded && srow[cx] >> 24 == 0 {
+				continue
+			}
 			mx := my * clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)
 			blend_px(&drow[cx], srow[cx], op, tint4 * #simd[4]f32{mx, mx, mx, mx}, inv255, half, c255, straight)
 		}
@@ -2619,7 +2628,7 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 				}
 			} else {
 				for su, cx in sr {
-					if su == 0 && op != .Copy && op != .Source_In {
+					if su == 0 && op != .Copy && op != .Source_In || bounded && su >> 24 == 0 {
 						continue
 					}
 					blend_px(&dr[cx], su, op, tint4, inv255, half, c255, straight)
@@ -2628,6 +2637,9 @@ sw_blit_image :: proc(b: ^Software_Backend, images: ^Image_Store, cmd: Command, 
 		}
 
 		for cx in i1 ..< w {
+			if bounded && srow[cx] >> 24 == 0 {
+				continue
+			}
 			mx := my
 			if has_scissor && (cx < in_x0 || cx >= in_x1) {
 				mx *= clamp(0.5 - (abs(ax * (f32(x0 + i32(cx)) + 0.5) + bx) - ex) * sx, 0, 1)

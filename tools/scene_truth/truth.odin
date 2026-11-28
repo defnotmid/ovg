@@ -30,6 +30,8 @@ CASES := [?]Case {
 	{"mask_isolated", build_mask_isolated, worst_mask_isolated},
 	{"pattern_coloured", build_pattern_coloured, worst_pattern_coloured},
 	{"pattern_uncoloured", build_pattern_uncoloured, worst_pattern_uncoloured},
+	{"op_copy_layer", build_copy_layer, worst_copy},
+	{"op_copy_run", build_copy_run, worst_copy},
 	{"clips_nested", build_clips, worst_clips},
 	{"run_union", build_run, worst_run},
 }
@@ -367,3 +369,52 @@ worst_pattern_coloured :: proc(px: []u8, w: int) -> f32 {return worst_pattern(px
 build_pattern_uncoloured :: proc(s: ^vg.Scene) {build_pattern(s, true)}
 @(private = "file")
 worst_pattern_uncoloured :: proc(px: []u8, w: int) -> f32 {return worst_pattern(px, w, {1, 0, 0})}
+
+// A Porter-Duff operation on a layer or a run is bounded: Copy of a
+// translucent blue rectangle (4.5, 4)..(14, 14) over red replaces the
+// red where the content covers, edges included, and leaves the red
+// everywhere else, whatever window the backend gave the layer.
+@(private = "file")
+COPY_RECT :: [4]vg.Vec2{{4.5, 4}, {14, 4}, {14, 14}, {4.5, 14}}
+@(private = "file")
+COPY_BLUE :: [4]f32{0, 0, 0.5, 0.5}
+
+@(private = "file")
+build_copy_layer :: proc(s: ^vg.Scene) {
+	id := ground(s, {1, 0, 0, 1})
+	rect := COPY_RECT
+	vg.scene_draw(s, vg.Layer_Push{opacity = 1, isolated = true, blend = {op = .Copy}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, rect[:]), transform = id, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{COPY_BLUE}))})
+	vg.scene_draw(s, vg.Layer_Pop{})
+}
+
+// The same rectangle as a run of two overlapping glyphs (painted once
+// where they overlap; their overlap has whole-pixel edges, as a union of
+// antialiased masks is approximate where edges cross), copied.
+@(private = "file")
+build_copy_run :: proc(s: ^vg.Scene) {
+	id := ground(s, {1, 0, 0, 1})
+	left := polygon(s, {{4.5, 4}, {10, 4}, {10, 14}, {4.5, 14}})
+	shift := vg.scene_add_transform(s, vg.transform_translation(4, 0))
+	g0 := u32(len(s.glyphs))
+	append(&s.glyphs, vg.Scene_Glyph{left, id}, vg.Scene_Glyph{left, shift})
+	append(&s.runs, vg.Scene_Run{{g0, 2}, id})
+	look := vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{COPY_BLUE}))
+	look.blend.op = .Copy
+	vg.scene_draw(s, vg.Scene_Glyphs{run = vg.Run_Id(len(s.runs)), look = look})
+}
+
+@(private = "file")
+worst_copy :: proc(px: []u8, w: int) -> f32 {
+	rect := COPY_RECT
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			f := pixel_area(rect[:], x, y)
+			want := COPY_BLUE * f if COPY_BLUE[3] * f * 255 >= 0.5 else [4]f32{1, 0, 0, 1}
+			d := px_at(px, w, x, y) - want
+			worst = max(worst, abs(d[0]), abs(d[1]), abs(d[2]), abs(d[3]))
+		}
+	}
+	return worst * 255
+}

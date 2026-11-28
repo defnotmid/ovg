@@ -62,6 +62,11 @@ Shader_Type :: enum u8 {
 	Filter_Turbulence         = 20,
 	Filter_Bloom_Bright       = 21,
 	Filter_Bloom_Add          = 22,
+	// An image that covers only where it isn't transparent: a texel under
+	// half an 8-bit step of alpha is discarded, so a Porter-Duff operation
+	// (Copy, Source_In) composited with it leaves those pixels as they
+	// were (a layer's bounded composite).
+	Fill_Image_Bounded        = 23,
 }
 
 // A draw's paint (a row of `Frame.paints`). Every backend's shaders read

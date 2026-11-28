@@ -605,3 +605,49 @@ test_scene_truth_patterns :: proc(t: ^testing.T) {
 		target_close(&tg)
 	}
 }
+
+// A Porter-Duff operation on a layer or a run is bounded: Copy of a
+// translucent blue rectangle over red replaces the red where the content
+// covers (its half-covered edge column included, with its coverage once)
+// and leaves the red everywhere else.
+@(test)
+test_scene_truth_bounded_ops :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	rect := [4]Vec2{{4.5, 4}, {14, 4}, {14, 14}, {4.5, 14}}
+	blue := [4]f32{0, 0, 0.5, 0.5}
+	for as_run in ([2]bool{false, true}) {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {1, 0, 0, 1}})
+		look := scene_look(scene_add_paint(&s, Scene_Solid{blue}))
+		if as_run {
+			left := scene_polygon(&s, {{4.5, 4}, {10, 4}, {10, 14}, {4.5, 14}})
+			shift := scene_add_transform(&s, transform_translation(4, 0))
+			g0 := u32(len(s.glyphs))
+			append(&s.glyphs, Scene_Glyph{left, id}, Scene_Glyph{left, shift})
+			append(&s.runs, Scene_Run{{g0, 2}, id})
+			look.blend.op = .Copy
+			scene_draw(&s, Scene_Glyphs{run = Run_Id(len(s.runs)), look = look})
+		} else {
+			scene_draw(&s, Layer_Push{opacity = 1, isolated = true, blend = {op = .Copy}})
+			scene_draw(&s, Scene_Fill{path = scene_polygon(&s, rect[:]), transform = id, look = look})
+			scene_draw(&s, Layer_Pop{})
+		}
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		worst: f32
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				f := pixel_area(rect[:], x, y)
+				want := blue * f if blue[3] * f * 255 >= 0.5 else [4]f32{1, 0, 0, 1}
+				d := target_px(&tg, x, y) - want
+				worst = max(worst, abs(d[0]), abs(d[1]), abs(d[2]), abs(d[3]))
+			}
+		}
+		testing.expectf(t, worst * 255 <= 1, "bounded Copy (run %v) is %.1f levels off", as_run, worst * 255)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}

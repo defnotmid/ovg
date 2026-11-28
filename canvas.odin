@@ -21,6 +21,9 @@ Canvas :: struct {
 	// Image paints read their (premultiplied) image's luminance by these
 	// weights (Shader_Type.Fill_Image_Luminance): layer masks set it.
 	image_luminance:       Maybe(Mask_Luminance),
+	// Image draws cover only where their texels aren't transparent
+	// (Shader_Type.Fill_Image_Bounded): a layer's bounded composite.
+	image_bounded:         bool,
 	states:                [dynamic]State,
 	commands:              [dynamic]Command,
 	paints:                [dynamic]Params,
@@ -764,6 +767,9 @@ shape_paint :: proc(c: ^Canvas, paint: Paint) -> (cmd: Command, row: u32) {
 	}
 	attach_paint_image(c, &cmd, &flavor)
 	params := params_from_paint(&c.images, paint_space(paint, st.transform), &flavor, st.scissor, c.fringe_width, c.fringe_width, -1)
+	if c.image_bounded && params.shader_type == .Fill_Image {
+		params.shader_type = .Fill_Image_Bounded
+	}
 	if l, read := c.image_luminance.?; read && params.shader_type == .Fill_Image {
 		params.shader_type = .Fill_Image_Luminance
 		params.tex_type = 1 if l == .Pdf else 0

@@ -235,7 +235,10 @@ paint:
   or a run's content) covers, at least 1/510, and leaves every pixel it
   doesn't cover as it was, whatever size a backend makes the layer. Unlike
   HTML canvas's unbounded operations, Copy or Source_In don't clear
-  uncovered pixels; a `Scene_Clear` or a mask does that;
+  uncovered pixels; a `Scene_Clear` or a mask does that. A layer or a run
+  has no shape apart from its content, so its content's alpha is its
+  coverage: an edge pixel half covered takes the content's half-covered
+  value, as a source image does under Copy;
 - an optional mask (`Mask_Id`), read by that draw alone.
 
 That's PDF's graphics state, where a soft mask, a blend mode and an opacity

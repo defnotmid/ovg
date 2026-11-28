@@ -8,8 +8,10 @@ import "core:slice"
 // backend draws it with today's machinery (docs/scene.md, staging step 4).
 // What this path can't yet draw exactly is rejected whole, before anything
 // is recorded, rather than drawn approximately: groups that are knockout or
-// not isolated, layer filters, motion, a Porter-Duff operation on a layer,
-// and the pattern cases listed at scene_record_supported.
+// not isolated, layer filters, motion, a Porter-Duff operation with a mask,
+// and the pattern cases listed at scene_record_supported. A layer or a run
+// under a Porter-Duff operation is drawn into an image first, which then
+// composites with the operation where it isn't transparent (bounded).
 //
 // A pattern cell is rendered once into a tile, before anything else: its
 // draws in cell space, mapped onto a tile of whole pixels spanning one
@@ -52,6 +54,13 @@ Scene_Renderer :: struct {
 	// Inside an uncoloured cell: every paint is white, so only coverage
 	// reaches the tile.
 	white:       bool,
+	// The open target's size in pixels: the canvas's, or a tile's.
+	target:      [2]u32,
+	// Per open Layer_Push, its Porter-Duff operation: anything but
+	// source-over draws the layer into an image first (scene_bounded_end).
+	layer_ops:   [dynamic]Composite_Operation,
+	// The open bounded images, innermost last.
+	bounded:     [dynamic]Image_Id,
 }
 
 // A pattern cell's tile: its image and size in pixels, and the map from
@@ -76,6 +85,8 @@ scene_renderer_init :: proc(r: ^Scene_Renderer, allocator := context.allocator) 
 	r.pushed_layer = make([dynamic]bool, allocator)
 	r.mask_images = make([dynamic]Image_Id, allocator)
 	r.tiles = make([dynamic]Scene_Tile, allocator)
+	r.layer_ops = make([dynamic]Composite_Operation, allocator)
+	r.bounded = make([dynamic]Image_Id, allocator)
 	r.base = TRANSFORM_IDENTITY
 }
 
@@ -98,6 +109,8 @@ scene_renderer_destroy :: proc(r: ^Scene_Renderer, c: ^Canvas) {
 	delete(r.pushed_layer)
 	delete(r.mask_images)
 	delete(r.tiles)
+	delete(r.layer_ops)
+	delete(r.bounded)
 }
 
 // Frees what recording a scene made for one render (images for borrowed
@@ -165,6 +178,9 @@ scene_record :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene
 	save(c)
 	clear(&r.layer_masks)
 	clear(&r.pushed_layer)
+	clear(&r.layer_ops)
+	clear(&r.bounded)
+	r.target = {c.width, c.height}
 	scene_render_masks(r, c, ls, s)
 	scene_record_range(r, c, ls, s, s.main)
 	restore(c)
@@ -197,7 +213,7 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 		case Scene_Glyphs:
 			// A run composites as a group, through a layer, which takes no
 			// Porter-Duff operation yet; no hairline pen for runs yet.
-			ok = look(s, v.look) && v.blend.op == .Source_Over
+			ok = look(s, v.look) && (v.blend.op == .Source_Over || v.mask == 0 && v.blend.mode == .Normal)
 			if ok && v.stroke != 0 {
 				ok = !s.strokes[v.stroke - 1].hairline
 			}
@@ -216,7 +232,7 @@ scene_record_supported :: proc(s: ^Scene) -> Scene_Problem {
 				}
 			}
 		case Layer_Push:
-			ok = v.isolated && !v.knockout && v.filters.count == 0 && v.blend.op == .Source_Over
+			ok = v.isolated && !v.knockout && v.filters.count == 0 && (v.blend.op == .Source_Over || v.mask == 0 && v.blend.mode == .Normal)
 		}
 		if !ok {
 			return {.Unsupported, .Draws, k}
@@ -556,15 +572,22 @@ scene_record_range :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: 
 				culled = 1
 				continue
 			}
+			if v.blend.op != .Source_Over {
+				scene_bounded_begin(r, c, ls)
+			}
 			params := Layer_Params{opacity = v.opacity, blend = v.blend.mode}
 			scene_mask_params(s, v.mask, &params)
 			layer_push(ls, c, params)
 			append(&r.layer_masks, v.mask)
+			append(&r.layer_ops, v.blend.op)
 		case Layer_Pop:
 			if m := pop(&r.layer_masks); m != 0 {
 				scene_record_mask(r, c, ls, s, m)
 			}
 			layer_pop(ls, c)
+			if op := pop(&r.layer_ops); op != .Source_Over {
+				scene_bounded_end(r, c, ls, op)
+			}
 		}
 	}
 }
@@ -612,6 +635,34 @@ scene_copy :: proc(ls: ^Layer_Stack, c: ^Canvas, img: Image_Id) {
 	p := paint_image(img, 0, 0, f32(c.width), f32(c.height), 0)
 	p.anti_alias = false
 	fill_path(c, &ls.scratch, p)
+	restore(c)
+}
+
+// A layer or run under a Porter-Duff operation: drawn source-over into an
+// image the open target's size, which `scene_bounded_end` composites with
+// the operation where the image isn't transparent (half an 8-bit step or
+// more), leaving every other pixel as it was, whatever size the backend
+// made the layer's window.
+@(private = "file")
+scene_bounded_begin :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack) {
+	append(&r.bounded, layer_image_begin(ls, c, r.target.x, r.target.y, .RGBA16F if ls.format == .RGBA16F else .RGBA8))
+}
+
+@(private = "file")
+scene_bounded_end :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, op: Composite_Operation) {
+	img := pop(&r.bounded)
+	layer_image_end(ls, c)
+	save(c)
+	reset_transform(c)
+	set_global_alpha(c, 1)
+	set_composite_operation(c, op)
+	path_reset(&ls.scratch)
+	path_rect(&ls.scratch, 0, 0, f32(r.target.x), f32(r.target.y))
+	p := paint_image(img, 0, 0, f32(r.target.x), f32(r.target.y), 0)
+	p.anti_alias = false
+	c.image_bounded = true
+	fill_path(c, &ls.scratch, p)
+	c.image_bounded = false
 	restore(c)
 }
 
@@ -697,10 +748,10 @@ scene_tile :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s: ^Scene, 
 	reset_transform(c)
 	reset_scissor(c)
 	scissor(c, 0, 0, (cell.clip.maxx - cell.clip.minx) * k.x, (cell.clip.maxy - cell.clip.miny) * k.y)
-	base, white := r.base, r.white
-	r.base, r.white = to_tile, cell.uncoloured
+	base, white, target := r.base, r.white, r.target
+	r.base, r.white, r.target = to_tile, cell.uncoloured, size
 	scene_record_range(r, c, ls, s, cell.draws)
-	r.base, r.white = base, white
+	r.base, r.white, r.target = base, white, target
 	restore(c)
 	layer_pattern_end(ls, c)
 	return {tile, size, transform_multiply(to_cell, s.transforms[cell.transform - 1])}
@@ -805,6 +856,16 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 	if run.glyphs.count == 0 {
 		return
 	}
+	if g.blend.op != .Source_Over {
+		// Drawn source-over into an image, which then composites with the
+		// operation where the run covers.
+		over := g
+		over.blend.op = .Source_Over
+		scene_bounded_begin(r, c, ls)
+		scene_record_glyphs(r, c, ls, s, over)
+		scene_bounded_end(r, c, ls, g.blend.op)
+		return
+	}
 	rt := scene_xf(r, s, run.transform)
 	solid, is_solid := s.paints[g.paint - 1].(Scene_Solid)
 	direct := g.stroke == 0 && is_solid && solid.color[3] >= 1 && g.opacity >= 1 && g.mask == 0 && g.blend == {}
@@ -838,6 +899,9 @@ scene_record_glyphs :: proc(r: ^Scene_Renderer, c: ^Canvas, ls: ^Layer_Stack, s:
 		scale := max(math.hypot(rt[0], rt[1]), math.hypot(rt[2], rt[3]))
 		b = bounds_grow_f(b, reach * scale)
 	}
+	// Out to whole pixels, plus one: the content must cover every pixel the
+	// glyphs touch fully, or its own edge would cut their coverage twice.
+	b = {math.floor(b.minx) - 1, math.floor(b.miny) - 1, math.ceil(b.maxx) + 1, math.ceil(b.maxy) + 1}
 	// Drawn as: a layer at the run's opacity whose content is the bounds
 	// filled with the paint and whose alpha mask is the glyphs. A run
 	// under a mask of its own gets it on an outer layer, which also takes

@@ -18,6 +18,7 @@ const int FILL_COLOR = 5;
 const int TEXTURE_COPY_UNCLIPPED = 6;
 const int FILL_GRADIENT_CONIC = 8;
 const int FILL_IMAGE_GRADIENT_CONIC = 9;
+const int FILL_IMAGE_BOUNDED = 23;
 const int FILTER_COLOR_MATRIX = 10;
 const int FILTER_BLEND = 11;
 const int FILTER_COMPOSITE = 12;
@@ -185,6 +186,15 @@ vec4 fill_color(int type, vec2 fpos) {
         vec2 pt = transform_point(3, fpos) / extent();
         vec3 w = tex_type() == 1 ? vec3(0.3, 0.59, 0.11) : vec3(0.2125, 0.7154, 0.0721);
         return vec4(clamp(dot(textureLod(tex, pt, image_lod()).xyz, w), 0.0, 1.0)) * inner_col();
+    } else if (type == FILL_IMAGE_BOUNDED) {
+        // An image that covers only where it isn't transparent
+        // (Shader_Type.Fill_Image_Bounded).
+        vec2 pt = transform_point(3, fpos) / extent();
+        vec4 c = apply_tex_type(textureLod(tex, pt, image_lod()));
+        if (c.a < 1.0 / 510.0) {
+            discard;
+        }
+        return c * inner_col();
     }
     return inner_col();
 }
