@@ -44,6 +44,8 @@ CASES := [?]Case {
 	{"clip_group_screen", build_clip_group, worst_clip_group},
 	{"clip_image", build_clip_image, worst_clip_image},
 	{"clips_nested", build_clips, worst_clips},
+	{"clip_rect_fractional", build_clip_rect_fractional, worst_clip_rect_fractional},
+	{"clips_nested_fractional", build_clips_fractional, worst_clips_fractional},
 	{"run_union", build_run, worst_run},
 }
 
@@ -245,6 +247,57 @@ worst_clips :: proc(px: []u8, w: int) -> f32 {
 			r := CLIP_RECT
 			in_rect: f32 = 1 if x >= int(r[0]) && x < int(r[2]) && y >= int(r[1]) && y < int(r[3]) else 0
 			worst = max(worst, abs(px_at(px, w, x, y)[0] - in_rect * pixel_area(CLIP_TRI[:], x, y)))
+		}
+	}
+	return worst * 255
+}
+
+// An axis-aligned rectangle off whole pixels, as a path: the draws'
+// scissor, each pixel covered by its overlap.
+@(private = "file")
+CLIP_FRACTIONAL :: [4]vg.Vec2{{4.5, 3.25}, {17.75, 3.25}, {17.75, 22}, {4.5, 22}}
+
+@(private = "file")
+build_clip_rect_fractional :: proc(s: ^vg.Scene) {
+	id := ground(s, {0, 0, 0, 1})
+	rect := CLIP_FRACTIONAL
+	vg.scene_draw(s, vg.Clip_Push{vg.Clip_Path{polygon(s, rect[:]), id, .Non_Zero}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 1, 1, 1}}))})
+	vg.scene_draw(s, vg.Clip_Pop{})
+}
+
+@(private = "file")
+worst_clip_rect_fractional :: proc(px: []u8, w: int) -> f32 {
+	rect := CLIP_FRACTIONAL
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			worst = max(worst, abs(px_at(px, w, x, y)[0] - pixel_area(rect[:], x, y)))
+		}
+	}
+	return worst * 255
+}
+
+// A path clip under that rectangle: the rectangle's coverage is an image
+// its child's render reads.
+@(private = "file")
+build_clips_fractional :: proc(s: ^vg.Scene) {
+	id := ground(s, {0, 0, 0, 1})
+	rect := CLIP_FRACTIONAL
+	vg.scene_draw(s, vg.Clip_Push{vg.Clip_Path{polygon(s, rect[:]), id, .Non_Zero}})
+	vg.scene_draw(s, vg.Clip_Push{vg.Clip_Path{polygon(s, CLIP_TRI[:]), id, .Non_Zero}})
+	vg.scene_draw(s, vg.Scene_Fill{path = polygon(s, {{0, 0}, {SIZE, 0}, {SIZE, SIZE}, {0, SIZE}}), transform = id, look = vg.scene_look(vg.scene_add_paint(s, vg.Scene_Solid{{1, 1, 1, 1}}))})
+	vg.scene_draw(s, vg.Clip_Pop{})
+	vg.scene_draw(s, vg.Clip_Pop{})
+}
+
+@(private = "file")
+worst_clips_fractional :: proc(px: []u8, w: int) -> f32 {
+	rect := CLIP_FRACTIONAL
+	worst: f32
+	for y in 0 ..< SIZE {
+		for x in 0 ..< SIZE {
+			worst = max(worst, abs(px_at(px, w, x, y)[0] - pixel_area(rect[:], x, y) * pixel_area(CLIP_TRI[:], x, y)))
 		}
 	}
 	return worst * 255
