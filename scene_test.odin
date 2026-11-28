@@ -175,3 +175,265 @@ test_scene_clear_keeps_room :: proc(t: ^testing.T) {
 	testing.expect_value(t, cap(s.draws), room)
 	testing.expect_value(t, s.main, Range{})
 }
+
+// ---- exact truth, drawn through scene_record on the software backend ---------------
+
+@(private = "file")
+Scene_Target :: struct {
+	backend: Software_Backend,
+	canvas:  Canvas,
+	layers:  Layer_Stack,
+	render:  Scene_Renderer,
+}
+
+@(private = "file")
+target_open :: proc(t: ^Scene_Target, w, h: u32) {
+	software_backend_init(&t.backend)
+	canvas_init(&t.canvas, software_backend(&t.backend))
+	set_size(&t.canvas, w, h)
+	scene_renderer_init(&t.render)
+}
+
+@(private = "file")
+target_close :: proc(t: ^Scene_Target) {
+	scene_renderer_destroy(&t.render, &t.canvas)
+	layer_stack_destroy(&t.layers, &t.canvas)
+	canvas_destroy(&t.canvas)
+	software_backend_destroy(&t.backend)
+}
+
+// Records and flushes `s`; the pixels as floats (premultiplied, 0..1).
+@(private = "file")
+target_draw :: proc(t: ^Scene_Target, s: ^Scene) -> Scene_Problem {
+	p := scene_record(&t.render, &t.canvas, &t.layers, s)
+	flush(&t.canvas)
+	scene_renderer_release(&t.render, &t.canvas)
+	return p
+}
+
+@(private = "file")
+target_px :: proc(t: ^Scene_Target, x, y: int) -> [4]f32 {
+	i := (y * int(t.backend.width) + x) * 4
+	p := t.backend.pixels
+	return {f32(p[i]), f32(p[i + 1]), f32(p[i + 2]), f32(p[i + 3])} / 255
+}
+
+// The area of convex polygon `poly` inside pixel (x, y): the polygon clipped
+// to the pixel's square (Sutherland-Hodgman), then its shoelace area.
+@(private = "file")
+pixel_area :: proc(poly: []Vec2, x, y: int) -> f32 {
+	buf_a, buf_b: [32]Vec2
+	n := len(poly)
+	copy(buf_a[:], poly)
+	src, dst := buf_a[:], buf_b[:]
+	edges := [4][3]f32{{1, 0, -f32(x)}, {-1, 0, f32(x + 1)}, {0, 1, -f32(y)}, {0, -1, f32(y + 1)}}
+	for e in edges {
+		m := 0
+		for i in 0 ..< n {
+			a, b := src[i], src[(i + 1) % n]
+			da, db := e[0] * a.x + e[1] * a.y + e[2], e[0] * b.x + e[1] * b.y + e[2]
+			if da >= 0 {
+				dst[m] = a
+				m += 1
+			}
+			if (da >= 0) != (db >= 0) {
+				dst[m] = a + (b - a) * (da / (da - db))
+				m += 1
+			}
+		}
+		n = m
+		src, dst = dst, src
+	}
+	area: f32
+	for i in 0 ..< n {
+		a, b := src[i], src[(i + 1) % n]
+		area += a.x * b.y - b.x * a.y
+	}
+	return abs(area) * 0.5
+}
+
+@(private = "file")
+scene_polygon :: proc(s: ^Scene, pts: []Vec2) -> Path_Id {
+	verbs := make([]Path_Verb, len(pts) + 1, context.temp_allocator)
+	verbs[0] = .Move
+	for i in 1 ..< len(pts) {
+		verbs[i] = .Line
+	}
+	verbs[len(pts)] = .Close
+	return scene_add_path(s, verbs, pts)
+}
+
+// Fills with exact areas: white over black, each pixel the area of the
+// shape it holds, within one 8-bit level.
+@(test)
+test_scene_truth_coverage :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	shapes := [2][]Vec2{{{2.25, 3.5}, {17.5, 3.5}, {17.5, 9.75}, {2.25, 9.75}}, {{3.1, 12.2}, {21.7, 14.9}, {8.4, 22.6}}}
+	for poly in shapes {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, poly), transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		worst: f32
+		for y in 0 ..< H {
+			for x in 0 ..< W {
+				worst = max(worst, abs(target_px(&tg, x, y)[0] - pixel_area(poly, x, y)))
+			}
+		}
+		testing.expectf(t, worst * 255 <= 1, "a fill is %.2f levels off its exact areas", worst * 255)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}
+
+// Draws against their formulas: source-over at an opacity, Multiply and
+// Screen over an opaque backdrop, and an opacity of 0 drawing nothing.
+@(test)
+test_scene_truth_blends :: proc(t: ^testing.T) {
+	W, H :: 8, 8
+	back := [4]f32{0.2, 0.6, 0.9, 1}
+	src := [3]f32{0.9, 0.3, 0.5}
+	Case :: struct {
+		mode:    Blend_Mode,
+		opacity: f32,
+		want:    [3]f32,
+	}
+	over := back.rgb * 0.5 + src * 0.5
+	cases := [4]Case{
+		{.Normal, 0.5, over},
+		{.Multiply, 1, src * back.rgb},
+		{.Screen, 1, src + back.rgb - src * back.rgb},
+		{.Normal, 0, back.rgb},
+	}
+	for cs in cases {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, back})
+		look := scene_look(scene_add_paint(&s, Scene_Solid{{src.r, src.g, src.b, 1}}))
+		look.opacity = cs.opacity
+		look.blend.mode = cs.mode
+		scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}}), transform = id, look = look})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		got := target_px(&tg, 4, 4)
+		d := max(abs(got.r - cs.want.r), abs(got.g - cs.want.g), abs(got.b - cs.want.b))
+		testing.expectf(t, d * 255 <= 1, "%v at %v: %v, wanted %v", cs.mode, cs.opacity, got, cs.want)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}
+
+// A luminance mask on a translucent colour: what it lets through is the
+// straight colour's luminance times its alpha, by Rec. 709's weights or
+// PDF's; an alpha mask lets through the alpha.
+@(test)
+test_scene_truth_masks :: proc(t: ^testing.T) {
+	W, H :: 8, 8
+	straight := [3]f32{0.2, 0.7, 0.4}
+	a: f32 = 0.6
+	Case :: struct {
+		read: Scene_Mask_Read,
+		want: f32,
+	}
+	cases := [3]Case{
+		{.Luminance, (0.2125 * straight.r + 0.7154 * straight.g + 0.0721 * straight.b) * a},
+		{.Luminance_Pdf, (0.3 * straight.r + 0.59 * straight.g + 0.11 * straight.b) * a},
+		{.Alpha, a},
+	}
+	for cs in cases {
+		tg: Scene_Target
+		target_open(&tg, W, H)
+		s: Scene
+		scene_init(&s)
+		id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+		square := scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}})
+		at := u32(len(s.draws))
+		append(&s.draws, Scene_Fill{path = square, transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{straight.r * a, straight.g * a, straight.b * a, a}}))})
+		append(&s.masks, Scene_Mask{draws = {at, 1}, read = cs.read})
+		look := scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))
+		look.mask = Mask_Id(len(s.masks))
+		scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+		scene_draw(&s, Scene_Fill{path = square, transform = id, look = look})
+		testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+		got := target_px(&tg, 3, 3)[0]
+		testing.expectf(t, abs(got - cs.want) * 255 <= 1, "%v mask: %v, wanted %v", cs.read, got, cs.want)
+		scene_destroy(&s)
+		target_close(&tg)
+	}
+}
+
+// Nested clips: a whole-pixel rectangle and a path, white over black, each
+// pixel the product of their exact coverages.
+@(test)
+test_scene_truth_clips :: proc(t: ^testing.T) {
+	W, H :: 24, 24
+	tri := []Vec2{{2.6, 1.3}, {22.4, 6.8}, {9.1, 21.5}}
+	rect := Clip_Rect{5, 4, 18, 20}
+	tg: Scene_Target
+	target_open(&tg, W, H)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+	scene_draw(&s, Clip_Push{rect})
+	scene_draw(&s, Clip_Push{Clip_Path{scene_polygon(&s, tri), id, .Non_Zero}})
+	scene_draw(&s, Scene_Fill{path = scene_polygon(&s, {{0, 0}, {W, 0}, {W, H}, {0, H}}), transform = id, look = scene_look(scene_add_paint(&s, Scene_Solid{{1, 1, 1, 1}}))})
+	scene_draw(&s, Clip_Pop{})
+	scene_draw(&s, Clip_Pop{})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+	worst: f32
+	for y in 0 ..< H {
+		for x in 0 ..< W {
+			in_rect: f32 = 1 if x >= int(rect[0]) && x < int(rect[2]) && y >= int(rect[1]) && y < int(rect[3]) else 0
+			worst = max(worst, abs(target_px(&tg, x, y)[0] - in_rect * pixel_area(tri, x, y)))
+		}
+	}
+	testing.expectf(t, worst * 255 <= 1, "nested clips are %.2f levels off the product of their coverages", worst * 255)
+}
+
+// A glyph run's coverage is its glyphs' union: two overlapping glyphs in
+// one translucent colour paint the overlap once, not twice.
+@(test)
+test_scene_truth_run_union :: proc(t: ^testing.T) {
+	W, H :: 16, 8
+	tg: Scene_Target
+	target_open(&tg, W, H)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	id := scene_add_transform(&s, TRANSFORM_IDENTITY)
+	square := scene_polygon(&s, {{0, 0}, {8, 0}, {8, 8}, {0, 8}})
+	shift := scene_add_transform(&s, transform_translation(4, 0))
+	g0 := u32(len(s.glyphs))
+	append(&s.glyphs, Scene_Glyph{square, id}, Scene_Glyph{square, shift})
+	append(&s.runs, Scene_Run{{g0, 2}, id})
+	scene_draw(&s, Scene_Clear{{0, 0, W, H}, {0, 0, 0, 1}})
+	scene_draw(&s, Scene_Glyphs{run = Run_Id(len(s.runs)), look = scene_look(scene_add_paint(&s, Scene_Solid{{0.5, 0.5, 0.5, 0.5}}))})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{})
+	alone, overlap := target_px(&tg, 2, 4)[0], target_px(&tg, 6, 4)[0]
+	testing.expectf(t, abs(alone - 0.5) * 255 <= 1 && abs(overlap - 0.5) * 255 <= 1, "a run's glyphs: %v alone, %v where they overlap; both should be 0.5", alone, overlap)
+}
+
+// What this recording can't draw exactly is rejected whole, not drawn
+// approximately.
+@(test)
+test_scene_record_rejects_unsupported :: proc(t: ^testing.T) {
+	tg: Scene_Target
+	target_open(&tg, 8, 8)
+	defer target_close(&tg)
+	s: Scene
+	scene_init(&s)
+	defer scene_destroy(&s)
+	scene_draw(&s, Layer_Push{opacity = 1, isolated = true, knockout = true})
+	scene_draw(&s, Layer_Pop{})
+	testing.expect_value(t, target_draw(&tg, &s), Scene_Problem{.Unsupported, .Draws, 0})
+}

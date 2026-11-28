@@ -71,7 +71,7 @@ Scene_Linear :: struct {
 	start, end: Vec2,
 	stops:      Range,
 	spread:     Gradient_Spread,
-	clip:       Gradient_Clip,
+	clip:       bit_set[Gradient_Clip; u8],
 }
 
 Scene_Radial :: struct {
@@ -83,7 +83,7 @@ Scene_Radial :: struct {
 	radius:     f32,
 	stops:      Range,
 	spread:     Gradient_Spread,
-	clip:       Gradient_Clip,
+	clip:       bit_set[Gradient_Clip; u8],
 }
 
 Scene_Conic :: struct {
@@ -475,6 +475,8 @@ Scene_Error :: enum u8 {
 	// A Clip_Pop or Layer_Pop without its push, or a push without its pop,
 	// within one draw range.
 	Unbalanced,
+	// Valid, but not something this renderer draws yet (scene_record).
+	Unsupported,
 }
 
 // Where `scene_check` found the first problem: the draw (index into
